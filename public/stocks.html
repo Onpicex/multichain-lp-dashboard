@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>股票代币成交额 — LP 仪表盘</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0b0e17;
+    --surface: #111827;
+    --surface-hover: #1a2236;
+    --border: #1e293b;
+    --border-light: #2a3a52;
+    --text: #e2e8f0;
+    --text-dim: #94a3b8;
+    --text-muted: #64748b;
+    --accent: #6366f1;
+    --accent-dim: rgba(99,102,241,0.12);
+    --green: #22c55e;
+    --green-dim: rgba(34,197,94,0.10);
+    --red: #ef4444;
+    --red-dim: rgba(239,68,68,0.10);
+    --yellow: #f59e0b;
+    --font: 'Inter', -apple-system, sans-serif;
+    --mono: 'JetBrains Mono', monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: var(--font); background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; }
+  .shell { max-width: 1200px; margin: 0 auto; padding: 0 20px 40px; }
+
+  .header {
+    display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;
+    padding: 14px 0; border-bottom: 1px solid var(--border);
+  }
+  .header-left { display: flex; align-items: center; gap: 12px; }
+  .logo {
+    width: 30px; height: 30px; border-radius: 6px;
+    background: linear-gradient(135deg, #00c805, #059669);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px; font-weight: 800; color: #04170a;
+  }
+  h1 { font-size: 16px; font-weight: 700; }
+  .header-sub { font-size: 11px; color: var(--text-muted); font-family: var(--mono); }
+  .refresh-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--accent-dim); color: var(--accent); border: 1px solid transparent;
+    font: 600 12px var(--font); padding: 6px 14px; border-radius: 8px; cursor: pointer;
+  }
+  .refresh-btn:hover { border-color: var(--accent); }
+  .refresh-btn:disabled { opacity: .5; cursor: wait; }
+  .upd-time { font-size: 11px; color: var(--text-muted); font-family: var(--mono); }
+
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 18px 0 14px; }
+  .stat-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px;
+  }
+  .stat-label { font-size: 10px; font-weight: 600; color: var(--text-muted); letter-spacing: .08em; text-transform: uppercase; }
+  .stat-val { font-size: 20px; font-weight: 800; font-family: var(--mono); margin-top: 5px; }
+  .stat-sub { font-size: 10px; color: var(--text-dim); margin-top: 3px; font-family: var(--mono); }
+
+  .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .search {
+    flex: 1; min-width: 180px; max-width: 320px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); font: 500 12px var(--font); padding: 8px 12px; outline: none;
+  }
+  .search:focus { border-color: var(--accent); }
+  .hint { font-size: 11px; color: var(--text-muted); }
+
+  .tbl-wrap {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    overflow-x: auto; -webkit-overflow-scrolling: touch;
+  }
+  table { width: 100%; border-collapse: collapse; min-width: 860px; }
+  thead th {
+    font-size: 10px; font-weight: 600; color: var(--text-muted); letter-spacing: .06em; text-transform: uppercase;
+    text-align: right; padding: 10px 14px; border-bottom: 1px solid var(--border);
+    white-space: nowrap; user-select: none; position: sticky; top: 0; background: var(--surface); z-index: 1;
+  }
+  thead th.sortable { cursor: pointer; }
+  thead th.sortable:hover { color: var(--text); }
+  thead th.sorted { color: var(--accent); }
+  th.c-rank { text-align: center; width: 40px; }
+  th.c-tok, td.c-tok { text-align: left; }
+  tbody td {
+    padding: 9px 14px; border-bottom: 1px solid var(--border);
+    font-family: var(--mono); font-size: 12.5px; text-align: right; white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr.data-row { cursor: pointer; }
+  tbody tr.data-row:hover td { background: var(--surface-hover); }
+  td.c-rank { text-align: center; color: var(--text-muted); font-size: 11px; }
+
+  /* 池子详情展开行 */
+  tr.detail-tr td { background: var(--bg); padding: 10px 14px 16px; }
+  /* width:0 + min-width:100%: 让嵌套内容不把外层表格的列宽撑爆, 内部自行横向滚动 */
+  .detail-box { border: 1px solid var(--border-light); border-radius: 10px; padding: 12px 14px; background: var(--surface); width: 0; min-width: 100%; }
+  .detail-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font: 700 12px var(--font); }
+  .dtable-wrap { overflow-x: auto; }
+  .dtable { width: 100%; border-collapse: collapse; min-width: 780px; }
+  .dtable th {
+    font-size: 9.5px; font-weight: 600; color: var(--text-muted); letter-spacing: .05em; text-transform: uppercase;
+    padding: 6px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--border);
+  }
+  .dtable td { font-family: var(--mono); font-size: 11.5px; padding: 7px 10px; text-align: right; white-space: nowrap; border-top: 1px solid var(--border); }
+  .dtable tr:first-child td { border-top: none; }
+  .dtable th.l, .dtable td.l { text-align: left; }
+  .v-badge { font: 700 9px var(--font); padding: 1px 5px; border-radius: 3px; background: var(--accent-dim); color: var(--accent); }
+  .fee-chip { font: 600 10px var(--font); color: var(--text-dim); }
+  .d-day { font-weight: 700; }
+  .d-day.hot { color: var(--green); }
+  .in-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
+  .in-dot.in { background: var(--green); }
+  .in-dot.out { background: var(--yellow); }
+  .d-note { font-size: 10px; color: var(--text-muted); margin-top: 9px; line-height: 1.6; }
+  .d-spin { display: flex; align-items: center; gap: 10px; padding: 10px 0; color: var(--text-dim); font-size: 12px; }
+  .d-spin .spinner { width: 18px; height: 18px; margin: 0; border-width: 2px; }
+  .pool-link { color: var(--text-muted); text-decoration: none; }
+  .pool-link:hover { color: var(--accent); }
+
+  .tok { display: flex; align-items: center; gap: 10px; }
+  .tok-logo {
+    width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+    background: var(--surface-hover); object-fit: cover;
+  }
+  .tok-fallback {
+    width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+    background: var(--accent-dim); color: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+    font: 800 10px var(--font);
+  }
+  .tok-sym { font: 700 13px var(--font); }
+  .tok-sym a { color: var(--text); text-decoration: none; }
+  .tok-sym a:hover { color: var(--accent); }
+  .tok-name {
+    font: 400 10.5px var(--font); color: var(--text-muted);
+    max-width: 200px; overflow: hidden; text-overflow: ellipsis;
+  }
+  .tok-addr { color: var(--text-muted); text-decoration: none; font-size: 9.5px; font-family: var(--mono); }
+  .tok-addr:hover { color: var(--accent); }
+
+  .chg-up { color: var(--green); }
+  .chg-down { color: var(--red); }
+  .chg-flat { color: var(--text-dim); }
+
+  .turnover-cell { position: relative; }
+  .turnover-num { position: relative; z-index: 1; font-weight: 600; }
+  .turnover-bar {
+    position: absolute; right: 10px; bottom: 4px; height: 2px; border-radius: 1px;
+    background: var(--accent); opacity: .45;
+  }
+
+  .pool-badge {
+    display: inline-block; color: var(--green); background: var(--green-dim);
+    font: 600 10.5px var(--font); padding: 2px 8px; border-radius: 4px;
+    text-decoration: none; cursor: help;
+  }
+  .pool-badge:hover { outline: 1px solid var(--green); }
+  .pool-none { color: var(--text-muted); }
+
+  .src-badge {
+    font: 600 9px var(--font); letter-spacing: .04em;
+    padding: 2px 6px; border-radius: 4px;
+  }
+  .src-nasdaq { color: var(--accent); background: var(--accent-dim); }
+  .src-cboe { color: var(--yellow); background: rgba(245,158,11,0.10); }
+  .src-none { color: var(--text-muted); background: rgba(148,163,184,0.10); }
+
+  .foot-note { font-size: 10.5px; color: var(--text-muted); margin-top: 12px; line-height: 1.7; }
+
+  .state-box { padding: 60px 0; text-align: center; }
+  .spinner {
+    width: 26px; height: 26px; margin: 0 auto 12px;
+    border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .state-text { font-size: 12px; color: var(--text-dim); }
+  .err-box {
+    background: var(--red-dim); border: 1px solid rgba(239,68,68,.3); color: var(--red);
+    font-size: 12px; padding: 10px 14px; border-radius: 8px; margin-bottom: 12px;
+  }
+
+  @media (max-width: 768px) {
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .stat-val { font-size: 16px; }
+    .header { padding: 12px 0; }
+    h1 { font-size: 14px; }
+    .header-sub { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="header">
+    <div class="header-left">
+      <div class="logo">股</div>
+      <div>
+        <h1>Robinhood 股票代币 · 美股成交额</h1>
+        <div class="header-sub">docs.robinhood.com/chain/contracts — Stock Tokens &amp; Tokenized ETFs</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="upd-time" id="updTime">—</span>
+      <button class="refresh-btn" id="refreshBtn">↻ 刷新</button>
+    </div>
+  </div>
+
+  <div class="stats" id="statsBar" style="display:none">
+    <div class="stat-card"><div class="stat-label">代币总数</div><div class="stat-val" id="stTotal">—</div><div class="stat-sub" id="stQuoted">—</div></div>
+    <div class="stat-card"><div class="stat-label">合计成交额</div><div class="stat-val" id="stTurnover">—</div><div class="stat-sub">有行情标的合计 · 当日</div></div>
+    <div class="stat-card"><div class="stat-label">成交额榜首</div><div class="stat-val" id="stTop">—</div><div class="stat-sub" id="stTopSub">—</div></div>
+    <div class="stat-card"><div class="stat-label">涨跌家数</div><div class="stat-val" id="stUpDown">—</div><div class="stat-sub">按最近交易日涨跌</div></div>
+  </div>
+
+  <div class="toolbar">
+    <input class="search" id="searchBox" placeholder="搜索代码 / 名称…" autocomplete="off">
+    <span class="hint" id="rowCount"></span>
+  </div>
+
+  <div id="errBox" class="err-box" style="display:none"></div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th class="c-rank">#</th>
+          <th class="c-tok">代币 / 底层美股</th>
+          <th class="sortable" data-key="price">价格</th>
+          <th class="sortable" data-key="chgPct">涨跌</th>
+          <th class="sortable" data-key="volume">成交量</th>
+          <th class="sortable" data-key="turnover">成交额</th>
+          <th class="sortable" data-key="marketCap">市值</th>
+          <th class="sortable" data-key="poolCount">RH 池</th>
+          <th class="sortable" data-key="rhTvl">RH TVL</th>
+          <th class="sortable" data-key="day">最高日化</th>
+          <th>来源</th>
+        </tr>
+      </thead>
+      <tbody id="tbody">
+        <tr><td colspan="11"><div class="state-box"><div class="spinner"></div><div class="state-text">加载行情数据…</div></div></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="foot-note">
+    成交额 = 最新价 × 当日成交量（延迟约 15 分钟；非交易时段为最近一个交易日全天数据）。
+    代币清单实时取自 Robinhood Chain 链上资产注册表（与 docs.robinhood.com/chain/contracts 同源，每日同步）。
+    行情来源：NASDAQ = 纳斯达克 screener（个股）；CBOE = Cboe 延迟行情（ETF 及特例）。点击代码跳 TradingView，点击合约地址跳 Robinhood Chain 浏览器。
+    「RH 池」= 该代币在 Robinhood Chain 上的<b>真实</b> Uniswap V3/V4 池子数：当前有流动性、对手币为 USDG/WETH/ETH/官方代币、费率≤10% 或动态费（RH 链 bot 垃圾池泛滥，三重过滤后才计数；链上事件全量扫描 + Multicall 流动性核验，每 10 分钟增量同步；悬停看对手币与费率，点击跳 Uniswap 代币页）。
+    <b>点击任意行</b>展开该代币全部池子的详情：TVL、24h 量/费、池日化、主力区间与主力区间日化（TVL &lt; $1,000 的尘埃池已过滤）。
+    「RH TVL」= 该代币在 RH 链全部真实池（TVL≥$1,000）的 TVL 合计。「最高日化」= 该代币全部池子（TVL≥$1,000）中最高的池日化，悬停显示来源池与其主力日化；全量每 2 小时后台重算，详情面板可「实时刷新」单个代币。
+  </div>
+</div>
+
+<script>
+const EXPLORER = 'https://robinhoodchain.blockscout.com/address/';
+let data = null;
+let sortKey = 'turnover', sortDir = -1;
+try {
+  const s = JSON.parse(localStorage.getItem('stkSort') || 'null');
+  if (s && s.key) { sortKey = s.key; sortDir = s.dir === 1 ? 1 : -1; }
+} catch {}
+
+const $ = id => document.getElementById(id);
+
+function fmtUsd(v, digits) {
+  if (!(v > 0)) return '—';
+  if (v >= 1e12) return '$' + (v/1e12).toFixed(2) + 'T';
+  if (v >= 1e9)  return '$' + (v/1e9).toFixed(2) + 'B';
+  if (v >= 1e6)  return '$' + (v/1e6).toFixed(1) + 'M';
+  if (v >= 1e3)  return '$' + (v/1e3).toFixed(1) + 'K';
+  return '$' + v.toFixed(digits == null ? 2 : digits);
+}
+function fmtPrice(v) {
+  if (!(v > 0)) return '—';
+  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: v < 1 ? 4 : 2 });
+}
+function fmtVol(v) {
+  if (!(v > 0)) return '—';
+  if (v >= 1e9) return (v/1e9).toFixed(2) + 'B';
+  if (v >= 1e6) return (v/1e6).toFixed(1) + 'M';
+  if (v >= 1e3) return (v/1e3).toFixed(1) + 'K';
+  return String(Math.round(v));
+}
+function fmtChg(v, src) {
+  if (!src) return '<span class="chg-flat">—</span>';
+  const cls = v > 0.001 ? 'chg-up' : v < -0.001 ? 'chg-down' : 'chg-flat';
+  const sign = v > 0 ? '+' : '';
+  return `<span class="${cls}">${sign}${v.toFixed(2)}%</span>`;
+}
+const escH = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+// --- 池子详情展开 ---
+let openSym = null, openData = null, openLoading = false;
+
+function fmtPct(v) {
+  if (v == null || !isFinite(v)) return '—';
+  if (v === 0) return '0%';
+  if (v < 0.01) return '<0.01%';
+  return v.toFixed(2) + '%';
+}
+function fmtRangePrice(v) {
+  if (!(v > 0) || !isFinite(v)) return '?';
+  if (v >= 1000) return v.toFixed(0);
+  if (v >= 1) return v.toFixed(2);
+  return v.toFixed(4);
+}
+function detailRowHtml(t) {
+  let inner;
+  if (openLoading) {
+    inner = `<div class="d-spin"><div class="spinner"></div>正在链上分析 ${t.poolCount} 个池子（feeGrowth 采样 + 流动性分布），全局缓存命中即秒开，实时重算约 5~20 秒…</div>`;
+  } else if (!openData || openData.error) {
+    inner = `<div class="d-spin">加载失败: ${escH(openData && openData.error || '未知错误')}（点击行重试）</div>`;
+  } else if (!openData.pools.length) {
+    inner = `<div class="d-spin">${openData.note === 'scanning' ? '池子扫描进行中，稍后再试'
+      : (openData.hidden > 0 ? `全部 ${openData.hidden} 个池子 TVL 均低于 $1,000，已隐藏` : '该代币在 RH 链暂无真实池子')}</div>`;
+  } else {
+    const rows = openData.pools.map(p => {
+      // 超出现价 10 倍的区间边界显示成 ∞/0 (宽区间/全区间语义, 边界值是扫描窗口截断产物)
+      const rb = v => p.curPrice > 0 && v > p.curPrice * 10 ? '∞' : (p.curPrice > 0 && v < p.curPrice / 10 ? '0' : fmtRangePrice(v));
+      const range = p.mainPrice ? `$${rb(p.mainPrice[0])} – $${rb(p.mainPrice[1])}` : '—';
+      const share = p.mainShare > 0 ? ` <span style="color:var(--text-muted)">(${p.mainShare.toFixed(0)}%TVL)</span>` : '';
+      const st = p.mainPrice ? (p.inMain ? '<span class="in-dot in"></span>在区间' : '<span class="in-dot out"></span>出区间') : '—';
+      const hot = v => v != null && v >= 0.1 ? ' hot' : '';
+      return `<tr>
+        <td class="l"><span class="v-badge">V${p.v}</span> <b>${escH(p.pair)}</b> <span class="fee-chip">${escH(p.feeLabel)}</span>
+          <a class="pool-link" href="https://app.uniswap.org/explore/pools/robinhood/${escH(p.key)}" target="_blank" rel="noopener">↗</a></td>
+        <td>${fmtUsd(p.tvl)}</td>
+        <td>${fmtUsd(p.vol24)}</td>
+        <td>${fmtUsd(p.fees24)}</td>
+        <td class="d-day${hot(p.dayPct)}"${p.winH > 0 && p.winH < 20 ? ` title="新池/短窗: 实际费收窗口 ${p.winH.toFixed(1)}h 已折算 24h"` : ''}>${fmtPct(p.dayPct)}${p.winH > 0 && p.winH < 20 ? '<span style="color:var(--yellow);font-size:9px">*</span>' : ''}</td>
+        <td>${range}${share}</td>
+        <td class="d-day${hot(p.mainDaily)}">${fmtPct(p.mainDaily)}</td>
+        <td class="l">${st}</td>
+      </tr>`;
+    }).join('');
+    inner = `<div class="dtable-wrap"><table class="dtable">
+      <thead><tr><th class="l">池子</th><th>TVL</th><th>24h 量≈</th><th>24h 费</th><th>池日化</th><th>主力区间</th><th>主力日化</th><th class="l">现价位置</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+      <div class="d-note">${openData.hidden > 0 ? `已隐藏 ${openData.hidden} 个 TVL &lt; $1,000 的尘埃池。` : ''}${openData.windowH > 0 && openData.windowH < 20 ? `<b>费收采样窗口目前仅 ${openData.windowH.toFixed(1)}h（已折算成 24h，数据随采样积累到 24h 后最准）。</b>` : ''}主力区间 = 流动性 ≥ 70% 峰值的连续价格带（附 TVL 占比）；费收 = 链上 feeGrowthGlobal 累计器差分（每单位流动性的实收费，动态费池亦精确），24h 费 ≈ 单位费收 × 当前活跃流动性；池日化 = 24h 费 ÷ 全池 TVL；主力日化 = 单位流动性 24h 费收 ÷ 主力区间单位仓位价值（即在主力区间做 LP 的日收益率，未年化）；24h 量 ≈ 费 ÷ 费率（动态费池无固定费率不估）；出区间 = 现价不在主力区间内；日化带黄色 * = 新池短窗折算（悬停看实际窗口，随采样积累自动转为标准 24h 口径）。</div>`;
+  }
+  let ageStr = '';
+  if (openData && openData.updatedAt) {
+    const m = Math.round((Date.now() - openData.updatedAt) / 60000);
+    ageStr = m < 1 ? '数据 刚刚' : m < 60 ? `数据 ${m} 分钟前` : `数据 ${(m / 60).toFixed(1)} 小时前`;
+  }
+  return `<tr class="detail-tr"><td colspan="11"><div class="detail-box">
+    <div class="detail-head">${escH(t.sym)} · RH 链池子详情 <span style="color:var(--text-muted);font-weight:400">${openData && openData.pools && openData.pools.length ? openData.pools.length + ' 个真实池' + (openData.hidden > 0 ? '（另 ' + openData.hidden + ' 个尘埃池已隐藏）' : '') : ''}</span>
+      <span style="margin-left:auto;display:flex;align-items:center;gap:10px">
+        <span style="color:var(--text-muted);font-weight:400;font-size:10px;font-family:var(--mono)">${ageStr}</span>
+        ${openLoading ? '' : '<button class="refresh-btn" id="dRefresh" style="padding:3px 10px;font-size:11px">↻ 实时刷新</button>'}
+      </span></div>
+    ${inner}</div></td></tr>`;
+}
+
+function render() {
+  if (!data) return;
+  const q = ($('searchBox').value || '').trim().toLowerCase();
+  let rows = data.tokens.slice();
+  if (q) rows = rows.filter(t => t.sym.toLowerCase().includes(q) || (t.name || '').toLowerCase().includes(q));
+
+  rows.sort((a, b) => {
+    // 无行情永远沉底
+    if (!a.src !== !b.src) return a.src ? -1 : 1;
+    return ((b[sortKey] || 0) - (a[sortKey] || 0)) * (sortDir === -1 ? 1 : -1);
+  });
+
+  const maxT = Math.max(...data.tokens.map(t => t.turnover), 1);
+  const html = rows.map((t, i) => {
+    const logo = t.logo
+      ? `<img class="tok-logo" src="${escH(t.logo)}" loading="lazy" onerror="this.outerHTML='<div class=&quot;tok-fallback&quot;>${escH(t.sym.slice(0,3))}</div>'">`
+      : `<div class="tok-fallback">${escH(t.sym.slice(0,3))}</div>`;
+    const addr = t.addr ? `<a class="tok-addr" href="${EXPLORER}${escH(t.addr)}" target="_blank" rel="noopener">${escH(t.addr.slice(0,6))}…${escH(t.addr.slice(-4))}</a>` : '';
+    const barW = t.turnover > 0 ? Math.max(2, Math.round(Math.sqrt(t.turnover / maxT) * 72)) : 0;
+    const srcBadge = t.src === 'nasdaq' ? '<span class="src-badge src-nasdaq">NASDAQ</span>'
+                   : t.src === 'cboe'   ? '<span class="src-badge src-cboe">CBOE</span>'
+                   : '<span class="src-badge src-none">无行情</span>';
+    return `<tr class="data-row" data-sym="${escH(t.sym)}">
+      <td class="c-rank">${i + 1}</td>
+      <td class="c-tok"><div class="tok">${logo}<div>
+        <div class="tok-sym"><a href="https://www.tradingview.com/symbols/${escH(t.sym)}/" target="_blank" rel="noopener">${escH(t.sym)}</a></div>
+        <div class="tok-name" title="${escH(t.name)}">${escH(t.name)} ${addr}</div>
+      </div></div></td>
+      <td>${fmtPrice(t.price)}</td>
+      <td>${fmtChg(t.chgPct, t.src)}</td>
+      <td>${fmtVol(t.volume)}</td>
+      <td class="turnover-cell"><span class="turnover-num">${fmtUsd(t.turnover)}</span>${barW ? `<div class="turnover-bar" style="width:${barW}px"></div>` : ''}</td>
+      <td>${fmtUsd(t.marketCap)}</td>
+      <td>${t.poolCount > 0
+        ? `<a class="pool-badge" title="${escH(t.poolInfo)}" href="https://app.uniswap.org/explore/tokens/robinhood/${escH(t.addr)}" target="_blank" rel="noopener">${t.poolCount} 池</a>`
+        : '<span class="pool-none">—</span>'}</td>
+      <td>${t.rhTvl > 0 ? `<span title="RH 链真实池 (TVL≥$1K) 合计">${fmtUsd(t.rhTvl)}</span>` : '<span class="pool-none">—</span>'}</td>
+      <td>${t.day == null ? '<span class="pool-none">—</span>'
+        : `<span class="d-day${t.day >= 0.1 ? ' hot' : ''}" title="${escH(t.dayPool + (t.dayMain != null ? ' · 主力日化 ' + fmtPct(t.dayMain) : ''))}">${fmtPct(t.day)}</span>`}</td>
+      <td>${srcBadge}</td>
+    </tr>` + (t.sym === openSym ? detailRowHtml(t) : '');
+  }).join('');
+  $('tbody').innerHTML = html || '<tr><td colspan="11"><div class="state-box"><div class="state-text">没有匹配的代币</div></div></td></tr>';
+  $('rowCount').textContent = q ? `${rows.length} / ${data.tokens.length}` : `${data.tokens.length} 个代币`;
+
+  // 表头排序指示
+  document.querySelectorAll('thead th.sortable').forEach(th => {
+    const on = th.dataset.key === sortKey;
+    th.classList.toggle('sorted', on);
+    th.textContent = th.textContent.replace(/ [↓↑]$/, '') + (on ? (sortDir === -1 ? ' ↓' : ' ↑') : '');
+  });
+
+  // 统计卡
+  const quoted = data.tokens.filter(t => t.src);
+  const sumT = quoted.reduce((s, t) => s + t.turnover, 0);
+  const top = data.tokens[0];
+  const ups = quoted.filter(t => t.chgPct > 0.001).length;
+  const downs = quoted.filter(t => t.chgPct < -0.001).length;
+  $('stTotal').textContent = data.counts.total;
+  $('stQuoted').textContent = `有行情 ${data.counts.quoted}` + (data.poolsScanned ? ` · RH 有池 ${data.counts.withPools}` : ' · 池子扫描中…');
+  $('stTurnover').textContent = fmtUsd(sumT);
+  if (top && top.turnover > 0) { $('stTop').textContent = top.sym; $('stTopSub').textContent = fmtUsd(top.turnover); }
+  $('stUpDown').innerHTML = `<span class="chg-up">${ups}↑</span> <span style="color:var(--text-muted);font-size:14px">/</span> <span class="chg-down">${downs}↓</span>`;
+  $('statsBar').style.display = '';
+
+  if (data.lastErr) { $('errBox').textContent = '数据源告警: ' + data.lastErr + '（显示最近一次成功数据）'; $('errBox').style.display = ''; }
+  else $('errBox').style.display = 'none';
+
+  $('updTime').textContent = data.updatedAt ? '更新 ' + new Date(data.updatedAt).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
+}
+
+async function load(force) {
+  const btn = $('refreshBtn');
+  if (force) { btn.disabled = true; btn.textContent = '↻ 刷新中…'; }
+  try {
+    const r = await fetch('/api/stocktokens' + (force ? '?refresh=true' : ''));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    data = await r.json();
+    render();
+  } catch (e) {
+    if (!data) $('tbody').innerHTML = `<tr><td colspan="11"><div class="state-box"><div class="state-text">加载失败: ${escH(e.message)}，30 秒后自动重试</div></div></td></tr>`;
+  } finally {
+    btn.disabled = false; btn.textContent = '↻ 刷新';
+  }
+}
+
+document.querySelectorAll('thead th.sortable').forEach(th => {
+  th.addEventListener('click', () => {
+    const k = th.dataset.key;
+    if (sortKey === k) sortDir = -sortDir;
+    else { sortKey = k; sortDir = -1; }
+    try { localStorage.setItem('stkSort', JSON.stringify({ key: sortKey, dir: sortDir })); } catch {}
+    render();
+  });
+});
+$('searchBox').addEventListener('input', render);
+$('refreshBtn').addEventListener('click', () => load(true));
+
+// 点击行展开/收起池子详情; 详情里的「实时刷新」强制重算
+async function loadDetail(sym, force) {
+  openSym = sym; openData = null; openLoading = true; render();
+  try {
+    const r = await fetch('/api/stocktokens/pools?sym=' + encodeURIComponent(sym) + (force ? '&force=1' : ''));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    if (openSym === sym) { openData = d; openLoading = false; render(); }
+  } catch (err) {
+    if (openSym === sym) { openData = { error: err.message }; openLoading = false; render(); }
+  }
+}
+$('tbody').addEventListener('click', e => {
+  if (e.target.id === 'dRefresh') { if (openSym) loadDetail(openSym, true); return; }
+  if (e.target.closest('a')) return;             // 链接照常跳转
+  const tr = e.target.closest('tr.data-row');
+  if (!tr) return;
+  const sym = tr.dataset.sym;
+  if (openSym === sym && !openLoading) { openSym = null; openData = null; render(); return; }
+  loadDetail(sym, false);
+});
+
+// 30s 自动轮询, 页面不可见时暂停
+setInterval(() => { if (!document.hidden) load(false); }, 30000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(false); });
+
+load(false);
+</script>
+</body>
+</html>

@@ -1,0 +1,601 @@
+// ============================================================
+// Solana LP 适配器 — Meteora DLMM + Raydium CLMM
+// 完全独立模块：不依赖 server.js 的任何 BSC 逻辑。
+// 输出与 BSC /api/positions 相同的 JSON 结构，前端零改动复用。
+// ============================================================
+const { Connection, PublicKey } = require('@solana/web3.js');
+const fs = require('fs');
+const path = require('path');
+
+const SOL_RPC = process.env.SOL_RPC || 'https://api.mainnet-beta.solana.com';
+// 备胎 RPC: 主 RPC 连续 429 时最后一轮重试切换用 (官方节点低频单钱包查询可承受)
+const SOL_RPC_FALLBACK = process.env.SOL_RPC_FALLBACK || 'https://api.mainnet-beta.solana.com';
+let conn = new Connection(SOL_RPC, 'confirmed');
+
+const WALLETS_FILE = path.join(__dirname, 'wallets-sol.json');
+const CACHE_FILE = path.join(__dirname, 'positions-cache-sol.json');
+const CACHE_TTL = 5 * 60 * 1000; // 5 min，与 BSC 一致 (2026-09-05 调快)
+
+const RAY_CLMM_PROGRAM = 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK';
+
+// --- wallets ---
+function loadWallets() {
+  try { return JSON.parse(fs.readFileSync(WALLETS_FILE, 'utf8')); } catch { return []; }
+}
+function saveWallets(w) {
+  fs.writeFileSync(WALLETS_FILE, JSON.stringify(w, null, 2));
+}
+let WALLETS = loadWallets();
+
+// --- cache ---
+let cache = { data: null, timestamp: 0 };
+try {
+  const c = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
+  if (c && c.data) cache = c;
+} catch {}
+function saveCache() {
+  try { fs.writeFileSync(CACHE_FILE, JSON.stringify(cache)); } catch {}
+}
+
+// --- Jupiter price API (free lite tier) ---
+async function getPrices(mints) {
+  const out = {};
+  const uniq = [...new Set(mints)].filter(Boolean);
+  for (let i = 0; i < uniq.length; i += 50) {
+    const batch = uniq.slice(i, i + 50);
+    try {
+      const r = await fetch(`https://lite-api.jup.ag/price/v3?ids=${batch.join(',')}`);
+      if (r.ok) {
+        const j = await r.json();
+        for (const [mint, info] of Object.entries(j)) out[mint] = info?.usdPrice || 0;
+      }
+    } catch (e) { console.error('SOL price fetch failed:', e.message); }
+  }
+  return out;
+}
+
+// --- Token metadata (symbol) via Jupiter, with fallback map + cache ---
+const TOKEN_META_FILE = path.join(__dirname, 'token-meta-sol.json');
+let tokenMeta = {};
+try { tokenMeta = JSON.parse(fs.readFileSync(TOKEN_META_FILE, 'utf8')); } catch {}
+const KNOWN_TOKENS = {
+  'So11111111111111111111111111111111111111112': 'SOL',
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 'USDC',
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': 'USDT',
+};
+async function getTokenSymbols(mints) {
+  const need = [...new Set(mints)].filter(m => m && !tokenMeta[m] && !KNOWN_TOKENS[m]);
+  if (need.length) {
+    for (const mint of need) {
+      try {
+        const r = await fetch(`https://lite-api.jup.ag/tokens/v2/search?query=${mint}`);
+        if (r.ok) {
+          const arr = await r.json();
+          const hit = Array.isArray(arr) ? arr.find(t => t.id === mint) : null;
+          if (hit) tokenMeta[mint] = { symbol: hit.symbol, decimals: hit.decimals };
+        }
+      } catch {}
+      if (!tokenMeta[mint]) tokenMeta[mint] = { symbol: mint.slice(0, 4) + '…', decimals: null };
+    }
+    try { fs.writeFileSync(TOKEN_META_FILE, JSON.stringify(tokenMeta)); } catch {}
+  }
+  const out = {};
+  for (const m of [...new Set(mints)]) {
+    out[m] = KNOWN_TOKENS[m] ? { symbol: KNOWN_TOKENS[m] } : (tokenMeta[m] || { symbol: m.slice(0, 4) + '…' });
+  }
+  return out;
+}
+
+const STABLE_MINTS = new Set([
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
+]);
+
+// ============================================================
+// Meteora DLMM
+// ============================================================
+async function fetchMeteoraPositions(wallet) {
+  const DLMM = require('@meteora-ag/dlmm');
+  const positions = [];
+  let map;
+  try {
+    map = await DLMM.getAllLbPairPositionsByUser(conn, new PublicKey(wallet.address));
+  } catch (e) {
+    console.error(`Meteora fetch failed for ${wallet.name}:`, e.message.slice(0, 120));
+    return null;   // null = 抓取失败(如429), 上层重试; 空数组才是真没仓位
+  }
+  for (const [pairAddr, info] of map) {
+    try {
+      const decX = info.tokenX.mint?.decimals ?? info.tokenX.decimal;
+      const decY = info.tokenY.mint?.decimals ?? info.tokenY.decimal;
+      const mintX = info.tokenX.publicKey.toBase58();
+      const mintY = info.tokenY.publicKey.toBase58();
+      const binStep = info.lbPair.binStep;
+      const activeId = info.lbPair.activeId;
+      // DLMM price: price(binId) = (1 + binStep/10000)^binId  (X in terms of Y, per lamport)
+      const binPrice = (id) => Math.pow(1 + binStep / 10000, id) * Math.pow(10, decX - decY);
+
+      for (const pos of info.lbPairPositionsData) {
+        const d = pos.positionData;
+        const amount0 = Number(d.totalXAmount) / 10 ** decX;
+        const amount1 = Number(d.totalYAmount) / 10 ** decY;
+        const feesOwed0 = Number(d.feeX) / 10 ** decX;
+        const feesOwed1 = Number(d.feeY) / 10 ** decY;
+        const lowerPrice = binPrice(d.lowerBinId);
+        const upperPrice = binPrice(d.upperBinId + 1); // upper bin 的上边界
+        const currentPrice = binPrice(activeId);
+        const inRange = activeId >= d.lowerBinId && activeId <= d.upperBinId;
+        const liquidityActive = amount0 > 0 || amount1 > 0;
+
+        positions.push({
+          tokenId: pos.publicKey.toBase58().slice(0, 8),
+          positionKey: pos.publicKey.toBase58(),
+          token0: { symbol: '', address: mintX, decimals: decX },
+          token1: { symbol: '', address: mintY, decimals: decY },
+          token0addr: mintX,
+          token1addr: mintY,
+          fee: 0,
+          feeLabel: (info.lbPair.parameters?.baseFactor != null)
+            ? ((info.lbPair.parameters.baseFactor * binStep) / 1e6 * 100).toFixed(2) + '%'
+            : `bin ${binStep}`,
+          tickLower: d.lowerBinId,
+          tickUpper: d.upperBinId,
+          currentTick: activeId,
+          liquidity: liquidityActive ? '1' : '0',
+          liquidityActive,
+          inRange,
+          currentPrice,
+          lowerPrice,
+          upperPrice,
+          amount0,
+          amount1,
+          feesOwed0,
+          feesOwed1,
+          poolAddress: pairAddr,
+          walletName: wallet.name,
+          walletAddress: wallet.address,
+          protocol: 'DLMM',
+          platform: 'Meteora',
+          createdAt: 0,
+          lastCollectAt: 0,
+          _lastUpdatedAt: Number(d.lastUpdatedAt) || 0,
+          _claimed0: Number(d.totalClaimedFeeXAmount || 0) / 10 ** decX,
+          _claimed1: Number(d.totalClaimedFeeYAmount || 0) / 10 ** decY,
+        });
+      }
+    } catch (e) {
+      console.error(`Meteora pair ${pairAddr} parse error:`, e.message.slice(0, 120));
+    }
+  }
+  return positions;
+}
+
+// ============================================================
+// Raydium CLMM
+// ============================================================
+let raydiumInstances = {}; // per-wallet cache (owner is baked into instance)
+
+async function fetchRaydiumPositions(wallet) {
+  const { Raydium, PositionUtils, TickArrayLayout, TickUtil, getPdaTickArrayAddress, getPdaPersonalPositionAddress, TICK_ARRAY_SIZE } = require('@raydium-io/raydium-sdk-v2');
+  const progPk = new PublicKey(RAY_CLMM_PROGRAM);
+  const taStart = (tick, spacing) => Math.floor(tick / (spacing * TICK_ARRAY_SIZE)) * spacing * TICK_ARRAY_SIZE;
+  const positions = [];
+  try {
+    let raydium = raydiumInstances[wallet.address];
+    if (!raydium) {
+      raydium = await Raydium.load({
+        connection: conn,
+        owner: new PublicKey(wallet.address),
+        disableLoadToken: true,
+      });
+      raydiumInstances[wallet.address] = raydium;
+    }
+    const posList = await raydium.clmm.getOwnerPositionInfo({ programId: RAY_CLMM_PROGRAM });
+    if (!posList.length) return [];
+
+    for (const p of posList) {
+      try {
+        const poolIdStr = p.poolId.toBase58();
+        // 官方 API：symbol/decimals/feeRate/APR
+        const r = await fetch(`https://api-v3.raydium.io/pools/info/ids?ids=${poolIdStr}`);
+        const j = await r.json();
+        const pool = j?.data?.[0];
+        if (!pool) { console.error(`Raydium pool info missing: ${poolIdStr}`); continue; }
+
+        const decA = pool.mintA.decimals, decB = pool.mintB.decimals;
+        const lowerPrice = Math.pow(1.0001, p.tickLower) * Math.pow(10, decA - decB);
+        const upperPrice = Math.pow(1.0001, p.tickUpper) * Math.pow(10, decA - decB);
+
+        // 链上池子状态：精确 tick / sqrtPrice / feeGrowth
+        const rpcData = await raydium.clmm.getRpcClmmPoolInfo({ poolId: p.poolId });
+        const currentTick = rpcData.tickCurrent;
+        const inRange = currentTick >= p.tickLower && currentTick < p.tickUpper;
+        const currentPrice = Math.pow(1.0001, currentTick) * Math.pow(10, decA - decB);
+
+        // amounts (Uniswap V3 math, BigInt)
+        const L = BigInt(p.liquidity.toString());
+        const Q64 = 2n ** 64n;
+        const sp = BigInt(rpcData.sqrtPriceX64.toString());
+        const sl = BigInt(TickUtil.getSqrtPriceAtTick(p.tickLower).toString());
+        const su = BigInt(TickUtil.getSqrtPriceAtTick(p.tickUpper).toString());
+        let a0 = 0n, a1 = 0n;
+        if (sp <= sl) a0 = L * Q64 * (su - sl) / (sl * su);
+        else if (sp >= su) a1 = L * (su - sl) / Q64;
+        else { a0 = L * Q64 * (su - sp) / (sp * su); a1 = L * (sp - sl) / Q64; }
+        const amount0 = Number(a0) / 10 ** decA;
+        const amount1 = Number(a1) / 10 ** decB;
+
+        // 未领手续费：tick array 状态 + GetPositionFees
+        let feesOwed0 = 0, feesOwed1 = 0;
+        try {
+          const taLowerAddr = getPdaTickArrayAddress(progPk, p.poolId, taStart(p.tickLower, rpcData.tickSpacing)).publicKey;
+          const taUpperAddr = getPdaTickArrayAddress(progPk, p.poolId, taStart(p.tickUpper, rpcData.tickSpacing)).publicKey;
+          const [accL, accU] = await conn.getMultipleAccountsInfo([taLowerAddr, taUpperAddr]);
+          if (accL && accU) {
+            const taL = TickArrayLayout.decode(accL.data);
+            const taU = TickArrayLayout.decode(accU.data);
+            const offL = Math.floor((p.tickLower - taStart(p.tickLower, rpcData.tickSpacing)) / rpcData.tickSpacing);
+            const offU = Math.floor((p.tickUpper - taStart(p.tickUpper, rpcData.tickSpacing)) / rpcData.tickSpacing);
+            const fees = PositionUtils.GetPositionFees(rpcData, p, taL.ticks[offL], taU.ticks[offU]);
+            feesOwed0 = Number(fees.tokenFeeAmountA.toString()) / 10 ** decA;
+            feesOwed1 = Number(fees.tokenFeeAmountB.toString()) / 10 ** decB;
+            if (feesOwed0 < 0 || feesOwed0 > 1e12) feesOwed0 = 0;
+            if (feesOwed1 < 0 || feesOwed1 > 1e12) feesOwed1 = 0;
+          }
+        } catch (e) {
+          console.error(`Raydium fee calc ${poolIdStr}:`, e.message.slice(0, 100));
+        }
+
+        positions.push({
+          tokenId: p.nftMint.toBase58().slice(0, 8),
+          positionKey: p.nftMint.toBase58(),
+          _activityKey: getPdaPersonalPositionAddress(progPk, p.nftMint).publicKey.toBase58(),
+          token0: { symbol: pool.mintA.symbol, address: pool.mintA.address, decimals: decA },
+          token1: { symbol: pool.mintB.symbol, address: pool.mintB.address, decimals: decB },
+          token0addr: pool.mintA.address,
+          token1addr: pool.mintB.address,
+          fee: (pool.feeRate || 0) * 1e6,
+          feeLabel: pool.feeRate ? (pool.feeRate * 100).toFixed(2) + '%' : '',
+          tickLower: p.tickLower,
+          tickUpper: p.tickUpper,
+          currentTick,
+          liquidity: p.liquidity.toString(),
+          liquidityActive: L > 0n,
+          inRange,
+          currentPrice,
+          lowerPrice,
+          upperPrice,
+          amount0,
+          amount1,
+          feesOwed0,
+          feesOwed1,
+          poolAddress: poolIdStr,
+          walletName: wallet.name,
+          walletAddress: wallet.address,
+          protocol: 'CLMM',
+          platform: 'Raydium',
+          createdAt: 0,
+          lastCollectAt: 0,
+          _aprApi: pool.day?.apr || 0,
+        });
+      } catch (e) {
+        console.error(`Raydium position error:`, e.message.slice(0, 120));
+      }
+    }
+  } catch (e) {
+    console.error(`Raydium fetch failed for ${wallet.name}:`, e.message.slice(0, 120));
+    return null;   // null = 抓取失败(如429), 上层重试; 空数组才是真没仓位
+  }
+  return positions;
+}
+
+// --- 仓位创建时间：查该账户最早一笔签名的 blockTime（永不变，持久缓存） ---
+const CREATED_CACHE_FILE = path.join(__dirname, 'created-cache-sol.json');
+let createdCache = {};
+try { createdCache = JSON.parse(fs.readFileSync(CREATED_CACHE_FILE, 'utf8')); } catch {}
+async function getCreatedAt(pubkeyStr) {
+  if (createdCache[pubkeyStr]) return createdCache[pubkeyStr];
+  // 主 RPC 失败(429等)时切备胎重试一次 —— createdAt 拿不到会导致日化无法计算
+  for (const c of [conn, new Connection(SOL_RPC_FALLBACK, 'confirmed')]) {
+    try {
+      const pk = new PublicKey(pubkeyStr);
+      let before = undefined, oldest = null;
+      for (let page = 0; page < 5; page++) {
+        // 注意: 必须 finalized —— solanavibestation 等节点 confirmed 档签名索引返回空数组
+        const sigs = await c.getSignaturesForAddress(pk, { limit: 1000, before }, 'finalized');
+        if (!sigs.length) break;
+        oldest = sigs[sigs.length - 1];
+        if (sigs.length < 1000) break;
+        before = oldest.signature;
+      }
+      if (oldest?.blockTime) {
+        createdCache[pubkeyStr] = oldest.blockTime * 1000;
+        try { fs.writeFileSync(CREATED_CACHE_FILE, JSON.stringify(createdCache)); } catch {}
+        return createdCache[pubkeyStr];
+      }
+      return 0;   // 查询成功但无签名(理论不该发生), 不必换备胎
+    } catch (e) {
+      console.error(`[SOL] createdAt lookup failed ${pubkeyStr.slice(0, 8)}:`, e.message.slice(0, 80));
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+  return 0;
+}
+
+// 最近一次链上操作时间（领取/加减仓都会更新）——不缓存，每次刷新都查最新
+async function getLastActivityAt(pubkeyStr) {
+  for (const c of [conn, new Connection(SOL_RPC_FALLBACK, 'confirmed')]) {
+    try {
+      const sigs = await c.getSignaturesForAddress(new PublicKey(pubkeyStr), { limit: 1 }, 'finalized');
+      if (sigs[0]?.blockTime) return sigs[0].blockTime * 1000;
+      return 0;
+    } catch (e) {
+      console.error(`[SOL] lastActivity lookup failed ${pubkeyStr.slice(0, 8)}:`, e.message.slice(0, 80));
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+  return 0;
+}
+
+// ============================================================
+// 主拉取（结构对齐 BSC /api/positions）
+// ============================================================
+let inFlight = null;
+
+async function fetchAllSol(force = false) {
+  const fresh = cache.data && Date.now() - cache.timestamp < CACHE_TTL;
+  if (!force && fresh) return cache.data;
+  // 与 BSC 同架构：有旧数据就先秒回旧数据，后台悄悄刷新（stale-while-revalidate）
+  if (!force && cache.data) {
+    if (!inFlight) {
+      inFlight = _fetchAllSol()
+        .catch(e => console.error('[SOL] background refresh failed:', e.message))
+        .finally(() => { inFlight = null; });
+    }
+    return cache.data;
+  }
+  if (inFlight) return inFlight;
+  inFlight = _fetchAllSol().finally(() => { inFlight = null; });
+  return inFlight;
+}
+
+async function _fetchAllSol() {
+  const walletResults = [];
+  for (const w of WALLETS) {
+    // 抓取失败(429限流等)时重试最多3轮, 每轮间隔递增, 避免把有仓钱包误判为空仓
+    let met = null, ray = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) {
+        console.log(`[SOL] ${w.name} 第${attempt + 1}次重试 (限流退避 ${attempt * 5}s)...`);
+        await new Promise(r => setTimeout(r, attempt * 5000));
+      }
+      if (attempt === 2 && SOL_RPC_FALLBACK !== SOL_RPC) {
+        // 最后一轮切备胎 RPC (主节点持续限流时兜底)
+        console.log(`[SOL] ${w.name} 切换备胎 RPC 重试...`);
+        conn = new Connection(SOL_RPC_FALLBACK, 'confirmed');
+        raydiumInstances = {};   // Raydium 实例绑定旧连接, 必须重建
+      }
+      if (met === null) met = await fetchMeteoraPositions(w);
+      if (ray === null) ray = await fetchRaydiumPositions(w);
+      if (met !== null && ray !== null) break;
+    }
+    if (conn.rpcEndpoint !== SOL_RPC) {
+      conn = new Connection(SOL_RPC, 'confirmed');   // 用完备胎切回主 RPC
+      raydiumInstances = {};
+    }
+    if (met === null || ray === null) console.error(`[SOL] ${w.name} 3轮重试仍失败, 本轮跳过 (下轮自动刷新会再试)`);
+    walletResults.push({ address: w.address, name: w.name, positions: [...(met || []), ...(ray || [])], totalUSD: 0 });
+    // 钱包间歇 1.5s, 防公共 RPC 429 (15+ 钱包连扫会被打限流, 空仓漏报)
+    await new Promise(r => setTimeout(r, 1500));
+  }
+
+  // 补 symbol（Meteora 只有 mint 地址）+ 价格
+  const allMints = [];
+  for (const wr of walletResults) for (const p of wr.positions) allMints.push(p.token0addr, p.token1addr);
+  const [symbols, prices] = await Promise.all([getTokenSymbols(allMints), getPrices(allMints)]);
+
+  let grandTotalUSD = 0, totalActive = 0, totalInRange = 0, totalOutOfRange = 0, totalFees = 0, walletsWithActiveLP = 0;
+
+  for (const wr of walletResults) {
+    let walletTotal = 0, hasActive = false;
+    for (const pos of wr.positions) {
+      if (!pos.token0.symbol) pos.token0.symbol = symbols[pos.token0addr]?.symbol || pos.token0addr.slice(0, 4);
+      if (!pos.token1.symbol) pos.token1.symbol = symbols[pos.token1addr]?.symbol || pos.token1addr.slice(0, 4);
+      const price0 = prices[pos.token0addr] || 0;
+      const price1 = prices[pos.token1addr] || 0;
+      pos.token0USD = price0;
+      pos.token1USD = price1;
+      pos.positionValueUSD = pos.amount0 * price0 + pos.amount1 * price1;
+      pos.feesValueUSD = pos.feesOwed0 * price0 + pos.feesOwed1 * price1;
+      pos.totalValueUSD = pos.positionValueUSD + pos.feesValueUSD;
+
+      // === 日化（与 BSC 同口径） ===
+      // createdAt = 仓位账户最早签名的 blockTime（Meteora position PDA / Raydium NFT mint）
+      if (pos.liquidityActive && pos.positionValueUSD >= 10) {
+        pos.createdAt = await getCreatedAt(pos.positionKey);
+        // lastCollectAt = 仓位账户最近一笔操作（领取/加减仓都会产生签名）
+        const lastAct = await getLastActivityAt(pos._activityKey || pos.positionKey);
+        if (lastAct > pos.createdAt + 60000) pos.lastCollectAt = lastAct; // 距创建>1分钟才视为后续操作
+      }
+      if (pos.createdAt > 0 && pos.positionValueUSD >= 10) {
+        const totalDays = (Date.now() - pos.createdAt) / 86400000;
+        if (totalDays > 0) {
+          // 1. 累计日化：已领 + 未领（从创建起算）
+          const collectedUSD = (pos._claimed0 || 0) * price0 + (pos._claimed1 || 0) * price1;
+          const totalFeesUSD = collectedUSD + pos.feesValueUSD;
+          if (totalFeesUSD > 0) {
+            pos.dailyRateCumulative = (totalFeesUSD / pos.positionValueUSD) / totalDays * 100;
+          }
+          pos.totalDays = totalDays >= 1 ? Math.floor(totalDays) : 0;
+          pos.totalHours = Math.floor(totalDays * 24);
+          pos.hasCollected = collectedUSD > 0 || !!pos.lastCollectAt;
+          pos.collectedFeesUSD = collectedUSD;
+        }
+
+        // 2. 当前日化：未领手续费 / 本金 / 距上次操作（无操作则距创建）
+        const currentStart = pos.lastCollectAt || pos.createdAt;
+        const holdMs = Date.now() - currentStart;
+        const holdDays = holdMs / 86400000;
+        if (holdDays > 0 && pos.feesValueUSD > 0) {
+          pos.dailyRateCurrent = (pos.feesValueUSD / pos.positionValueUSD) / holdDays * 100;
+          pos.holdDays = holdDays >= 1 ? Math.floor(holdDays) : 0;
+          pos.holdHours = Math.floor(holdMs / 3600000);
+          pos.holdMinutes = Math.floor((holdMs % 3600000) / 60000);
+        }
+      }
+
+      walletTotal += pos.totalValueUSD;
+      totalFees += pos.feesValueUSD;
+      if (pos.liquidityActive) {
+        totalActive++; hasActive = true;
+        if (pos.inRange) totalInRange++; else totalOutOfRange++;
+      }
+    }
+    wr.totalUSD = walletTotal;
+    grandTotalUSD += walletTotal;
+    if (hasActive) walletsWithActiveLP++;
+
+    // 价格方向归一：稳定币在 token0 时翻转为 Token/稳定币
+    wr.positions = wr.positions.map(normalizeSolPosition);
+    wr.positions.sort((a, b) => {
+      if (a.liquidityActive && !b.liquidityActive) return -1;
+      if (!a.liquidityActive && b.liquidityActive) return 1;
+      return b.totalValueUSD - a.totalValueUSD;
+    });
+  }
+
+  const wallets = walletResults.filter(wr => wr.positions.length > 0);
+  wallets.sort((a, b) => {
+    const nA = parseInt((a.name.match(/\d+/) || ['0'])[0]);
+    const nB = parseInt((b.name.match(/\d+/) || ['0'])[0]);
+    return nA - nB;
+  });
+
+  const result = {
+    wallets,
+    grandTotalUSD,
+    timestamp: Date.now(),
+    chain: 'sol',
+    stats: { totalActive, totalInRange, totalOutOfRange, totalFees, walletsWithActiveLP, totalWallets: WALLETS.length },
+  };
+  cache = { data: result, timestamp: Date.now() };
+  saveCache();
+  console.log(`[SOL] Fetch complete. ${wallets.length} wallets, ${totalActive} active, total $${grandTotalUSD.toFixed(2)}`);
+  return result;
+}
+
+function normalizeSolPosition(pos) {
+  if (STABLE_MINTS.has(pos.token0addr)) {
+    return {
+      ...pos,
+      token0: pos.token1, token1: pos.token0,
+      token0addr: pos.token1addr, token1addr: pos.token0addr,
+      token0USD: pos.token1USD, token1USD: pos.token0USD,
+      amount0: pos.amount1, amount1: pos.amount0,
+      feesOwed0: pos.feesOwed1, feesOwed1: pos.feesOwed0,
+      currentPrice: pos.currentPrice > 0 ? 1 / pos.currentPrice : 0,
+      lowerPrice: pos.upperPrice > 0 ? 1 / pos.upperPrice : 0,
+      upperPrice: pos.lowerPrice > 0 ? 1 / pos.lowerPrice : 0,
+      _normalized: true,
+    };
+  }
+  return pos;
+}
+
+// ============================================================
+// Express 路由挂载
+// ============================================================
+function mountSolRoutes(app, adminGuard) {
+  app.get('/api/sol/positions', async (req, res) => {
+    try {
+      res.json(await fetchAllSol(req.query.refresh === 'true'));
+    } catch (e) {
+      console.error('[SOL] API error:', e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/sol/wallets', (req, res) => res.json(WALLETS));
+
+  app.post('/api/sol/wallets', adminGuard, (req, res) => {
+    const { address, name } = req.body;
+    if (!address || !name) return res.status(400).json({ error: '需要 address 和 name' });
+    const addr = address.trim();
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr)) return res.status(400).json({ error: '无效的 Solana 地址' });
+    try { new PublicKey(addr); } catch { return res.status(400).json({ error: '无效的 Solana 地址' }); }
+    if (WALLETS.some(w => w.address === addr)) return res.status(409).json({ error: '地址已存在' });
+    if (WALLETS.length >= 30) return res.status(400).json({ error: '最多支持 30 个地址' });
+    WALLETS.push({ address: addr, name: name.trim() });
+    saveWallets(WALLETS);
+    cache = { data: null, timestamp: 0 };
+    console.log(`[SOL] Wallet added: ${name.trim()} (${addr})`);
+    res.json({ ok: true, wallets: WALLETS });
+  });
+
+  app.delete('/api/sol/wallets/:address', adminGuard, (req, res) => {
+    const idx = WALLETS.findIndex(w => w.address === req.params.address);
+    if (idx === -1) return res.status(404).json({ error: '地址不存在' });
+    const removed = WALLETS.splice(idx, 1)[0];
+    saveWallets(WALLETS);
+    cache = { data: null, timestamp: 0 };
+    console.log(`[SOL] Wallet removed: ${removed.name}`);
+    res.json({ ok: true, wallets: WALLETS });
+  });
+
+  // 编辑钱包: 改名和/或换地址。换地址等同删旧+加新, 沿用 SOL 增删的清缓存语义
+  app.patch('/api/sol/wallets/:address', adminGuard, (req, res) => {
+    const idx = WALLETS.findIndex(w => w.address === req.params.address);
+    if (idx === -1) return res.status(404).json({ error: '地址不存在' });
+    const { name, address } = req.body || {};
+    let newName, newAddr;
+    if (name !== undefined) {
+      newName = String(name).trim();
+      if (!newName) return res.status(400).json({ error: '名称不能为空' });
+    }
+    if (address !== undefined) {
+      newAddr = String(address).trim();
+      if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(newAddr)) return res.status(400).json({ error: '无效的 Solana 地址' });
+      try { new PublicKey(newAddr); } catch { return res.status(400).json({ error: '无效的 Solana 地址' }); }
+      if (newAddr !== WALLETS[idx].address && WALLETS.some((w, i) => i !== idx && w.address === newAddr)) return res.status(409).json({ error: '地址已存在' });
+    }
+    if (newName === undefined && newAddr === undefined) return res.status(400).json({ error: '需要 name 或 address' });
+    const old = { ...WALLETS[idx] };
+    const addrChanged = newAddr !== undefined && newAddr !== old.address;
+    if (newName !== undefined) WALLETS[idx].name = newName;
+    if (newAddr !== undefined) WALLETS[idx].address = newAddr;
+    saveWallets(WALLETS);
+    if (addrChanged) {
+      cache = { data: null, timestamp: 0 };
+      delete raydiumInstances[old.address];
+    } else if (cache.data) {
+      // 只改名: 缓存里就地改显示名, 不触发重拉
+      for (const w of (cache.data.wallets || [])) if (w.address === old.address) w.name = WALLETS[idx].name;
+      saveCache();
+    }
+    console.log(`[SOL] Wallet updated: ${old.name} (${old.address}) -> ${WALLETS[idx].name} (${WALLETS[idx].address})`);
+    res.json({ ok: true, wallets: WALLETS });
+  });
+}
+
+module.exports = { mountSolRoutes };
+
+// --- 服务端定时自动刷新（与 BSC 同架构，不依赖前端触发）---
+setInterval(() => {
+  if (inFlight) { console.log('[SOL][auto] skip: fetch in flight'); return; }
+  console.log('[SOL][auto] scheduled refresh starting...');
+  inFlight = _fetchAllSol()
+    .then(() => console.log('[SOL][auto] scheduled refresh done'))
+    .catch(e => console.error('[SOL][auto] scheduled refresh failed:', e.message))
+    .finally(() => { inFlight = null; });
+}, CACHE_TTL);
+
+// 启动预热: pm2 重启定时器归零, 缓存陈旧就立即补一轮 (错开 BSC 25s 启动)
+setTimeout(() => {
+  if (inFlight) return;
+  if (cache.data && Date.now() - cache.timestamp < CACHE_TTL / 2) { console.log('[SOL][auto] 预热跳过: 缓存还新鲜'); return; }
+  console.log('[SOL][auto] 启动预热刷新 (缓存已陈旧)...');
+  inFlight = _fetchAllSol()
+    .then(() => console.log('[SOL][auto] 预热刷新完成'))
+    .catch(e => console.error('[SOL][auto] 预热刷新失败:', e.message))
+    .finally(() => { inFlight = null; });
+}, 25 * 1000);
