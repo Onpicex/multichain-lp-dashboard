@@ -73,6 +73,7 @@
   .chain-ico.stk { background: linear-gradient(135deg, #00c805, #059669); color: #04170a; font-size: 9px; }
   .chain-ico.doc { background: #6366f1; font-size: 9px; }
   .chain-ico.apr { background: #f59e0b; color: #1a1a1a; }
+  .chain-ico.set { background: var(--surface-hover, #2a2d3a); color: var(--text-dim, #aaa); }
   #toolNav .nav-item { text-decoration: none; }
   .nav-soon {
     margin-left: auto; font-size: 9px; font-weight: 600;
@@ -98,7 +99,7 @@
     .sidebar-logo { padding: 10px 12px; border-bottom: none; flex-shrink: 0; }
     .sidebar-section, .sidebar-footer { display: none; }
     /* 手机端: 链导航横排 + 只留图标 */
-    #chainNav, #toolNav { display: flex; align-items: center; }
+    #chainNav, #toolNav, #settingsNav { display: flex; align-items: center; }
     .nav-item { width: auto; flex-shrink: 0; padding: 6px 8px; margin: 8px 4px; gap: 0; }
     .nav-item .chain-name { display: none; }
     .nav-item .chain-ico { width: 26px; height: 26px; font-size: 12px; }
@@ -134,20 +135,128 @@
   .refresh-btn:hover { background: #5558e6; }
   .refresh-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-  /* ── Stats Strip ── */
+  /* ── Stats Strip: 两行 — 3 张价值大卡 + 4 张状态小卡 ── */
   .stats-strip {
-    display: grid; grid-template-columns: repeat(5, 1fr);
+    display: grid; grid-template-columns: repeat(12, 1fr);
     border-bottom: 1px solid var(--border);
   }
   .stat-cell {
-    padding: 18px 16px; border-right: 1px solid var(--border);
+    grid-column: span 3;
+    padding: 14px 16px; border-right: 1px solid var(--border);
   }
-  .stat-cell:last-child { border-right: none; }
+  .stat-cell.big { grid-column: span 4; padding: 18px 16px; border-bottom: 1px solid var(--border); }
+  .stat-cell:nth-child(3), .stat-cell:last-child { border-right: none; }
   .stat-label { font-size: 11px; color: var(--text-muted); margin-bottom: 6px; }
-  .stat-val { font-family: var(--mono); font-size: 28px; font-weight: 700; line-height: 1; }
+  .stat-val { font-family: var(--mono); font-size: 22px; font-weight: 700; line-height: 1; }
+  .stat-cell.big .stat-val { font-size: 28px; }
   .stat-val.green { color: var(--green); }
   .stat-val.red { color: var(--red); }
   .stat-val.yellow { color: var(--yellow); }
+
+  /* ── 钱包余额卡 + 明细面板 ── */
+  #idleCell { cursor: pointer; transition: background 0.15s; }
+  #idleCell:hover { background: rgba(99,102,241,0.06); }
+  .idle-arrow { font-size: 9px; color: var(--text-muted); }
+  .idle-panel { border-bottom: 1px solid var(--border); padding: 4px 16px 12px; overflow-x: auto; }
+  .idle-table { width: 100%; border-collapse: collapse; }
+  .idle-table th {
+    text-align: left; font-size: 10.5px; font-weight: 500; color: var(--text-muted);
+    padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap;
+  }
+  .idle-table td { padding: 8px 10px; font-size: 12.5px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .idle-table tr:last-child td { border-bottom: none; }
+  .idle-table td.num { font-family: var(--mono); text-align: right; }
+  .idle-sym { font-weight: 600; }
+  .idle-native { font-size: 9px; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 4px; margin-left: 6px; vertical-align: 1px; }
+  .idle-val { font-weight: 600; }
+  .idle-ws { color: var(--text-muted); font-size: 11px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+  .idle-note { font-size: 10.5px; color: var(--text-muted); padding: 8px 10px 0; }
+  .idle-empty { font-size: 12px; color: var(--text-muted); padding: 14px 10px; }
+  /* 设置页 (侧栏一级目录, 与仪表盘视图互斥) — 卡片式分组 */
+  .st-page { max-width: 860px; padding: 20px 0 40px; display: flex; flex-direction: column; gap: 16px; }
+  .st-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    overflow: hidden;
+  }
+  .st-card-head {
+    display: flex; align-items: center; gap: 14px;
+    padding: 16px 18px; border-bottom: 1px solid var(--border);
+  }
+  .st-card-ico {
+    width: 38px; height: 38px; border-radius: 10px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; font-size: 18px;
+  }
+  .st-card-ico.fund { background: var(--accent-dim); }
+  .st-card-ico.bell { background: var(--yellow-dim); }
+  .st-card-titles { min-width: 0; flex: 1; }
+  .st-card-title { font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  .st-card-desc { font-size: 11.5px; color: var(--text-muted); margin-top: 3px; line-height: 1.5; }
+  .st-badge {
+    font-family: var(--mono); font-size: 10px; font-weight: 600;
+    color: var(--accent); background: var(--accent-dim);
+    padding: 1px 7px; border-radius: 9px;
+  }
+  .st-card-body { padding: 14px 18px 16px; }
+  .st-sub { font-size: 12px; font-weight: 600; color: var(--text-dim); margin: 10px 0 8px; }
+  .st-sub:first-child { margin-top: 0; }
+  .st-sub-note { font-size: 10.5px; font-weight: 400; color: var(--text-muted); margin-left: 6px; }
+  .st-opts { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  /* 拨杆开关 */
+  .switch { position: relative; display: inline-block; width: 42px; height: 24px; flex-shrink: 0; cursor: pointer; }
+  .switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+  .switch-track {
+    position: absolute; inset: 0; background: var(--border-light);
+    border-radius: 24px; transition: background 0.18s;
+  }
+  .switch-track::after {
+    content: ''; position: absolute; width: 18px; height: 18px; border-radius: 50%;
+    background: #fff; top: 3px; left: 3px; transition: transform 0.18s;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+  }
+  .switch input:checked + .switch-track { background: var(--accent); }
+  .switch input:checked + .switch-track::after { transform: translateX(18px); }
+  /* 钱包胶囊网格 (勾选高亮) */
+  .st-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px; }
+  .st-grid .wm-item {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 12px; transition: border-color 0.12s, background 0.12s;
+    justify-content: flex-start; overflow: hidden;
+  }
+  .st-grid .wm-item:hover { border-color: var(--border-light); }
+  .st-grid .wm-item:has(input:checked) { border-color: var(--accent); background: var(--accent-dim); }
+  .st-grid .nm-hint { grid-column: 1 / -1; }
+  .st-card select { background: var(--bg); }
+  .st-card .nm-test-btn { margin-left: auto; }
+  @media (max-width: 480px) {
+    .st-page { padding: 12px 0 30px; gap: 12px; }
+    .st-card-head { padding: 13px 14px; gap: 10px; }
+    .st-card-body { padding: 12px 14px 14px; }
+    .st-card-ico { width: 32px; height: 32px; font-size: 15px; border-radius: 8px; }
+    .st-grid { grid-template-columns: 1fr; }
+  }
+  /* 初始资金 (净入金) 摘要 + 转账明细 */
+  .fund-bar {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
+    padding: 10px; margin-bottom: 4px; font-size: 12px;
+    border: 1px solid var(--border); border-radius: 8px; background: rgba(99,102,241,0.04);
+  }
+  .fund-bar b { font-family: var(--mono); font-size: 14px; }
+  .fund-sub { color: var(--text-muted); font-size: 11px; font-family: var(--mono); }
+  .fund-toggle {
+    margin-left: auto; background: transparent; border: 1px solid var(--accent);
+    color: var(--accent); font-size: 11px; padding: 3px 10px; border-radius: 5px; cursor: pointer;
+  }
+  .fund-toggle:hover { background: var(--accent); color: #fff; }
+  .fund-warn { font-size: 10.5px; color: var(--yellow); width: 100%; }
+  .fund-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+  .fund-table th { text-align: left; font-size: 10px; font-weight: 500; color: var(--text-muted); padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .fund-table td { padding: 6px 8px; font-size: 11.5px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .fund-table tr:last-child td { border-bottom: none; }
+  .fund-table td.num { font-family: var(--mono); text-align: right; }
+  .fund-dir-in { color: var(--green); font-weight: 600; }
+  .fund-dir-out { color: var(--red); font-weight: 600; }
+  .fund-ct { font-size: 9px; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; margin-left: 5px; color: var(--text-muted); vertical-align: 1px; }
+  .fund-cp { font-family: var(--mono); font-size: 10.5px; color: var(--text-muted); }
 
   /* ── Wallet Manager ── */
   .wallet-mgr {
@@ -350,6 +459,11 @@
   .d-val.fees { color: var(--yellow); }
   .d-val.gain { color: var(--green); }
   .d-val.loss { color: var(--red); }
+  /* 建仓至今差价副行/钱包名副行: 仅手机卡片显示(480 媒体块开启) */
+  .val-diff { display: none; }
+  .val-diff.gain { color: var(--green); }
+  .val-diff.loss { color: var(--red); }
+  .pair-wallet { display: none; }
   .d-sub { font-family: var(--mono); font-size: 10px; color: var(--text-muted); margin-top: 1px; }
   .range-bar-labels { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--text-muted); margin-bottom: 6px; }
   .range-bar-track { height: 5px; background: var(--border-light); border-radius: 3px; position: relative; }
@@ -410,9 +524,11 @@
   /* ── Responsive: Tablet ── */
   @media (max-width: 768px) {
     .shell { padding: 0 10px; }
-    .stats-strip { grid-template-columns: repeat(2, 1fr); }
+    .stat-cell, .stat-cell.big { grid-column: span 6; border-bottom: 1px solid var(--border); }
     .stat-cell:nth-child(2n) { border-right: none; }
-    .stat-val { font-size: 22px; }
+    .stat-cell:nth-child(3) { border-right: 1px solid var(--border); }
+    .stat-cell:last-child { grid-column: 1 / -1; border-bottom: none; border-right: none; }
+    .stat-val, .stat-cell.big .stat-val { font-size: 22px; }
     .pos-table th, .pos-row td { padding: 10px 8px; }
     .pair-cell { font-size: 13px; }
     .val-cell { font-size: 13px; }
@@ -433,13 +549,15 @@
     .chain-tag { font-size: 10px; padding: 3px 8px; }
     .refresh-btn { font-size: 11px; padding: 6px 12px; }
 
-    /* Stats: 2x3 grid, 最后一个独占整行 */
-    .stats-strip { grid-template-columns: repeat(2, 1fr); }
-    .stat-cell { padding: 12px 10px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+    /* Stats: 7 格 = 两列三行 + 末格整行 */
+    .stat-cell, .stat-cell.big { grid-column: span 6; padding: 12px 10px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
     .stat-cell:nth-child(2n) { border-right: none; }
+    .stat-cell:nth-child(3) { border-right: 1px solid var(--border); }
     .stat-cell:last-child { grid-column: 1 / -1; border-bottom: none; border-right: none; }
-    .stat-val { font-size: 20px; }
+    .stat-val, .stat-cell.big .stat-val { font-size: 20px; }
     .stat-label { font-size: 10px; }
+    .idle-table td, .idle-table th { padding: 7px 6px; font-size: 11.5px; }
+    .idle-table .idle-ws { display: none; }  /* 手机: 钱包分布列放不下, 点单钱包筛选看 */
 
     /* Filter: 小按钮可滚动 */
     .filter-row { overflow-x: auto; flex-wrap: nowrap; padding: 8px 0; gap: 6px; -webkit-overflow-scrolling: touch; }
@@ -456,14 +574,25 @@
     .pos-row { display: flex; flex-wrap: wrap; align-items: center; padding: 12px 10px; gap: 4px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
     .pos-row td { padding: 2px 0; border: none; }
 
-    /* 卡片布局: 第一行 交易对 + 状态, 第二行 日化 + 价值 */
-    .pos-row td.pair-cell { width: 60%; font-size: 14px; font-weight: 700; order: 1; }
+    /* 卡片布局 v2 (2026-09-05: 数据全露后按视觉层级整理, 用户报"乱"):
+       独立圆角卡片; 顶部 交易对+钱包 | 价值+差价; 中部 区间条+边界; 底部 状态|费|日化 三等分统计栏 */
+    .pos-table tbody { display: flex; flex-direction: column; gap: 8px; padding: 10px 0; }
+    .pos-row { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; gap: 0; align-items: flex-start; }
+    .pos-row:has(+ .detail-row.open) { border-radius: 10px 10px 0 0; }
+    .detail-row.open { background: var(--surface); border: 1px solid var(--border); border-top: none; border-radius: 0 0 10px 10px; margin-top: -8px; }
+    .pos-row td.pair-cell { flex: 1 1 auto; width: auto; min-width: 0; font-size: 14px; font-weight: 700; order: 1; }
+    .pair-wallet { display: block; font-size: 10.5px; font-weight: 400; color: var(--text-muted); margin-top: 2px; }
     .pos-row td.wallet-cell { display: none; }
-    .pos-row td.range-cell { display: none; }
-    .pos-row td.status-cell { width: 40%; text-align: right; order: 2; }
-    .pos-row td.fees-cell { display: none; }
-    .pos-row td.apr-cell { width: 50%; text-align: left; order: 3; font-size: 14px; color: var(--green); }
-    .pos-row td.val-cell { width: 50%; text-align: right; order: 4; font-size: 14px; }
+    .pos-row td.val-cell { width: auto; text-align: right; order: 2; font-size: 15px; font-weight: 700; }
+    .pos-row td.val-cell .val-diff { display: block; font-family: var(--mono); font-size: 10.5px; font-weight: 600; margin-top: 2px; }
+    .pos-row td.range-cell { display: flex; flex-direction: column; width: 100%; order: 3; font-family: var(--mono); font-size: 10px; color: var(--text-muted); padding: 9px 0 0; }
+    .pos-row td.range-cell .mini-range { order: 1; margin-top: 0; }
+    .range-bounds { order: 2; text-align: center; margin-top: 3px; letter-spacing: 0.02em; }
+    .pos-row td.status-cell { width: 33%; order: 4; text-align: left; border-top: 1px solid var(--border); margin-top: 10px; padding-top: 9px; }
+    .pos-row td.fees-cell { display: block; width: 34%; order: 5; font-size: 12px; color: var(--text); text-align: center; border-top: 1px solid var(--border); margin-top: 10px; padding-top: 10px; }
+    .pos-row td.fees-cell::before { content: '费 '; color: var(--text-muted); font-size: 10.5px; }
+    .pos-row td.apr-cell { width: 33%; order: 6; font-size: 12px; font-weight: 600; color: var(--green); text-align: right; border-top: 1px solid var(--border); margin-top: 10px; padding-top: 10px; }
+    .pos-row td.apr-cell .apr-sub { display: inline; margin-left: 3px; font-size: 10px; font-weight: 400; color: var(--text-muted); }
 
     /* Protocol tag 在手机上更紧凑 */
     .protocol-tag { font-size: 9px; padding: 1px 6px; margin-left: 6px; }
@@ -522,18 +651,25 @@
     </nav>
     <div class="sidebar-section">工具</div>
     <nav id="toolNav">
-      <a class="nav-item" href="/stocks.html" target="_blank" rel="noopener">
+      <a class="nav-item" href="stocks.html" target="_blank" rel="noopener">
         <span class="chain-ico stk">股</span> <span class="chain-name">股票代币成交额 ↗</span>
       </a>
       <a class="nav-item" href="https://docs.robinhood.com/chain/contracts/" target="_blank" rel="noopener">
         <span class="chain-ico doc">文</span> <span class="chain-name">RH 合约文档 ↗</span>
       </a>
     </nav>
+    <div class="sidebar-section">设置</div>
+    <nav id="settingsNav">
+      <button class="nav-item" id="stNavBtn" onclick="openSettings()">
+        <span class="chain-ico set">⚙</span> <span class="chain-name">设置</span>
+      </button>
+    </nav>
     <div class="sidebar-footer">UNISWAP V3+V4<br>v2.0 · rebuilt</div>
   </aside>
 
   <div class="main">
 <div class="shell">
+<div id="dashView">
   <div class="header">
     <div class="header-left">
       <span class="header-title">头寸总览</span>
@@ -546,9 +682,21 @@
   </div>
 
   <div class="stats-strip" id="statsBar" style="display:none;">
-    <div class="stat-cell">
-      <div class="stat-label">总价值</div>
+    <div class="stat-cell big" title="钱包余额 + LP 仓位价值（含待领手续费）">
+      <div class="stat-label">总价值（钱包+LP）</div>
       <div class="stat-val" id="totalValue" style="color:var(--green);">—</div>
+    </div>
+    <div class="stat-cell big" id="idleCell" onclick="togIdle()" title="LP 头寸之外的钱包代币资产，点击展开代币明细">
+      <div class="stat-label">钱包余额 <span class="idle-arrow" id="idleArrow">▼</span></div>
+      <div class="stat-val" id="idleValue" style="color:var(--accent);">—</div>
+    </div>
+    <div class="stat-cell big" title="LP 仓位价值（含待领手续费）">
+      <div class="stat-label">LP 价值</div>
+      <div class="stat-val" id="lpValue" style="color:var(--green);">—</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">待领手续费</div>
+      <div class="stat-val yellow" id="totalFees">$0</div>
     </div>
     <div class="stat-cell">
       <div class="stat-label">活跃头寸</div>
@@ -562,11 +710,9 @@
       <div class="stat-label">区间外</div>
       <div class="stat-val red" id="outRangeCount">0</div>
     </div>
-    <div class="stat-cell">
-      <div class="stat-label">待领手续费</div>
-      <div class="stat-val yellow" id="totalFees">$0</div>
-    </div>
   </div>
+
+  <div class="idle-panel" id="idlePanel" style="display:none;"></div>
 
   <div class="wallet-mgr" id="walletMgr">
     <button class="wallet-mgr-toggle" id="wmToggle" onclick="toggleWalletMgr()">
@@ -584,27 +730,6 @@
     </div>
   </div>
 
-  <div class="wallet-mgr" id="notifyMgr">
-    <button class="wallet-mgr-toggle" id="nmToggle" onclick="toggleNotifyMgr()">
-      <span>🔔 出区间通知 (<span id="nmCount">0</span>)</span>
-      <span class="arrow">▼</span>
-    </button>
-    <div class="wallet-mgr-body" id="nmBody">
-      <div class="nm-row">
-        <label class="nm-opt"><input type="checkbox" id="nmEnabled" onchange="saveNotifyCfg()"> 启用</label>
-        <label class="nm-opt"><input type="checkbox" id="nmRecover" onchange="saveNotifyCfg()"> 回区间也通知</label>
-        <label class="nm-opt">检查间隔 <select id="nmInterval" onchange="saveNotifyCfg()">
-          <option value="5">5 分钟</option><option value="10">10 分钟</option><option value="30">30 分钟</option>
-        </select></label>
-        <button class="nm-test-btn" id="nmTestBtn" onclick="testNotify()">发送测试</button>
-      </div>
-      <div class="nm-status" id="nmStatus"></div>
-      <div class="nm-hint">勾选本链要监控的钱包（已勾选钱包的活跃仓位出区间时经哨兵 Telegram 通知）：</div>
-      <div class="wm-list" id="nmList"></div>
-      <div class="wm-error" id="nmError"></div>
-    </div>
-  </div>
-
   <div id="filterBar" class="filter-row" style="display:none;"></div>
 
   <div id="content">
@@ -618,6 +743,60 @@
     <span>LP 仪表盘 · <span id="footerProto">UNISWAP V3+V4</span> · <span id="footerChain">BSC</span></span>
     <span id="countdown"></span>
   </div>
+</div><!-- /#dashView -->
+
+<!-- 设置页 (侧栏一级目录「设置」进入, 与仪表盘视图互斥切换) -->
+<div id="settingsView" style="display:none;">
+  <div class="header">
+    <div class="header-left">
+      <span class="header-title">设置</span>
+    </div>
+    <div class="header-right">
+      <span class="chain-tag" id="stChainTag">BSC</span>
+      <button class="refresh-btn" onclick="closeSettings()">返回总览</button>
+    </div>
+  </div>
+  <div class="st-page">
+    <div class="st-card">
+      <div class="st-card-head">
+        <div class="st-card-ico fund">💰</div>
+        <div class="st-card-titles">
+          <div class="st-card-title">钱包资金查询</div>
+          <div class="st-card-desc">统计条显示钱包余额与初始资金 · 随 LP 数据每 5 分钟刷新，点「刷新」同步更新</div>
+        </div>
+        <label class="switch" title="启用/关闭本功能"><input type="checkbox" id="fdEnabled" onchange="saveFdCfg()"><span class="switch-track"></span></label>
+      </div>
+      <div class="st-card-body">
+        <div class="st-sub">参与查询的钱包 <span class="st-sub-note">未勾选的不查余额、不计入总价值</span></div>
+        <div class="st-grid" id="fdList"></div>
+        <div class="wm-error" id="fdError"></div>
+      </div>
+    </div>
+    <div class="st-card">
+      <div class="st-card-head">
+        <div class="st-card-ico bell">🔔</div>
+        <div class="st-card-titles">
+          <div class="st-card-title">出区间通知 <span class="st-badge" id="nmCount">0</span></div>
+          <div class="st-card-desc">已勾选钱包的活跃仓位出区间时，经哨兵 Telegram 推送</div>
+        </div>
+        <label class="switch" title="启用/关闭本功能"><input type="checkbox" id="nmEnabled" onchange="saveNotifyCfg()"><span class="switch-track"></span></label>
+      </div>
+      <div class="st-card-body">
+        <div class="st-opts">
+          <label class="nm-opt"><input type="checkbox" id="nmRecover" onchange="saveNotifyCfg()"> 回区间也通知</label>
+          <label class="nm-opt">检查间隔 <select id="nmInterval" onchange="saveNotifyCfg()">
+            <option value="5">5 分钟</option><option value="10">10 分钟</option><option value="30">30 分钟</option>
+          </select></label>
+          <button class="nm-test-btn" id="nmTestBtn" onclick="testNotify()">发送测试</button>
+        </div>
+        <div class="nm-status" id="nmStatus"></div>
+        <div class="st-sub">监控的钱包 <span class="st-sub-note">仅勾选的钱包触发通知</span></div>
+        <div class="st-grid" id="nmList"></div>
+        <div class="wm-error" id="nmError"></div>
+      </div>
+    </div>
+  </div>
+</div><!-- /#settingsView -->
 </div>
   </div><!-- /.main -->
 </div><!-- /.layout -->
@@ -634,7 +813,9 @@ function apiBase() {
 document.querySelectorAll('#chainNav .nav-item').forEach(btn => {
   btn.addEventListener('click', () => {
     const chain = btn.dataset.chain;
-    if (btn.classList.contains('disabled') || chain === activeChain) return;
+    if (btn.classList.contains('disabled')) return;
+    if (settingsOpen) closeSettings();          // 从设置页点链 = 返回该链仪表盘
+    if (chain === activeChain) return;
     document.querySelectorAll('#chainNav .nav-item').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     activeChain = chain;
@@ -649,6 +830,8 @@ document.querySelectorAll('#chainNav .nav-item').forEach(btn => {
     try { activeF = localStorage.getItem('lpWalletF_' + chain) || 'all'; } catch { activeF = 'all'; }
     document.getElementById('content').innerHTML = '<div class="state-box"><div class="spinner"></div><div class="state-text">加载链上数据…</div></div>';
     document.getElementById('statsBar').style.display = 'none';
+    document.getElementById('idlePanel').style.display = 'none';
+    document.getElementById('idleValue').textContent = '—';
     loadWallets();
     loadData(false);
   });
@@ -725,6 +908,7 @@ function renderWalletList() {
     </div>`;
   }).join('');
   if (notifyCfg) renderNotify();
+  if (fdCfg) renderFd();
 }
 
 function editWallet(addr) {
@@ -939,8 +1123,12 @@ function render(data) {
   let ws=curF==='all'?wA:wA.filter(w=>w.address===curF);
 
   // 统计卡跟随钱包筛选: 全部=服务端整链统计, 单钱包=从该钱包头寸就地汇总
+  // 总价值 = 钱包余额(闲置) + LP 仓位价值; idle 数据缺失时退化为纯 LP
+  const idleT=idleTotalFor(data,curF);
   if(curF==='all'){
-    $('totalValue').textContent=fU(data.grandTotalUSD);
+    const lp=data.grandTotalUSD||0;
+    $('totalValue').textContent=fU(lp+(idleT||0));
+    $('lpValue').textContent=fU(lp);
     $('activeCount').textContent=data.stats.totalActive;
     $('inRangeCount').textContent=data.stats.totalInRange;
     $('outRangeCount').textContent=data.stats.totalOutOfRange;
@@ -954,12 +1142,15 @@ function render(data) {
         if(p.liquidityActive){ ta++; if(p.inRange) ti++; else to++; }
       }
     }
-    $('totalValue').textContent=fU(tv);
+    $('totalValue').textContent=fU(tv+(idleT||0));
+    $('lpValue').textContent=fU(tv);
     $('activeCount').textContent=ta;
     $('inRangeCount').textContent=ti;
     $('outRangeCount').textContent=to;
     $('totalFees').textContent=fU2(tf);
   }
+
+  renderIdle(data,curF);
 
   if(!ws.length){ $('content').innerHTML='<div class="state-box"><div class="state-text">暂无活跃头寸</div></div>'; return; }
 
@@ -974,9 +1165,9 @@ function render(data) {
       const uid=w.address.slice(-6)+'-'+p.tokenId;
       const proto=p.protocol||'V3';
       h+=`<tr class="pos-row" onclick="togExp('${uid}')">
-        <td class="pair-cell">${p.token0.symbol}/${p.token1.symbol}<span class="protocol-tag ${proto.toLowerCase()}">${proto}</span>${p.feeLabel?`<span class="fee-tag">${p.feeLabel}</span>`:''}</td>
+        <td class="pair-cell">${p.token0.symbol}/${p.token1.symbol}<span class="protocol-tag ${proto.toLowerCase()}">${proto}</span>${p.feeLabel?`<span class="fee-tag">${p.feeLabel}</span>`:''}<span class="pair-wallet">${w.name}</span></td>
         <td class="wallet-cell">${w.name}</td>
-        <td class="range-cell hide-m">${isFullRange(p) ? `<span style="opacity:.7">全区间</span> 0 — ∞<div class="mini-range"><span class="mini-range-pct down">—</span><div class="mini-range-track"><div class="mini-range-fill" style="left:0;width:50%"></div></div><span class="mini-range-pct up">—</span></div>` : (fP(p.lowerPrice) + ' — ' + fP(p.upperPrice))+(()=>{
+        <td class="range-cell hide-m">${isFullRange(p) ? `<span class="range-bounds"><span style="opacity:.7">全区间</span> 0 — ∞</span><div class="mini-range"><span class="mini-range-pct down">—</span><div class="mini-range-track"><div class="mini-range-fill" style="left:0;width:50%"></div></div><span class="mini-range-pct up">—</span></div>` : ('<span class="range-bounds">'+fP(p.lowerPrice)+' — '+fP(p.upperPrice)+'</span>')+(()=>{
           const pct=p.inRange?Math.min(100,Math.max(0,((p.currentPrice-p.lowerPrice)/(p.upperPrice-p.lowerPrice))*100)):(p.currentPrice<p.lowerPrice?0:100);
           const dL=((p.lowerPrice-p.currentPrice)/p.currentPrice)*100;
           const dU=((p.upperPrice-p.currentPrice)/p.currentPrice)*100;
@@ -986,7 +1177,14 @@ function render(data) {
         <td class="status-cell"><span class="range-dot ${p.inRange?'in':'out'}"></span><span class="status-text ${p.inRange?'in':'out'}">${p.inRange?'区间内':'区间外'}</span></td>
         <td class="fees-cell hide-m" style="text-align:right">${fU2(p.feesValueUSD)}</td>
         <td class="apr-cell">${p.dailyRateCurrent ? p.dailyRateCurrent.toFixed(2)+'%' : '—'}${p.dailyRateCurrent ? `<div class="apr-sub">${p.holdDays>=1 ? p.holdDays+'天'+(p.holdHours%24>0?(p.holdHours%24)+'h':'') : p.holdHours+'h'+((p.holdMinutes||0)>0?(p.holdMinutes+'m'):'')}${p.hasCollected ? ' ↻' : ''}</div>` : ''}</td>
-        <td class="val-cell">${fU(p.totalValueUSD)}</td>
+        <td class="val-cell">${fU(p.totalValueUSD)}${(()=>{
+          if(!(p.entryValueUSD>0)) return '';
+          const wdr=p.entryWithdrawnUSD||0;
+          const diff=p.positionValueUSD+wdr-p.entryValueUSD;
+          const pc=diff/p.entryValueUSD*100;
+          const sign=diff>=0?'+':'-';
+          return `<div class="val-diff ${diff>=0?'gain':'loss'}">${sign}${fU2(Math.abs(diff))} · ${sign}${Math.abs(pc).toFixed(1)}%${p.entryModified?'*':''}</div>`;
+        })()}</td>
       </tr><tr class="detail-row" id="det-${uid}"><td colspan="7">${mkDet(p)}</td></tr>`;
     }
     // 已结束头寸暂时隐藏
@@ -999,6 +1197,129 @@ function setF(v){
   activeF=v;
   try{localStorage.setItem('lpWalletF_'+activeChain,v);}catch{}
   if(curData)render(curData);
+}
+
+// --- 钱包余额 (闲置资金) 统计卡 + 明细面板 ---
+// 当前筛选下的闲置总额; 无 idle 数据/该钱包未参与查询返回 null (总价值卡退化为纯 LP)
+function idleTotalFor(data,curF){
+  const d=data&&data.idle;
+  if(!d||!d.byWallet) return null;
+  if(curF==='all') return d.totalUSD||0;
+  const w=d.byWallet[curF];
+  return w?(w.totalUSD||0):null;
+}
+let idleOpen=false;
+try{ idleOpen=localStorage.getItem('lpIdleOpen')==='1'; }catch{}
+function togIdle(){
+  idleOpen=!idleOpen;
+  try{localStorage.setItem('lpIdleOpen',idleOpen?'1':'0');}catch{}
+  if(curData)render(curData);
+}
+function renderIdle(data,curF){
+  const panel=$('idlePanel');
+  const d=data&&data.idle;
+  if(!d||!d.byWallet){
+    $('idleValue').textContent='—'; $('idleArrow').textContent='▼';
+    // 已被设置关闭(或数据未就绪): 点击卡片给出指引而不是没反应
+    if(idleOpen){ panel.style.display='block'; panel.innerHTML='<div class="idle-empty">资金查询未开启或数据尚未就绪 — 可在左侧「⚙ 设置 → 钱包资金查询」中启用/勾选钱包，改动后约 1 分钟生效</div>'; }
+    else panel.style.display='none';
+    return;
+  }
+  let total=0, rows=[];
+  if(curF==='all'){
+    total=d.totalUSD||0;
+    const agg={};
+    for(const w of Object.values(d.byWallet)){
+      for(const t of (w.tokens||[])){
+        const k=t.address;
+        if(!agg[k]) agg[k]={symbol:t.symbol,address:k,native:t.native,amount:0,valueUSD:0,priceUSD:t.priceUSD,ws:[]};
+        agg[k].amount+=t.amount; agg[k].valueUSD+=t.valueUSD; agg[k].ws.push(w.name);
+      }
+    }
+    rows=Object.values(agg).sort((a,b)=>b.valueUSD-a.valueUSD);
+  }else{
+    const w=d.byWallet[curF];
+    if(!w){
+      // 该钱包未参与资金查询 (设置里未勾选)
+      $('idleValue').textContent='—'; $('idleArrow').textContent='▼';
+      if(idleOpen){ panel.style.display='block'; panel.innerHTML='<div class="idle-empty">该钱包未参与资金查询 — 可在左侧「⚙ 设置 → 钱包资金查询」中勾选</div>'; }
+      else panel.style.display='none';
+      return;
+    }
+    total=w.totalUSD||0; rows=w.tokens||[];
+  }
+  $('idleValue').textContent=fU(total);
+  $('idleArrow').textContent=idleOpen?'▲':'▼';
+  if(!idleOpen){ panel.style.display='none'; return; }
+  panel.style.display='block';
+  let h=mkFund(d,curF);
+  if(!rows.length){
+    panel.innerHTML=h+'<div class="idle-empty">'+(curF==='all'?'本链':'该钱包')+'暂无价值 ≥ $1 的闲置代币</div>';
+    return;
+  }
+  h+='<table class="idle-table"><thead><tr><th>代币</th><th style="text-align:right">数量</th><th style="text-align:right">价格</th><th style="text-align:right">价值</th>'+(curF==='all'?'<th class="idle-ws">钱包</th>':'')+'</tr></thead><tbody>';
+  for(const t of rows){
+    h+='<tr><td class="idle-sym">'+escH(t.symbol)+(t.native?'<span class="idle-native">原生</span>':'')+'</td>'
+      +'<td class="num">'+fN(t.amount)+'</td>'
+      +'<td class="num">'+(t.priceUSD>0?fU(t.priceUSD):'—')+'</td>'
+      +'<td class="num idle-val">'+fU2(t.valueUSD)+'</td>'
+      +(curF==='all'?('<td class="idle-ws" title="'+escH((t.ws||[]).join(', '))+'">'+escH((t.ws||[]).join(', '))+'</td>'):'')
+      +'</tr>';
+  }
+  const scope=activeChain==='sol'?'全部 SPL 代币':('LP 相关代币 + 稳定币 + 主流币'+(activeChain==='rh'?' + 官方股票代币':''));
+  h+='</tbody></table><div class="idle-note">口径：钱包中 LP 头寸之外的代币余额（'+scope+'）· 价值 &lt;$1 已隐藏'+(activeChain==='rh'?' · 股票代币按美股行情估价（~15min 延迟）':'')+'</div>';
+  panel.innerHTML=h;
+}
+
+// --- 初始资金 (净入金) 摘要 + 转账明细 (仅 rh 后端提供 funding 数据) ---
+let fundOpen=false;
+function togFund(){ fundOpen=!fundOpen; if(curData)render(curData); }
+function fT(ts){ if(!ts) return '—'; const d=new Date(ts); return (d.getMonth()+1)+'-'+d.getDate()+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }
+const FUND_CT={external:'外部',internal:'内部',mint:'铸入',burn:'销毁'};
+function mkFund(d,curF){
+  let fd=null, evs=[], partialNote='';
+  if(curF==='all'){
+    fd=d.funding;
+    if(fd){
+      for(const w of Object.values(d.byWallet||{})){
+        if(w.funding&&w.funding.events) for(const e of w.funding.events) evs.push({...e,wn:w.name});
+      }
+      if(fd.partialWallets&&fd.partialWallets.length) partialNote='高频钱包（'+fd.partialWallets.join('、')+'）交易过密未回溯，未计入合计';
+    }
+  }else{
+    const w=d.byWallet&&d.byWallet[curF];
+    fd=w&&w.funding;
+    if(fd&&fd.partial) return '<div class="fund-bar">初始资金：<span class="fund-warn" style="width:auto">该钱包交易过密（高频 bot），金流未回溯</span></div>';
+    if(fd) evs=(fd.events||[]).map(e=>({...e}));
+  }
+  if(!fd||fd.netUSD===undefined) return '';
+  const net=fd.netUSD;
+  const fUF=v=>'$'+v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); // 初始资金不缩写, 保留精确值
+  let h='<div class="fund-bar">初始资金（净入金）<b class="'+(net>=0?'':'')+'">'+fUF(net)+'</b>'
+    +'<span class="fund-sub">= 转入 '+fUF(fd.inUSD)+' − 转出 '+fUF(fd.outUSD)+'</span>'
+    +(fd.catchingUp?'<span class="fund-sub">（历史回补中…）</span>':'')
+    +'<button class="fund-toggle" onclick="togFund()">'+(fundOpen?'收起明细 ▲':'转账明细 ▼')+'</button>'
+    +(partialNote?'<div class="fund-warn">'+escH(partialNote)+'</div>':'')
+    +'</div>';
+  if(fundOpen){
+    evs.sort((a,b)=>(b.ts||0)-(a.ts||0));
+    const MAX=300, cut=evs.length>MAX;
+    if(cut) evs=evs.slice(0,MAX);
+    h+='<table class="fund-table"><thead><tr><th>时间</th>'+(curF==='all'?'<th>钱包</th>':'')+'<th>方向</th><th>代币</th><th style="text-align:right">数量</th><th style="text-align:right">USD</th><th class="idle-ws">对手方</th></tr></thead><tbody>';
+    for(const e of evs){
+      h+='<tr><td class="num">'+fT(e.ts)+'</td>'
+        +(curF==='all'?'<td>'+escH(e.wn||'')+'</td>':'')
+        +'<td><span class="fund-dir-'+e.dir+'">'+(e.dir==='in'?'转入':'转出')+'</span><span class="fund-ct">'+(FUND_CT[e.ct]||e.ct)+'</span></td>'
+        +'<td class="idle-sym">'+escH(e.sym)+'</td>'
+        +'<td class="num">'+fN(e.amt)+'</td>'
+        +'<td class="num idle-val">'+fU2(e.usd)+'</td>'
+        +'<td class="fund-cp idle-ws" title="'+escH(e.cp||'')+'">'+escH((e.cp||'').slice(0,10))+'…</td></tr>';
+    }
+    h+='</tbody></table>';
+    if(cut) h+='<div class="idle-note">仅显示最近 '+MAX+' 笔</div>';
+    h+='<div class="idle-note">口径：链上 ERC20 转账中对手方为普通地址（EOA）/铸销的部分；与合约的往来（swap/LP 出入金）已排除；原生 ETH 直转链上无日志不可见 · 内部=本页监控钱包间互转 · 稳定币按面值、WETH 按转账时点 ETH 价、股票代币按当前行情近似</div>';
+  }
+  return h;
 }
 
 async function loadData(fr=false){
@@ -1022,12 +1343,84 @@ setInterval(()=>{
   if(rem<=0){loadData(false);nextR=Date.now()+RI;} // 自动刷新走服务端缓存TTL，不强制清缓存（手动点刷新按钮才强刷）
 },1000);
 
-// --- 出区间通知配置 (默认哨兵 Telegram, 钱包从已添加列表勾选) ---
+// --- 设置页 (侧栏一级目录): 钱包资金查询 + 出区间通知; 与仪表盘视图互斥切换 ---
 let notifyCfg = null;
-function toggleNotifyMgr() {
-  const b = $('nmBody'), t = $('nmToggle');
-  b.classList.toggle('open'); t.classList.toggle('open');
-  if (b.classList.contains('open')) loadNotifyCfg();   // 打开时刷新状态(lastRun/tracked)
+let settingsOpen = false;
+function openSettings() {
+  settingsOpen = true;
+  $('dashView').style.display = 'none';
+  $('settingsView').style.display = 'block';
+  document.querySelectorAll('#chainNav .nav-item').forEach(b => b.classList.remove('active'));
+  $('stNavBtn').classList.add('active');
+  $('stChainTag').textContent = CHAIN_NAMES[activeChain] || activeChain;
+  try { localStorage.setItem('lpChain', activeChain); } catch {}   // hash 被 #settings 占用, 刷新后靠它恢复链
+  history.replaceState(null, '', '#settings');
+  loadNotifyCfg(); loadFdCfg();   // 进入时刷新状态
+}
+function closeSettings() {
+  settingsOpen = false;
+  $('settingsView').style.display = 'none';
+  $('dashView').style.display = 'block';
+  $('stNavBtn').classList.remove('active');
+  const btn = document.querySelector(`#chainNav .nav-item[data-chain="${activeChain}"]`);
+  if (btn) btn.classList.add('active');
+  history.replaceState(null, '', '#' + activeChain);
+}
+
+// --- 钱包资金查询配置 (wallets.<chain> 未设置=全部参与; []=全不参与) ---
+let fdCfg = null;
+async function loadFdCfg() {
+  try {
+    const r = await fetch('/api/fund/config');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    fdCfg = await r.json();
+    renderFd();
+  } catch (e) { console.error('资金查询配置加载失败:', e); }
+}
+function fdSelSet() {
+  // 当前链勾选集合; null = 未设置(全选)
+  if (!fdCfg.wallets || typeof fdCfg.wallets !== 'object') fdCfg.wallets = {};
+  const arr = fdCfg.wallets[activeChain];
+  return Array.isArray(arr) ? new Set(arr.map(nmNorm)) : null;
+}
+function renderFd() {
+  if (!fdCfg) return;
+  $('fdEnabled').checked = fdCfg.enabled !== false;
+  const sel = fdSelSet();
+  $('fdList').innerHTML = walletList.map(w => `<label class="wm-item nm-check">
+      <input type="checkbox" ${(sel === null || sel.has(nmNorm(w.address))) ? 'checked' : ''} onchange="fdToggleWallet('${escH(w.address)}', this.checked)">
+      <span class="wm-item-name">${escH(w.name)}</span>
+      <span class="wm-item-addr">${escH(w.address)}</span>
+    </label>`).join('') || '<div class="nm-hint">本链还没有已添加的钱包，先返回总览在「💼 管理钱包」中添加</div>';
+}
+function fdToggleWallet(addr, on) {
+  // 未设置(全选)状态下首次改动: 先物化为全量列表再增删
+  if (!Array.isArray(fdCfg.wallets[activeChain])) fdCfg.wallets[activeChain] = walletList.map(w => nmNorm(w.address));
+  const arr = fdCfg.wallets[activeChain], n = nmNorm(addr);
+  const i = arr.findIndex(a => nmNorm(a) === n);
+  if (on && i < 0) arr.push(n);
+  if (!on && i >= 0) arr.splice(i, 1);
+  saveFdCfg();
+}
+async function saveFdCfg() {
+  if (!fdCfg) return;
+  const body = { enabled: $('fdEnabled').checked, wallets: fdCfg.wallets || {}, _chain: activeChain };
+  try {
+    const r = await fetch('/api/fund/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
+    fdCfg = await r.json();
+    renderFd();
+    $('fdError').style.display = 'none';
+    // 服务端已踢当前链后台刷新, 45s/100s 两次回读让统计卡自然跟上
+    setTimeout(() => loadData(false), 45000);
+    setTimeout(() => loadData(false), 100000);
+  } catch (e) {
+    const el = $('fdError');
+    el.textContent = '保存失败: ' + e.message;
+    el.style.display = 'block';
+  }
 }
 async function loadNotifyCfg() {
   try {
@@ -1055,7 +1448,7 @@ function renderNotify() {
       <input type="checkbox" ${sel.has(nmNorm(w.address)) ? 'checked' : ''} onchange="nmToggleWallet('${escH(w.address)}', this.checked)">
       <span class="wm-item-name">${escH(w.name)}</span>
       <span class="wm-item-addr">${escH(w.address)}</span>
-    </label>`).join('') || '<div class="nm-hint">本链还没有已添加的钱包，先在上方「管理钱包」添加</div>';
+    </label>`).join('') || '<div class="nm-hint">本链还没有已添加的钱包，先返回总览在「💼 管理钱包」中添加</div>';
   const ch = notifyCfg.channelReady
     ? '<span style="color:var(--green)">哨兵 Telegram ●</span>'
     : '<span style="color:var(--red)">哨兵 Telegram ● 服务器未配置</span>';
@@ -1103,7 +1496,9 @@ async function testNotify() {
 
 loadWallets();
 loadNotifyCfg();
+loadFdCfg();
 loadData();
+if (location.hash === '#settings') openSettings();   // 设置页刷新保持
 </script>
 </body>
 </html>

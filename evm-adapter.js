@@ -95,6 +95,7 @@ const EVM_CHAINS = {
     nativePriceId: 'ethereum',
     coingeckoPlatform: null,              // coingecko 不收录 RH 链, 全靠池内价 + native 价
     entryFromLogs: true,                  // 建仓价值: 无子图, 从链上事件回溯 (详情面板显示差价)
+    fundingFromLogs: true,                // 初始资金(净入金): 全链 Transfer 回溯 (仅 rh; rh RPC 无 trace, 原生 ETH 直转不可见)
   },
 };
 
@@ -1442,6 +1443,292 @@ async function getUSDPrices(chainId, tokenAddresses, positionsData) {
   return prices;
 }
 
+// --- 钱包闲置余额 (LP 之外的代币资产) ---
+// EVM 无法免索引器枚举全部 ERC20, 候选集=LP 涉及 token + 稳定币 + WETH (+ rh 全部官方股票代币);
+// 垃圾空投币天然进不了候选集, 无需再做 spam 过滤, 仅滤 <$1 灰尘
+const ERC20_BAL_ABI = ['function balanceOf(address) view returns (uint256)'];
+const MC3_NATIVE_ABI = ['function getEthBalance(address addr) view returns (uint256)'];
+let rhRegistryCache = { list: null, ts: 0 };
+function rhStockTokens() {
+  if (rhRegistryCache.list && Date.now() - rhRegistryCache.ts < 3600e3) return rhRegistryCache.list;
+  try {
+    const reg = JSON.parse(fs.readFileSync(path.join(__dirname, 'stocktokens-registry.json'), 'utf8'));
+    rhRegistryCache = { list: reg.map(t => ({ addr: t.addr.toLowerCase(), sym: t.sym })), ts: Date.now() };
+  } catch { rhRegistryCache = { list: [], ts: Date.now() }; }
+  return rhRegistryCache.list;
+}
+function rhStockQuotes() {
+  try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'stocktokens-cache.json'), 'utf8')).quotes || {}; }
+  catch { return {}; }
+}
+// 候选 ERC20 集合 (小写地址); lpTokenAddrs = 本轮 LP 头寸涉及的 token
+function idleCandidates(chainId, lpTokenAddrs) {
+  const cfg = EVM_CHAINS[chainId];
+  const cand = new Set();
+  for (const a of lpTokenAddrs) if (a && a !== ethers.ZeroAddress.toLowerCase()) cand.add(a);
+  for (const a of Object.keys(cfg.stables)) cand.add(a);
+  cand.add(cfg.wrappedNative.toLowerCase());
+  if (chainId === 'rh') for (const t of rhStockTokens()) cand.add(t.addr);
+  return [...cand];
+}
+async function fetchIdleBalances(chainId, WALLETS, tokens, usdPrices) {
+  const cfg = EVM_CHAINS[chainId];
+  const st = chainState(chainId);
+  if (WALLETS.length === 0) return { totalUSD: 0, byWallet: {} };
+
+  // token meta: 未缓存的批量 multicall, 结果进 tokenCache
+  const needMeta = tokens.filter(a => !st.tokenCache[a] || st.tokenCache[a]._fallback);
+  if (needMeta.length) {
+    const metaCalls = [];
+    for (const a of needMeta) {
+      const c = new ethers.Contract(a, ERC20_ABI, st.provider);
+      metaCalls.push({ contract: c, fn: 'symbol', args: [] }, { contract: c, fn: 'decimals', args: [] });
+    }
+    const mr = await multicall(chainId, metaCalls);
+    needMeta.forEach((a, i) => {
+      const sym = mr[i * 2], dec = mr[i * 2 + 1];
+      if (sym && dec !== null) st.tokenCache[a] = { symbol: sym[0], decimals: Number(dec[0]), address: a };
+      else st.tokenCache[a] = { symbol: a.slice(0, 6) + '…', decimals: 18, address: a, _fallback: true };
+    });
+  }
+
+  // 余额: 每钱包 native getEthBalance + 每候选 token balanceOf, 全部 Multicall3 聚合
+  const mcNative = new ethers.Contract(MC3_ADDR, MC3_NATIVE_ABI, st.provider);
+  const calls = [];
+  for (const w of WALLETS) {
+    calls.push({ contract: mcNative, fn: 'getEthBalance', args: [w.address] });
+    for (const a of tokens) calls.push({ contract: new ethers.Contract(a, ERC20_BAL_ABI, st.provider), fn: 'balanceOf', args: [w.address] });
+  }
+  const res = await multicall(chainId, calls);
+
+  const stockSym = {};
+  if (chainId === 'rh') for (const t of rhStockTokens()) stockSym[t.addr] = t.sym;
+  const quotes = chainId === 'rh' ? rhStockQuotes() : {};
+  let nativePrice = usdPrices[cfg.wrappedNative.toLowerCase()] || 0;
+  if (!nativePrice) nativePrice = await getNativePrice(cfg.nativePriceId);
+
+  const byWallet = {}; let totalUSD = 0; let ri = 0;
+  for (const w of WALLETS) {
+    const items = [];
+    const nat = res[ri++];
+    if (nat) {
+      const amount = Number(nat[0]) / 1e18;
+      const v = amount * nativePrice;
+      if (v >= 1) items.push({ symbol: cfg.nativeSymbol, address: 'native', amount, priceUSD: nativePrice, valueUSD: v, native: true });
+    }
+    for (const a of tokens) {
+      const r = res[ri++];
+      if (!r) continue;
+      const meta = st.tokenCache[a];
+      const amount = Number(r[0]) / 10 ** (meta?.decimals ?? 18);
+      if (amount <= 0) continue;
+      let price = cfg.stables[a] ? 1 : (usdPrices[a] || 0);
+      if (!price && a === cfg.wrappedNative.toLowerCase()) price = nativePrice;
+      if (!price && stockSym[a]) price = quotes[stockSym[a]]?.price || 0;  // rh 股票代币: 美股行情近似 (~15min 延迟)
+      const v = amount * price;
+      if (v < 1) continue;
+      items.push({ symbol: meta?.symbol || a.slice(0, 6), address: a, amount, priceUSD: price, valueUSD: v });
+    }
+    items.sort((x, y) => y.valueUSD - x.valueUSD);
+    const wTotal = items.reduce((s, t) => s + t.valueUSD, 0);
+    byWallet[w.address] = { name: w.name, totalUSD: wTotal, tokens: items };  // 键=钱包文件原样地址(已小写), 与前端筛选值一致
+    totalUSD += wTotal;
+  }
+  return { totalUSD, byWallet };
+}
+// 钱包删除/换地址时把它从 idle 快照剔除并重算合计 (EVM 地址键=小写)
+function dropIdleWallet(idle, addr) {
+  if (!idle || !idle.byWallet || !idle.byWallet[addr]) return;
+  delete idle.byWallet[addr];
+  idle.totalUSD = Object.values(idle.byWallet).reduce((s, w) => s + (w.totalUSD || 0), 0);
+}
+
+// --- 钱包资金查询配置 (fund-config.json, 路由在 server.js): 启用开关 + 按链勾选 ---
+function loadFundCfgEvm() {
+  try {
+    const c = JSON.parse(fs.readFileSync(path.join(__dirname, 'fund-config.json'), 'utf8'));
+    return { enabled: c.enabled !== false, wallets: (c.wallets && typeof c.wallets === 'object') ? c.wallets : {} };
+  } catch { return { enabled: true, wallets: {} }; }
+}
+// 勾选子集; 未设置(非数组)=全部钱包
+function fundSelected(fundCfg, chainId, WALLETS) {
+  if (!fundCfg.enabled) return [];
+  const sel = fundCfg.wallets[chainId];
+  if (!Array.isArray(sel)) return WALLETS;
+  const s = new Set(sel.map(a => String(a).toLowerCase()));
+  return WALLETS.filter(w => s.has(w.address.toLowerCase()));
+}
+// 兜底快照按当前勾选过滤 (配置变更后旧快照可能含未勾选钱包)
+function filterIdleByWallets(idle, walletsSel) {
+  if (!idle || !idle.byWallet) return idle;
+  const allow = new Set(walletsSel.map(w => w.address.toLowerCase()));
+  const byWallet = {}; let totalUSD = 0;
+  for (const [a, w] of Object.entries(idle.byWallet)) {
+    if (!allow.has(a.toLowerCase())) continue;
+    byWallet[a] = w; totalUSD += w.totalUSD || 0;
+  }
+  return { totalUSD, byWallet };
+}
+
+// ============================================================
+// 初始资金 (净入金) 回溯 — fundingFromLogs 链 (rh)
+// 口径: 仅 ERC20 Transfer (rh RPC 不支持任何 trace 方法, 原生 ETH 直转链上无日志不可见);
+//   对手=合约的转账全部排除 (swap 结算/LP 出入金/router 都是合约对手);
+//   计入: 对手=外部 EOA / 本链监控钱包(标"内部", 聚合视图双向抵消) / 铸入销毁(桥);
+//   计价: 稳定币=1, WETH=转账时点 ETH 价(coingecko 小时级), 股票代币=当前美股行情近似,
+//         其他 token=最近一轮 LP 定价的当前价近似 (历史价不可得, 前端注明);
+//   高频 bot 钱包 (原始 Transfer 超 FUNDING_RAW_LIMIT) 直接放弃并标注 — 宁缺毋滥
+// ============================================================
+const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
+const FUNDING_RAW_LIMIT = 8000;
+function fundingFile(chainId) { return path.join(__dirname, `funding-cache-${chainId}.json`); }
+function loadFundingCache(chainId) {
+  const st = chainState(chainId);
+  if (!st.fundingCache) {
+    try { st.fundingCache = JSON.parse(fs.readFileSync(fundingFile(chainId), 'utf8')); } catch { st.fundingCache = {}; }
+  }
+  return st.fundingCache;
+}
+function saveFundingCache(chainId) {
+  try { fs.writeFileSync(fundingFile(chainId), JSON.stringify(chainState(chainId).fundingCache || {})); } catch {}
+}
+const codeCache = {};   // `${chainId}:${addr}` -> 是否合约 (进程级; 判定失败不缓存下轮重试)
+async function isContract(chainId, addr) {
+  const key = chainId + ':' + addr;
+  if (key in codeCache) return codeCache[key];
+  try {
+    const code = await withRetry(() => chainState(chainId).provider.getCode(addr), 2, 500);
+    codeCache[key] = !!code && code !== '0x';
+    return codeCache[key];
+  } catch { return true; }   // 拿不到按合约处理 (宁可漏记不错记)
+}
+async function fundingBlockTs(chainId, block) {
+  const st = chainState(chainId);
+  st.blockTsCache = st.blockTsCache || {};
+  if (st.blockTsCache[block]) return st.blockTsCache[block];
+  try {
+    const b = await withRetry(() => st.provider.getBlock(block), 2, 500);
+    if (b) { st.blockTsCache[block] = b.timestamp * 1000; return st.blockTsCache[block]; }
+  } catch {}
+  return 0;
+}
+// 自适应分段单方向扫描; stopped: null=完成 | 'budget'=量超限(bot) | 'rpc'=段失败(下轮续)
+async function scanTransfersAdaptive(chainId, topics, fromBlock, toBlock, budget) {
+  const st = chainState(chainId);
+  const out = [];
+  let f = fromBlock, chunk = 5000000, stopped = null;
+  while (f <= toBlock) {
+    if (out.length > budget) { stopped = 'budget'; break; }
+    const to = Math.min(f + chunk - 1, toBlock);
+    try {
+      const logs = await st.provider.send('eth_getLogs', [{
+        fromBlock: '0x' + f.toString(16), toBlock: '0x' + to.toString(16), topics,
+      }]);
+      for (const l of logs) out.push(l);
+      f = to + 1;
+      if (chunk < 5000000) chunk = Math.min(chunk * 2, 5000000);
+      await sleep(700);
+    } catch (e) {
+      if (chunk > 150000) { chunk = Math.floor(chunk / 4); await sleep(1500); continue; }
+      stopped = 'rpc'; break;
+    }
+  }
+  return { logs: out, scannedTo: f - 1, stopped };
+}
+async function fundingTokenPrice(chainId, token, tsMs) {
+  const cfg = EVM_CHAINS[chainId];
+  if (cfg.stables[token]) return { price: 1, approx: false };
+  if (token === cfg.wrappedNative.toLowerCase()) {
+    const p = await ethUsdAtTime(tsMs);
+    return { price: p || 0, approx: !p };
+  }
+  if (chainId === 'rh') {
+    for (const t of rhStockTokens()) if (t.addr === token) {
+      return { price: rhStockQuotes()[t.sym]?.price || 0, approx: true };   // 当前行情近似
+    }
+  }
+  const st = chainState(chainId);
+  return { price: (st.lastUsdPrices || {})[token] || 0, approx: true };     // LP 当前价近似
+}
+async function scanWalletFunding(chainId, wallet) {
+  const st = chainState(chainId);
+  const cache = loadFundingCache(chainId);
+  const addr = wallet.address.toLowerCase();
+  const cur = cache[addr] || (cache[addr] = { scannedTo: -1, stopped: null, events: [], inUSD: 0, outUSD: 0 });
+  if (cur.stopped === 'budget') return cur;   // bot 钱包已放弃, 不再扫
+  const latest = await st.provider.getBlockNumber();
+  const from = cur.scannedTo + 1;
+  if (from > latest) return cur;
+  const padded = ethers.zeroPadValue(addr, 32);
+  const rIn = await scanTransfersAdaptive(chainId, [TRANSFER_TOPIC, null, padded], from, latest, FUNDING_RAW_LIMIT);
+  if (rIn.stopped === 'budget') { cur.stopped = 'budget'; cur.events = []; cur.inUSD = 0; cur.outUSD = 0; saveFundingCache(chainId); return cur; }
+  const rOut = await scanTransfersAdaptive(chainId, [TRANSFER_TOPIC, padded], from, latest, FUNDING_RAW_LIMIT);
+  if (rOut.stopped === 'budget') { cur.stopped = 'budget'; cur.events = []; cur.inUSD = 0; cur.outUSD = 0; saveFundingCache(chainId); return cur; }
+  // 两方向进度取小者, 超出部分丢弃 (下轮重扫, 以 id 去重)
+  const scannedTo = Math.min(rIn.scannedTo, rOut.scannedTo);
+  const monitored = new Set(loadWallets(chainId).map(w => w.address.toLowerCase()));
+  const seen = new Set(cur.events.map(e => e.id));
+  const zero32 = '0x' + '0'.repeat(64);
+  const raw = new Map();   // id -> log (in/out 两次扫描自转会重复)
+  for (const l of [...rIn.logs, ...rOut.logs]) {
+    if (!l.topics || l.topics.length !== 3) continue;             // ERC721 的 Transfer 是 4 topics
+    if (parseInt(l.blockNumber, 16) > scannedTo) continue;
+    raw.set(l.transactionHash + '-' + parseInt(l.logIndex, 16), l);
+  }
+  const cfg = EVM_CHAINS[chainId];
+  const stockSet = chainId === 'rh' ? new Set(rhStockTokens().map(t => t.addr)) : new Set();
+  for (const [id, l] of raw) {
+    if (seen.has(id)) continue;
+    const token = l.address.toLowerCase();
+    // 快筛: 完全无定价途径的 token (垃圾空投) 不值得花 getCode/getBlock
+    const priceable = cfg.stables[token] || token === cfg.wrappedNative.toLowerCase()
+      || stockSet.has(token) || (st.lastUsdPrices || {})[token] > 0;
+    if (!priceable) continue;
+    const fromA = '0x' + l.topics[1].slice(26), toA = '0x' + l.topics[2].slice(26);
+    if (fromA === toA) continue;                                   // 自转
+    const dir = toA === addr ? 'in' : 'out';
+    const cp = dir === 'in' ? fromA : toA;
+    let ct;
+    if (l.topics[1] === zero32) ct = 'mint';
+    else if (l.topics[2] === zero32) ct = 'burn';
+    else if (monitored.has(cp)) ct = 'internal';
+    else if (await isContract(chainId, cp)) continue;              // 合约对手 = 交易行为, 排除
+    else ct = 'external';
+    const meta = await getTokenInfo(chainId, token);
+    const amt = Number(BigInt(l.data)) / 10 ** (meta?.decimals ?? 18);
+    if (!(amt > 0)) continue;
+    const b = parseInt(l.blockNumber, 16);
+    const ts = await fundingBlockTs(chainId, b);
+    const { price } = await fundingTokenPrice(chainId, token, ts);
+    const usd = amt * price;
+    if (usd < 1) continue;                                         // 灰尘
+    cur.events.push({ id, b, ts, dir, sym: meta?.symbol || token.slice(0, 6), amt, usd, cp, ct });
+  }
+  cur.events.sort((a, b2) => b2.ts - a.ts);
+  cur.inUSD = cur.events.filter(e => e.dir === 'in').reduce((s, e) => s + e.usd, 0);
+  cur.outUSD = cur.events.filter(e => e.dir === 'out').reduce((s, e) => s + e.usd, 0);
+  cur.scannedTo = scannedTo;
+  cur.stopped = (rIn.stopped || rOut.stopped) ? 'rpc' : null;     // rpc 止步: 下轮从 scannedTo+1 续
+  cur.updatedAt = Date.now();
+  saveFundingCache(chainId);
+  return cur;
+}
+const fundingRunning = {};
+async function runFundingQueue(chainId) {
+  if (fundingRunning[chainId]) return;
+  fundingRunning[chainId] = true;
+  try {
+    const WALLETS = fundSelected(loadFundCfgEvm(), chainId, loadWallets(chainId));
+    for (const w of WALLETS) {
+      try {
+        const r = await scanWalletFunding(chainId, w);
+        console.log(`[${chainId}] funding ${w.name}: ${r.stopped === 'budget' ? '高频钱包放弃' : `${r.events.length} 笔, 净入金 $${(r.inUSD - r.outUSD).toFixed(0)}${r.stopped === 'rpc' ? ' (RPC 止步下轮续)' : ''}`}`);
+      } catch (e) { console.error(`[${chainId}] funding scan ${w.name}:`, e.message?.slice(0, 80)); }
+      await sleep(1200);
+    }
+  } finally { fundingRunning[chainId] = false; }
+}
+
 // --- 价格方向归一: 稳定币放 token1 侧 ---
 function normalizePosition(chainId, pos) {
   const cfg = EVM_CHAINS[chainId];
@@ -1540,7 +1827,10 @@ async function fetchInner(chainId, forceRefresh) {
     allTokens.add(p.token0addr.toLowerCase()); allTokens.add(p.token1addr.toLowerCase());
     allPositions.push(p);
   }
-  const usdPrices = await getUSDPrices(chainId, [...allTokens], allPositions);
+  // 闲置余额候选一并送进定价 (coingecko/池内价/稳定币分支都能覆盖到)
+  const idleCand = idleCandidates(chainId, [...allTokens].map(a => a.toLowerCase()));
+  const usdPrices = await getUSDPrices(chainId, [...new Set([...allTokens, ...idleCand])], allPositions);
+  st.lastUsdPrices = usdPrices;   // funding 回溯给非稳定币 token 当前价近似用
 
   let grandTotalUSD = 0, totalActive = 0, totalInRange = 0, totalOutOfRange = 0, totalFees = 0, walletsWithActiveLP = 0;
   for (const wr of walletResults) {
@@ -1597,8 +1887,43 @@ async function fetchInner(chainId, forceRefresh) {
   const wallets = walletResults.filter(wr => wr.positions.length > 0);
   wallets.sort((a, b) => parseInt((a.name.match(/\d+/) || ['0'])[0]) - parseInt((b.name.match(/\d+/) || ['0'])[0]));
 
+  // 钱包闲置余额: 按 fund-config 启用/勾选过滤; 失败沿用上轮快照 (按当前勾选过滤), 不拖累主数据
+  const fundCfg = loadFundCfgEvm();
+  const fundWallets = fundSelected(fundCfg, chainId, WALLETS);
+  let idle = null;
+  if (fundWallets.length) {
+    idle = filterIdleByWallets(st.lastIdle || st.cache.data?.idle || null, fundWallets);
+    try {
+      idle = await fetchIdleBalances(chainId, fundWallets, idleCand, usdPrices);
+      st.lastIdle = idle;
+    } catch (e) { console.error(`[${chainId}] idle balances failed:`, e.message?.slice(0, 100)); }
+  }
+
+  // 强刷时同步跑一轮初始资金增量续扫 (每钱包 1 段×2 方向, 秒级), 让刷新按钮把资金数据一并带新
+  if (cfg.fundingFromLogs && fundWallets.length && forceRefresh) {
+    await runFundingQueue(chainId).catch(e => console.error(`[${chainId}] funding sync:`, e.message?.slice(0, 80)));
+  }
+
+  // 初始资金 (净入金): 从 funding 缓存注入 (后台队列独立回填, 此处零 RPC)
+  if (cfg.fundingFromLogs && idle && idle.byWallet) {
+    const fc = loadFundingCache(chainId);
+    let fin = 0, fout = 0; const partialNames = []; let anyData = false;
+    for (const [a, wI] of Object.entries(idle.byWallet)) {
+      const f = fc[a.toLowerCase()];
+      if (!f || (!f.updatedAt && f.stopped !== 'budget')) continue;
+      anyData = true;
+      if (f.stopped === 'budget') { wI.funding = { partial: true }; partialNames.push(wI.name); continue; }
+      wI.funding = {
+        inUSD: f.inUSD, outUSD: f.outUSD, netUSD: f.inUSD - f.outUSD,
+        partial: false, catchingUp: f.stopped === 'rpc', events: f.events,
+      };
+      fin += f.inUSD; fout += f.outUSD;
+    }
+    if (anyData) idle.funding = { inUSD: fin, outUSD: fout, netUSD: fin - fout, partialWallets: partialNames };
+  }
+
   const result = {
-    wallets, grandTotalUSD, timestamp: Date.now(),
+    wallets, grandTotalUSD, idle, timestamp: Date.now(),
     stats: { totalActive, totalInRange, totalOutOfRange, totalFees, walletsWithActiveLP, totalWallets: WALLETS.length },
   };
   st.cache = { data: result, timestamp: Date.now() };
@@ -1641,7 +1966,9 @@ function mountEvmRoutes(app, adminGuard) {
       if (st.cache.data) {
         st.cache.data.wallets = st.cache.data.wallets.filter(w => w.address.toLowerCase() !== addr);
         st.cache.data.grandTotalUSD = st.cache.data.wallets.reduce((s, w) => s + (w.totalUSD || 0), 0);
+        dropIdleWallet(st.cache.data.idle, addr);
       }
+      dropIdleWallet(st.lastIdle, addr);
       if (st.lastGood) delete st.lastGood[addr];
       kickRefresh(chainId);
       console.log(`[${chainId}] Wallet removed: ${removed.name} (${addr})`);
@@ -1676,15 +2003,19 @@ function mountEvmRoutes(app, adminGuard) {
         if (st.cache.data) {
           st.cache.data.wallets = st.cache.data.wallets.filter(w => w.address.toLowerCase() !== cur);
           st.cache.data.grandTotalUSD = st.cache.data.wallets.reduce((s, w) => s + (w.totalUSD || 0), 0);
+          dropIdleWallet(st.cache.data.idle, cur);
           try { fs.writeFileSync(st.posFile, JSON.stringify(st.cache)); } catch {}
         }
+        dropIdleWallet(st.lastIdle, cur);
         if (st.lastGood) delete st.lastGood[cur];
         kickRefresh(chainId);
       } else {
         if (st.cache.data) {
           for (const w of st.cache.data.wallets) if (w.address.toLowerCase() === cur) w.name = wallets[idx].name;
+          if (st.cache.data.idle?.byWallet?.[cur]) st.cache.data.idle.byWallet[cur].name = wallets[idx].name;
           try { fs.writeFileSync(st.posFile, JSON.stringify(st.cache)); } catch {}
         }
+        if (st.lastIdle?.byWallet?.[cur]) st.lastIdle.byWallet[cur].name = wallets[idx].name;
         if (st.lastGood && st.lastGood[cur]) st.lastGood[cur].name = wallets[idx].name;
       }
       console.log(`[${chainId}] Wallet updated: ${old.name} (${old.address}) -> ${wallets[idx].name} (${wallets[idx].address})`);
@@ -1711,6 +2042,11 @@ function mountEvmRoutes(app, adminGuard) {
         .catch(e => console.error(`[${chainId}][auto] scheduled refresh failed:`, e.message))
         .finally(() => { st.fetchInFlight = null; });
     }, CACHE_TTL);
+    // 初始资金后台队列: 启动 90s 后首跑 (错开预热), 之后随 5min 刷新周期增量续扫 (每轮每钱包 1 段×2 方向)
+    if (EVM_CHAINS[chainId].fundingFromLogs) {
+      setTimeout(() => runFundingQueue(chainId).catch(e => console.error(`[${chainId}] funding queue:`, e.message)), 90 * 1000);
+      setInterval(() => runFundingQueue(chainId).catch(e => console.error(`[${chainId}] funding queue:`, e.message)), CACHE_TTL);
+    }
     // 启动预热: 重启后缓存陈旧就立即补一轮 (eth 35s / rh 45s, 错开 BSC 和 SOL)
     const delay = ({ eth: 35, rh: 45, base: 55 }[chainId] || 45) * 1000;
     setTimeout(() => {
@@ -1726,5 +2062,5 @@ function mountEvmRoutes(app, adminGuard) {
   }
 }
 
-module.exports = { mountEvmRoutes, EVM_CHAINS,
+module.exports = { mountEvmRoutes, EVM_CHAINS, kickRefresh,
   _entryTest: { getV3EntryData, getV4EntryData, getV3EntrySubgraph, getV4EntrySubgraph, getTokenInfo } };  // 建仓回溯的独立验证入口

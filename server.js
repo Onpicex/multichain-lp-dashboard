@@ -516,6 +516,45 @@ async function getUSDPrices(tokenAddresses, positionsData) {
   return prices;
 }
 
+// --- 钱包闲置余额 (LP 之外): 候选=LP 涉及 token + USDT/BUSD + WBNB, native BNB 单列 ---
+// (BSC 无法免索引器枚举全部 ERC20, 与 EVM 适配器同口径; <$1 灰尘过滤)
+const ERC20_BAL_ABI = ['function balanceOf(address) view returns (uint256)'];
+let lastIdleBsc = null;
+async function fetchIdleBsc(walletsSel, tokens, usdPrices) {
+  if (walletsSel.length === 0) return { totalUSD: 0, byWallet: {} };
+  const bnbPrice = usdPrices[WBNB.toLowerCase()] || 0;
+  const byWallet = {}; let totalUSD = 0;
+  for (const w of walletsSel) {
+    const items = [];
+    const bnb = Number(await provider.getBalance(w.address)) / 1e18;
+    const bnbVal = bnb * bnbPrice;
+    if (bnbVal >= 1) items.push({ symbol: 'BNB', address: 'native', amount: bnb, priceUSD: bnbPrice, valueUSD: bnbVal, native: true });
+    for (let i = 0; i < tokens.length; i += 8) {
+      const batch = tokens.slice(i, i + 8);
+      const rs = await Promise.all(batch.map(async (a) => {
+        try {
+          const bal = await new ethers.Contract(a, ERC20_BAL_ABI, provider).balanceOf(w.address);
+          return { a, bal };
+        } catch { return { a, bal: 0n }; }
+      }));
+      for (const { a, bal } of rs) {
+        if (bal === 0n) continue;
+        const meta = await getTokenInfo(a);
+        const amount = Number(bal) / 10 ** (meta?.decimals ?? 18);
+        const price = STABLECOINS.has(a) ? 1 : (usdPrices[a] || 0);
+        const v = amount * price;
+        if (v < 1) continue;
+        items.push({ symbol: meta?.symbol || a.slice(0, 6), address: a, amount, priceUSD: price, valueUSD: v });
+      }
+    }
+    items.sort((x, y) => y.valueUSD - x.valueUSD);
+    const wTotal = items.reduce((s, t) => s + t.valueUSD, 0);
+    byWallet[w.address] = { name: w.name, totalUSD: wTotal, tokens: items };
+    totalUSD += wTotal;
+  }
+  return { totalUSD, byWallet };
+}
+
 // --- Uncollected fees via collect staticCall ---
 async function getUnclaimedFees(positionManager, tokenId, walletAddress) {
   try {
@@ -1315,8 +1354,9 @@ async function _fetchPositionsInner(forceRefresh = false) {
     }
   }
 
-  // Get USD prices (once for all tokens)
-  const usdPrices = await getUSDPrices([...allTokenAddresses], allPositions);
+  // Get USD prices (once for all tokens); 闲置余额候选一并送定价 (coingecko 可覆盖 WBNB 等)
+  const idleCandBsc = [...new Set([...allTokenAddresses, ...STABLECOINS, WBNB.toLowerCase()])];
+  const usdPrices = await getUSDPrices(idleCandBsc, allPositions);
 
   // Calculate USD values
   let grandTotalUSD = 0;
@@ -1425,9 +1465,24 @@ async function _fetchPositionsInner(forceRefresh = false) {
     return numA - numB;
   });
 
+  // 钱包闲置余额: 按 fund-config 启用/勾选过滤; 失败沿用上轮快照, 不拖累主数据
+  const fundCfg = loadFundCfg();
+  const fundSel = fundCfg.wallets.bsc;
+  const fundWallets = !fundCfg.enabled ? []
+    : (!Array.isArray(fundSel) ? WALLETS : WALLETS.filter(w => fundSel.some(a => String(a).toLowerCase() === w.address.toLowerCase())));
+  let idle = null;
+  if (fundWallets.length) {
+    idle = lastIdleBsc || cache.data?.idle || null;
+    try {
+      idle = await fetchIdleBsc(fundWallets, idleCandBsc, usdPrices);
+      lastIdleBsc = idle;
+    } catch (e) { console.error('[BSC] idle balances failed:', e.message?.slice(0, 100)); }
+  }
+
   const result = {
     wallets,
     grandTotalUSD,
+    idle,
     timestamp: Date.now(),
     stats: {
       totalActive,
@@ -1571,9 +1626,11 @@ app.get('/api/positions', async (req, res) => {
 });
 
 // --- Solana (Meteora DLMM + Raydium CLMM) ---
+let solKickRefresh = null, evmKickRefresh = null;
 try {
-  const { mountSolRoutes } = require('./sol-adapter');
-  mountSolRoutes(app, adminGuard);
+  const solMod = require('./sol-adapter');
+  solMod.mountSolRoutes(app, adminGuard);
+  solKickRefresh = solMod.kickSolRefresh || null;
   console.log('SOL adapter mounted (/api/sol/*)');
 } catch (e) {
   console.error('SOL adapter failed to mount:', e.message);
@@ -1581,8 +1638,9 @@ try {
 
 // --- EVM 多链 (Ethereum + Robinhood Chain), 每链独立钱包文件 wallets-<chain>.json ---
 try {
-  const { mountEvmRoutes } = require('./evm-adapter');
-  mountEvmRoutes(app, adminGuard);
+  const evmMod = require('./evm-adapter');
+  evmMod.mountEvmRoutes(app, adminGuard);
+  evmKickRefresh = evmMod.kickRefresh || null;
 } catch (e) {
   console.error('EVM adapter failed to mount:', e.message);
 }
@@ -1603,6 +1661,40 @@ try {
 } catch (e) {
   console.error('Notifier failed to mount:', e.message);
 }
+
+// --- 钱包资金查询配置 (/api/fund/config): 启用开关 + 按链勾选钱包 ---
+// wallets.<chain> 未设置 = 该链全部钱包参与; [] = 全不参与; 数组 = 勾选子集
+const FUND_CFG_FILE = path.join(__dirname, 'fund-config.json');
+function loadFundCfg() {
+  try {
+    const c = JSON.parse(fs.readFileSync(FUND_CFG_FILE, 'utf8'));
+    return { enabled: c.enabled !== false, wallets: (c.wallets && typeof c.wallets === 'object') ? c.wallets : {} };
+  } catch { return { enabled: true, wallets: {} }; }
+}
+app.get('/api/fund/config', (req, res) => res.json(loadFundCfg()));
+app.post('/api/fund/config', adminGuard, (req, res) => {
+  const body = req.body || {};
+  const cur = loadFundCfg();
+  const next = { enabled: body.enabled !== false, wallets: {} };
+  const VALID_CHAINS = ['bsc', 'sol', 'eth', 'rh', 'base'];
+  const src = (body.wallets && typeof body.wallets === 'object') ? body.wallets : cur.wallets;
+  for (const [ch, arr] of Object.entries(src)) {
+    if (!VALID_CHAINS.includes(ch)) continue;
+    if (Array.isArray(arr)) next.wallets[ch] = arr.slice(0, 60).map(a => String(a).slice(0, 64));
+  }
+  try {
+    const tmp = FUND_CFG_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2)); fs.renameSync(tmp, FUND_CFG_FILE);
+  } catch (e) { return res.status(500).json({ error: '写入失败: ' + e.message }); }
+  // 踢一轮当前链后台刷新, 让改动尽快生效 (其余链下轮 5min 周期自然跟上)
+  const ch = String(body._chain || '');
+  try {
+    if (['eth', 'rh', 'base'].includes(ch) && evmKickRefresh) evmKickRefresh(ch);
+    else if (ch === 'sol' && solKickRefresh) solKickRefresh();
+  } catch {}
+  console.log(`[fund] config saved: enabled=${next.enabled}, chains=${Object.keys(next.wallets).join(',') || '(all default)'}`);
+  res.json(loadFundCfg());
+});
 
 app.listen(PORT, process.env.HOST || '0.0.0.0', () => {
   console.log(`LP Dashboard running at http://0.0.0.0:${PORT}`);

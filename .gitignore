@@ -20,3 +20,5 @@ created-cache-*.json
 positions-cache*.json
 stocktokens-*.json
 token-meta-sol.json
+fund-config.json
+funding-cache-*.json

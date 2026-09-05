@@ -68,6 +68,11 @@
     color: var(--text); font: 500 12px var(--font); padding: 8px 12px; outline: none;
   }
   .search:focus { border-color: var(--accent); }
+  .win-sel {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); font: 600 12px var(--font); padding: 8px 10px; outline: none; cursor: pointer;
+  }
+  .win-sel:focus, .win-sel:hover { border-color: var(--accent); }
   .hint { font-size: 11px; color: var(--text-muted); }
 
   .tbl-wrap {
@@ -218,6 +223,20 @@
 
   <div class="toolbar">
     <input class="search" id="searchBox" placeholder="搜索代码 / 名称…" autocomplete="off">
+    <select class="win-sel" id="winSel" title="日化统计窗口：短窗用于捕捉交易突增导致的日化拉升（数值均折算为 24h 口径便于对比）">
+      <option value="5">日化窗口 · 5 分钟</option>
+      <option value="10">日化窗口 · 10 分钟</option>
+      <option value="15">日化窗口 · 15 分钟</option>
+      <option value="30">日化窗口 · 30 分钟</option>
+      <option value="45">日化窗口 · 45 分钟</option>
+      <option value="60">日化窗口 · 1 小时</option>
+      <option value="120">日化窗口 · 2 小时</option>
+      <option value="180">日化窗口 · 3 小时</option>
+      <option value="240">日化窗口 · 4 小时</option>
+      <option value="360">日化窗口 · 6 小时</option>
+      <option value="720">日化窗口 · 12 小时</option>
+      <option value="1440" selected>日化窗口 · 24 小时</option>
+    </select>
     <span class="hint" id="rowCount"></span>
   </div>
 
@@ -252,7 +271,8 @@
     行情来源：NASDAQ = 纳斯达克 screener（个股）；CBOE = Cboe 延迟行情（ETF 及特例）。点击代码跳 TradingView，点击合约地址跳 Robinhood Chain 浏览器。
     「RH 池」= 该代币在 Robinhood Chain 上的<b>真实</b> Uniswap V3/V4 池子数：当前有流动性、对手币为 USDG/WETH/ETH/官方代币、费率≤10% 或动态费（RH 链 bot 垃圾池泛滥，三重过滤后才计数；链上事件全量扫描 + Multicall 流动性核验，每 10 分钟增量同步；悬停看对手币与费率，点击跳 Uniswap 代币页）。
     <b>点击任意行</b>展开该代币全部池子的详情：TVL、24h 量/费、池日化、主力区间与主力区间日化（TVL &lt; $1,000 的尘埃池已过滤）。
-    「RH TVL」= 该代币在 RH 链全部真实池（TVL≥$1,000）的 TVL 合计。「最高日化」= 该代币全部池子（TVL≥$1,000）中最高的池日化，悬停显示来源池与其主力日化；全量每 2 小时后台重算，详情面板可「实时刷新」单个代币。
+    「RH TVL」= 该代币在 RH 链全部真实池（TVL≥$1,000）的 TVL 合计。「最高日化」= 该代币全部池子（TVL≥$1,000）中最高的池日化，悬停显示来源池与其主力日化；详情面板可「实时刷新」单个代币。
+    <b>「日化窗口」下拉</b>可把日化统计窗口在 5 分钟 ~ 24 小时之间切换（也作用于详情面板的池日化/主力日化）：短窗用于捕捉<b>交易突增</b>导致的日化拉升，数值一律折算为 24h 口径便于对比；短窗数据由每 5 分钟一次的常驻链上细采样支撑（仅 TVL≥$1,000 的池），实际差分窗口与所选窗口偏差较大时数值带黄 *（悬停看实际窗口）。
   </div>
 </div>
 
@@ -264,6 +284,20 @@ try {
   const s = JSON.parse(localStorage.getItem('stkSort') || 'null');
   if (s && s.key) { sortKey = s.key; sortDir = s.dir === 1 ? 1 : -1; }
 } catch {}
+// 日化统计窗口 (分钟), 默认 24h
+const WIN_OPTS = [5, 10, 15, 30, 45, 60, 120, 180, 240, 360, 720, 1440];
+let curWin = 1440;
+try {
+  const w = parseInt(localStorage.getItem('stkWin') || '', 10);
+  if (WIN_OPTS.includes(w)) curWin = w;
+} catch {}
+const winLabel = m => m >= 60 ? (m / 60) + '小时' : m + '分钟';
+// 当前窗口下该代币的最高日化 {d,m,pool,h}; 24h 用主口径旧字段 (兼容旧缓存)
+function dayOf(t) {
+  if (curWin === 1440) return t.day == null ? null : { d: t.day, m: t.dayMain, pool: t.dayPool, h: null };
+  const x = t.dayW && t.dayW[curWin];
+  return x && x.d != null ? x : null;
+}
 
 const $ = id => document.getElementById(id);
 
@@ -319,6 +353,7 @@ function detailRowHtml(t) {
     inner = `<div class="d-spin">${openData.note === 'scanning' ? '池子扫描进行中，稍后再试'
       : (openData.hidden > 0 ? `全部 ${openData.hidden} 个池子 TVL 均低于 $1,000，已隐藏` : '该代币在 RH 链暂无真实池子')}</div>`;
   } else {
+    const wl = curWin === 1440 ? '' : '·' + winLabel(curWin);
     const rows = openData.pools.map(p => {
       // 超出现价 10 倍的区间边界显示成 ∞/0 (宽区间/全区间语义, 边界值是扫描窗口截断产物)
       const rb = v => p.curPrice > 0 && v > p.curPrice * 10 ? '∞' : (p.curPrice > 0 && v < p.curPrice / 10 ? '0' : fmtRangePrice(v));
@@ -326,22 +361,27 @@ function detailRowHtml(t) {
       const share = p.mainShare > 0 ? ` <span style="color:var(--text-muted)">(${p.mainShare.toFixed(0)}%TVL)</span>` : '';
       const st = p.mainPrice ? (p.inMain ? '<span class="in-dot in"></span>在区间' : '<span class="in-dot out"></span>出区间') : '—';
       const hot = v => v != null && v >= 0.1 ? ' hot' : '';
+      // 日化两列跟随所选窗口 (24h 用主口径旧字段, 兼容旧缓存)
+      const wx = (curWin === 1440 || !p.win) ? { d: p.dayPct, m: p.mainDaily, h: p.winH } : (p.win[curWin] || { d: null, m: null, h: 0 });
+      const exp = curWin / 60;
+      const off = curWin === 1440 ? (wx.h > 0 && wx.h < 20) : (wx.h > 0 && Math.abs(wx.h - exp) > Math.max(exp * 0.5, 0.03));
+      const offTip = off ? ` title="实际费收窗口 ${(+wx.h).toFixed(2)}h，已折算 24h 口径"` : '';
       return `<tr>
         <td class="l"><span class="v-badge">V${p.v}</span> <b>${escH(p.pair)}</b> <span class="fee-chip">${escH(p.feeLabel)}</span>
           <a class="pool-link" href="https://app.uniswap.org/explore/pools/robinhood/${escH(p.key)}" target="_blank" rel="noopener">↗</a></td>
         <td>${fmtUsd(p.tvl)}</td>
         <td>${fmtUsd(p.vol24)}</td>
         <td>${fmtUsd(p.fees24)}</td>
-        <td class="d-day${hot(p.dayPct)}"${p.winH > 0 && p.winH < 20 ? ` title="新池/短窗: 实际费收窗口 ${p.winH.toFixed(1)}h 已折算 24h"` : ''}>${fmtPct(p.dayPct)}${p.winH > 0 && p.winH < 20 ? '<span style="color:var(--yellow);font-size:9px">*</span>' : ''}</td>
+        <td class="d-day${hot(wx.d)}"${offTip}>${fmtPct(wx.d)}${off ? '<span style="color:var(--yellow);font-size:9px">*</span>' : ''}</td>
         <td>${range}${share}</td>
-        <td class="d-day${hot(p.mainDaily)}">${fmtPct(p.mainDaily)}</td>
+        <td class="d-day${hot(wx.m)}">${fmtPct(wx.m)}</td>
         <td class="l">${st}</td>
       </tr>`;
     }).join('');
     inner = `<div class="dtable-wrap"><table class="dtable">
-      <thead><tr><th class="l">池子</th><th>TVL</th><th>24h 量≈</th><th>24h 费</th><th>池日化</th><th>主力区间</th><th>主力日化</th><th class="l">现价位置</th></tr></thead>
+      <thead><tr><th class="l">池子</th><th>TVL</th><th>24h 量≈</th><th>24h 费</th><th>池日化${wl}</th><th>主力区间</th><th>主力日化${wl}</th><th class="l">现价位置</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
-      <div class="d-note">${openData.hidden > 0 ? `已隐藏 ${openData.hidden} 个 TVL &lt; $1,000 的尘埃池。` : ''}${openData.windowH > 0 && openData.windowH < 20 ? `<b>费收采样窗口目前仅 ${openData.windowH.toFixed(1)}h（已折算成 24h，数据随采样积累到 24h 后最准）。</b>` : ''}主力区间 = 流动性 ≥ 70% 峰值的连续价格带（附 TVL 占比）；费收 = 链上 feeGrowthGlobal 累计器差分（每单位流动性的实收费，动态费池亦精确），24h 费 ≈ 单位费收 × 当前活跃流动性；池日化 = 24h 费 ÷ 全池 TVL；主力日化 = 单位流动性 24h 费收 ÷ 主力区间单位仓位价值（即在主力区间做 LP 的日收益率，未年化）；24h 量 ≈ 费 ÷ 费率（动态费池无固定费率不估）；出区间 = 现价不在主力区间内；日化带黄色 * = 新池短窗折算（悬停看实际窗口，随采样积累自动转为标准 24h 口径）。</div>`;
+      <div class="d-note">${openData.hidden > 0 ? `已隐藏 ${openData.hidden} 个 TVL &lt; $1,000 的尘埃池。` : ''}${openData.windowH > 0 && openData.windowH < 20 ? `<b>24h 口径费收采样窗口目前仅 ${openData.windowH.toFixed(1)}h（已折算成 24h，数据随采样积累到 24h 后最准）。</b>` : ''}主力区间 = 流动性 ≥ 70% 峰值的连续价格带（附 TVL 占比）；费收 = 链上 feeGrowthGlobal 累计器差分（每单位流动性的实收费，动态费池亦精确），24h 费 ≈ 单位费收 × 当前活跃流动性；池日化 = 窗口内费收 ÷ 全池 TVL（折算 24h）；主力日化 = 单位流动性窗口费收 ÷ 主力区间单位仓位价值（即在主力区间做 LP 的日收益率，未年化）；24h 量 ≈ 费 ÷ 费率（动态费池无固定费率不估）；<b>「日化窗口」当前为 ${winLabel(curWin)}</b>——只改变池日化/主力日化两列的统计窗口（数值均折算为 24h 口径便于对比），24h 量/24h 费两列始终为 24h 口径；短窗数据来自每 5 分钟的常驻链上细采样（仅 TVL≥$1,000 的池）；日化带黄色 * = 实际差分窗口与所选窗口偏差较大（新池/采样尚未积累，悬停看实际窗口）。</div>`;
   }
   let ageStr = '';
   if (openData && openData.updatedAt) {
@@ -363,10 +403,11 @@ function render() {
   let rows = data.tokens.slice();
   if (q) rows = rows.filter(t => t.sym.toLowerCase().includes(q) || (t.name || '').toLowerCase().includes(q));
 
+  const sv = t => sortKey === 'day' ? (dayOf(t) ? dayOf(t).d : -1) : (t[sortKey] || 0);
   rows.sort((a, b) => {
     // 无行情永远沉底
     if (!a.src !== !b.src) return a.src ? -1 : 1;
-    return ((b[sortKey] || 0) - (a[sortKey] || 0)) * (sortDir === -1 ? 1 : -1);
+    return (sv(b) - sv(a)) * (sortDir === -1 ? 1 : -1);
   });
 
   const maxT = Math.max(...data.tokens.map(t => t.turnover), 1);
@@ -394,15 +435,23 @@ function render() {
         ? `<a class="pool-badge" title="${escH(t.poolInfo)}" href="https://app.uniswap.org/explore/tokens/robinhood/${escH(t.addr)}" target="_blank" rel="noopener">${t.poolCount} 池</a>`
         : '<span class="pool-none">—</span>'}</td>
       <td>${t.rhTvl > 0 ? `<span title="RH 链真实池 (TVL≥$1K) 合计">${fmtUsd(t.rhTvl)}</span>` : '<span class="pool-none">—</span>'}</td>
-      <td>${t.day == null ? '<span class="pool-none">—</span>'
-        : `<span class="d-day${t.day >= 0.1 ? ' hot' : ''}" title="${escH(t.dayPool + (t.dayMain != null ? ' · 主力日化 ' + fmtPct(t.dayMain) : ''))}">${fmtPct(t.day)}</span>`}</td>
+      <td>${(() => {
+        const dy = dayOf(t);
+        if (!dy) return '<span class="pool-none">—</span>';
+        const exp = curWin / 60;
+        const off = curWin !== 1440 && dy.h > 0 && Math.abs(dy.h - exp) > Math.max(exp * 0.5, 0.03);
+        const tip = (dy.pool || '') + (dy.m != null ? ' · 主力日化 ' + fmtPct(dy.m) : '') + (dy.h != null ? ' · 实际窗口 ' + (+dy.h).toFixed(2) + 'h' : '');
+        return `<span class="d-day${dy.d >= 0.1 ? ' hot' : ''}" title="${escH(tip)}">${fmtPct(dy.d)}${off ? '<span style="color:var(--yellow);font-size:9px">*</span>' : ''}</span>`;
+      })()}</td>
       <td>${srcBadge}</td>
     </tr>` + (t.sym === openSym ? detailRowHtml(t) : '');
   }).join('');
   $('tbody').innerHTML = html || '<tr><td colspan="11"><div class="state-box"><div class="state-text">没有匹配的代币</div></div></td></tr>';
   $('rowCount').textContent = q ? `${rows.length} / ${data.tokens.length}` : `${data.tokens.length} 个代币`;
 
-  // 表头排序指示
+  // 表头排序指示 (最高日化列头带当前窗口标签)
+  const thDay = document.querySelector('thead th[data-key="day"]');
+  if (thDay) thDay.textContent = '最高日化' + (curWin === 1440 ? '' : '·' + winLabel(curWin));
   document.querySelectorAll('thead th.sortable').forEach(th => {
     const on = th.dataset.key === sortKey;
     th.classList.toggle('sorted', on);
@@ -454,6 +503,13 @@ document.querySelectorAll('thead th.sortable').forEach(th => {
 });
 $('searchBox').addEventListener('input', render);
 $('refreshBtn').addEventListener('click', () => load(true));
+$('winSel').value = String(curWin);
+$('winSel').addEventListener('change', () => {
+  curWin = parseInt($('winSel').value, 10) || 1440;
+  if (!WIN_OPTS.includes(curWin)) curWin = 1440;
+  try { localStorage.setItem('stkWin', String(curWin)); } catch {}
+  render();   // 全部窗口数据已在 payload 里, 切换零请求即时生效
+});
 
 // 点击行展开/收起池子详情; 详情里的「实时刷新」强制重算
 async function loadDetail(sym, force) {

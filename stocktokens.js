@@ -282,29 +282,49 @@ async function scanPools() {
   return poolScanning;
 }
 
-// --- 池子详情 (点击行展开: 每池 24h 量/费/日化 + 主力区间) ---------------------
+// --- 池子详情 (点击行展开: 每池 量/费/日化 + 主力区间) -------------------------
 // 费收不扫 swap 日志 (rh 链一天 ~460 万笔 swap, RPC 单响应限 1 万条, 扫不动)——
 // 用链上原生累计器 feeGrowthGlobal{0,1}X128 (每单位活跃 L 的累计费, X128 定点):
-// 每轮全局扫描采样一次, 留 25h 环形历史, 「现在 − 24h 前」差分即 24h 单位费收, 零日志、精确。
+// 双环采样: ①全量扫描每 30min 采一次全部真实池, 留 25h 环形 (长窗口基准);
+//           ②细采样每 5min 常驻采 TVL≥$1000 的池, 留 ~2.5h 环形 (短窗口/突增探测基准)。
+// 日化按窗口差分: 每个窗口取两环中最接近「now − 窗口」的样本, 按实际时长折算 24h 口径。
 // 流动性分布 (主力区间 = L≥70% 峰值的连续区间) 走 tickBitmap/ticks + Multicall 聚合。
+const WINDOWS = [5, 10, 15, 30, 45, 60, 120, 180, 240, 360, 720, 1440];   // 分钟; 1440 = 主口径
 const FG_FILE = path.join(__dirname, 'stocktokens-feegrowth.json');
+const FINE_FILE = path.join(__dirname, 'stocktokens-feegrowth-fine.json');
+const FINE_TTL = 5 * 60 * 1000;          // 细采样周期
+const FINE_KEEP = 2.6 * 3600 * 1000;     // 细环保留时长 (≤2h 窗口用得上, 更长窗口有粗环)
 const SEL_FG0 = ethers.id('feeGrowthGlobal0X128()').slice(0, 10);
 const SEL_FG1 = ethers.id('feeGrowthGlobal1X128()').slice(0, 10);
-let fgHistory = [];   // [{at, fg: {key: [hex0, hex1]}}] 按 at 升序
+let fgHistory = [];     // 粗环 [{at, fg: {key: [hex0, hex1]}}] 按 at 升序
+let fineHistory = [];   // 细环, 同构
+let fineKeys = new Set();   // 细采样池集 = 上轮全量扫描中 TVL≥$1000 的池, 随 sweep 更新
 try {
   const f = JSON.parse(fs.readFileSync(FG_FILE, 'utf8'));
   if (Array.isArray(f.samples)) fgHistory = f.samples;
 } catch {}
+try {
+  const f = JSON.parse(fs.readFileSync(FINE_FILE, 'utf8'));
+  if (Array.isArray(f.samples)) fineHistory = f.samples;
+  if (Array.isArray(f.keys)) fineKeys = new Set(f.keys);
+} catch {}
 function saveFg() {
   try { fs.writeFileSync(FG_FILE, JSON.stringify({ samples: fgHistory })); } catch {}
 }
-// 取最接近 24h 前的采样做差分基准 (历史不足 24h 就用最老的, 窗口按实际时长折算)
-function pickFgRef(now) {
-  let best = null;
-  for (const s of fgHistory) {
-    if (!best || Math.abs(now - s.at - 86400000) < Math.abs(now - best.at - 86400000)) best = s;
+function saveFine() {
+  try { fs.writeFileSync(FINE_FILE, JSON.stringify({ keys: [...fineKeys], samples: fineHistory })); } catch {}
+}
+// 每个窗口的全局差分基准 = 两环合并后最接近「now − 窗口」的样本 (排除 1min 内的太新样本)
+function buildSampleIndex(nowMs) {
+  const samples = [...fgHistory, ...fineHistory].filter(s => s.at < nowMs - 60000).sort((a, b) => a.at - b.at);
+  const bestByWin = {};
+  for (const wm of WINDOWS) {
+    const target = nowMs - wm * 60000;
+    let best = null;
+    for (const s of samples) if (!best || Math.abs(s.at - target) < Math.abs(best.at - target)) best = s;
+    bestByWin[wm] = best;
   }
-  return best;
+  return { samples, bestByWin };
 }
 const SV2_IFACE = new ethers.Interface([
   'function getFeeGrowthGlobals(bytes32) view returns (uint256 feeGrowthGlobal0, uint256 feeGrowthGlobal1)',
@@ -325,7 +345,8 @@ const SWEEP_TTL = 30 * 60 * 1000;   // 全量日化扫描周期 (feeGrowth 采�
 const DAILY_FILE = path.join(__dirname, 'stocktokens-pooldaily.json');
 const detailCache = {};             // sym -> {at, data} 或 {promise}
 const decCache = { '0x0000000000000000000000000000000000000000': 18 };
-let dailyBySym = {};                // sym -> {d: 最高池日化, m: 该池主力日化, pool: 标签, at}
+let dailyBySym = {};                // sym -> {d: 最高池日化(24h), m: 主力日化, pool: 标签, tvl, w: {分钟: {d,m,h,pool}}, at}
+let lastStats = null;               // 上次全量扫描的原始池统计 (含 BigInt 上下文), 细采样零 RPC 重算窗口用
 let sweepAt = 0;
 let sweepTryAt = 0;
 let sweeping = null;
@@ -405,10 +426,8 @@ function isRealPool(p) {
   return (p.v === 4 && (p.fee & 0x800000)) || p.fee <= 100000;
 }
 
-// 一组池子的中性统计 (不绑定股票视角); 全局日化扫描与单代币实时刷新共用
-async function computePoolSet(pools) {
-  if (!rhProvider) rhProvider = new ethers.JsonRpcProvider(RH_RPC, undefined, { staticNetwork: true });
-  // ① feeGrowthGlobal 采样: 每单位活跃 L 的链上累计费收, 与历史样本差分得 24h 费率
+// feeGrowth 采样 (全量扫描与细采样共用): pools -> {key: [hex0, hex1]}
+async function sampleFeeGrowth(pools) {
   const fgCalls = [], fgMeta = [];
   for (const p of pools) {
     if (p.v === 4) {
@@ -421,17 +440,67 @@ async function computePoolSet(pools) {
       fgCalls.push({ target: p.pa, callData: SEL_FG1 });
     }
   }
-  const fgRes = await stage('feegrowth', () => mc3(fgCalls));
-  const fgNow = {};   // key -> [hex0, hex1]
+  const fgRes = await mc3(fgCalls);
+  const fgNow = {};
   fgRes.forEach((r, k) => {
     if (!r || r.length < 66) return;
     const m = fgMeta[k];
     if (m.both) fgNow[m.key] = ['0x' + r.slice(2, 66), '0x' + r.slice(66, 130)];
     else (fgNow[m.key] = fgNow[m.key] || ['0x0', '0x0'])[m.slot] = '0x' + r.slice(2, 66);
   });
+  return fgNow;
+}
+
+// 对单池按全部窗口做差分: 写入 st.win = {分钟: {d 池日化, m 主力日化, h 实际窗口小时}},
+// 并同步 24h 主口径旧字段 (dayPct/fees24/vol24/winH/mainDaily)。nf 缺失 = 本轮没采到, 全清。
+// st 需带上下文 _L (当前活跃 L, BigInt) 与 _vperl (主力区间单位 L 仓位价值)。
+function computeWins(st, nf, nowMs, samples, bestByWin) {
+  st.win = {}; st.dayPct = null; st.fees24 = null; st.vol24 = null; st.winH = 0; st.mainDaily = null;
+  if (!nf) return;
+  const rate = (st.v === 4 && (st.fee & 0x800000)) ? 0 : st.fee / 1e6;
+  for (const wm of WINDOWS) {
+    const target = nowMs - wm * 60000;
+    let rf = null, rAt = 0;
+    const gb = bestByWin[wm];
+    if (gb && gb.fg[st.key]) { rf = gb.fg[st.key]; rAt = gb.at; }
+    else {
+      // 该池不在全局基准样本里 (新池 / 尘埃池不进细环): 在含它的样本中取最接近目标的
+      let bd = Infinity;
+      for (const s of samples) {
+        if (!s.fg[st.key]) continue;
+        const d = Math.abs(s.at - target);
+        if (d < bd) { bd = d; rf = s.fg[st.key]; rAt = s.at; }
+      }
+    }
+    const dt = rf ? nowMs - rAt : 0;
+    if (!rf || dt <= 60000) continue;
+    const d0 = Number(BigInt(nf[0]) - BigInt(rf[0]));
+    const d1 = Number(BigInt(nf[1]) - BigInt(rf[1]));
+    const f0 = d0 > 0 ? d0 / 2 ** 128 / 10 ** st.dec0 * st.p0usd : 0;
+    const f1 = d1 > 0 ? d1 / 2 ** 128 / 10 ** st.dec1 * st.p1usd : 0;
+    const feePerL = (f0 + f1) * (86400000 / dt);   // 单位 L 费收, 折算 24h
+    const fees = feePerL * Number(st._L);
+    const dayPct = st.tvl > 0 ? fees / st.tvl * 100 : null;
+    const mainDaily = st._vperl > 0 ? feePerL / st._vperl * 100 : null;
+    st.win[wm] = {
+      d: dayPct == null ? null : +dayPct.toPrecision(4),
+      m: mainDaily == null ? null : +mainDaily.toPrecision(4),
+      h: +(dt / 3600000).toFixed(2),
+    };
+    if (wm === 1440) {
+      st.dayPct = dayPct; st.fees24 = fees; st.winH = dt / 3600000; st.mainDaily = mainDaily;
+      st.vol24 = rate > 0 && fees > 0 ? fees / rate : null;   // 动态费池无固定费率, 量不可估
+    }
+  }
+}
+
+// 一组池子的中性统计 (不绑定股票视角); 全局日化扫描与单代币实时刷新共用
+async function computePoolSet(pools) {
+  if (!rhProvider) rhProvider = new ethers.JsonRpcProvider(RH_RPC, undefined, { staticNetwork: true });
+  // ① feeGrowthGlobal 采样: 每单位活跃 L 的链上累计费收, 与历史样本按窗口差分
+  const fgNow = await stage('feegrowth', () => sampleFeeGrowth(pools));
   const nowMs = Date.now();
-  const fgRef = pickFgRef(nowMs);
-  const fgDtMs = fgRef ? nowMs - fgRef.at : 0;
+  const { samples: fgSamples, bestByWin } = buildSampleIndex(nowMs);
 
   // ② slot0 + liquidity
   const s0calls = pools.map(p => p.v === 4
@@ -551,47 +620,24 @@ async function computePoolSet(pools) {
       }
       mainShare = tvl > 0 ? mUsd / tvl : 0;
     }
-    // 24h 费: feeGrowth 差分 → 单位 L 费收 (折算 24h); 池费 ≈ 单位费收 × 当前活跃 L
-    const key = p.v === 4 ? p.id : p.pa;
-    let feePerL = null, fees = null, vol = null;
-    const nf = fgNow[key];
-    let rf = fgRef && fgRef.fg[key];
-    let dtMs = fgDtMs;
-    if (nf && !rf) {
-      // 新池: 24h 前的基准样本里还没有它 → 用包含它的最早样本兜底
-      // (下一轮全局重算即出日化, 短窗折算, 随历史滑动自动收敛到 24h 口径)
-      for (const smp of fgHistory) {
-        if (smp.fg[key]) { rf = smp.fg[key]; dtMs = nowMs - smp.at; break; }
-      }
-    }
-    if (nf && rf && dtMs > 60000) {
-      const d0 = Number(BigInt(nf[0]) - BigInt(rf[0]));
-      const d1 = Number(BigInt(nf[1]) - BigInt(rf[1]));
-      const f0 = d0 > 0 ? d0 / 2 ** 128 / 10 ** dec0 * p0usd : 0;
-      const f1 = d1 > 0 ? d1 / 2 ** 128 / 10 ** dec1 * p1usd : 0;
-      feePerL = (f0 + f1) * (86400000 / dtMs);
-      fees = feePerL * Number(activeL);
-      const rate = (p.v === 4 && (p.fee & 0x800000)) ? 0 : p.fee / 1e6;
-      vol = rate > 0 && fees > 0 ? fees / rate : null;   // 动态费池无固定费率, 量不可估
-    }
-    // 主力区间日化: 单位 L 的 24h 费收 / 单位 L 在主力区间的仓位价值
-    let mainDaily = null, inMain = false;
+    // 主力区间单位 L 仓位价值 (各窗口主力日化共用分母)
+    let vPerL = 0, inMain = false;
     if (main) {
       inMain = curTick >= main.a && curTick < main.b;
       const [a0, a1] = amountsPerL(sqrtP, tickSqrt(main.a), tickSqrt(main.b));
-      const vPerL = a0 / 10 ** dec0 * p0usd + a1 / 10 ** dec1 * p1usd;
-      if (vPerL > 0 && feePerL != null) mainDaily = feePerL / vPerL * 100;
+      vPerL = a0 / 10 ** dec0 * p0usd + a1 / 10 ** dec1 * p1usd;
     }
-    out.push({
+    const key = p.v === 4 ? p.id : p.pa;
+    const st = {
       v: p.v, fee: p.fee, key,
       t0: p.t0, t1: p.t1, dec0, dec1, p0usd, p1usd, sqrtP,
-      tvl, vol24: vol, fees24: fees,
-      dayPct: fees != null && tvl > 0 ? fees / tvl * 100 : null,
-      winH: feePerL != null ? dtMs / 3600000 : 0,   // 该池实际差分窗口 (新池短窗)
-      main, mainShare: mainShare * 100, mainDaily, inMain,
-    });
+      tvl, main, mainShare: mainShare * 100, inMain,
+      _L: activeL, _vperl: vPerL,   // 细采样零 RPC 重算窗口所需上下文 (不进 payload)
+    };
+    computeWins(st, fgNow[key], nowMs, fgSamples, bestByWin);
+    out.push(st);
   }
-  return { stats: out, fgNow, windowH: fgDtMs > 0 ? fgDtMs / 3600000 : 0, sampleAt: nowMs };
+  return { stats: out, fgNow, windowH: bestByWin[1440] ? (nowMs - bestByWin[1440].at) / 3600000 : 0, sampleAt: nowMs };
 }
 
 // 把中性统计按某个官方代币的视角包装成展示对象
@@ -614,6 +660,7 @@ function presentPool(sym, al, s) {
     feeLabel: s.v === 4 && (s.fee & 0x800000) ? '动态费' : (s.fee / 10000) + '%',
     key: s.key,
     tvl: s.tvl, vol24: s.vol24, fees24: s.fees24, dayPct: s.dayPct, winH: s.winH,
+    win: s.win || {},
     mainPrice, mainShare: s.mainShare, mainDaily: s.mainDaily, inMain: s.inMain,
     curPrice: stockIs0 ? hp * s.p1usd : (s.p0usd > 0 && hp > 0 ? s.p0usd / hp : 0),
   };
@@ -625,15 +672,20 @@ function packDetail(sym, arr, windowH) {
   return { sym, updatedAt: Date.now(), windowH, pools: kept, hidden: arr.length - kept.length };
 }
 
-// 记录该代币所有池 (TVL≥1000) 的最高池日化, 供首页列显示
+// 记录该代币所有池 (TVL≥1000) 的最高池日化 (按全部窗口各记一份), 供首页列显示
 function noteDaily(sym, data) {
   let best = null, tvl = 0;
+  const w = {};
   for (const p of data.pools) {
     tvl += p.tvl;   // 只合计 TVL≥$1000 的真实池 (与详情表之和一致)
     if (p.dayPct != null && (!best || p.dayPct > best.dayPct)) best = p;
+    if (p.win) for (const k in p.win) {
+      const x = p.win[k];
+      if (x.d != null && (!w[k] || x.d > w[k].d)) w[k] = { d: x.d, m: x.m, h: x.h, pool: `V${p.v} ${p.pair} ${p.feeLabel}` };
+    }
   }
-  if (best) dailyBySym[sym] = { d: best.dayPct, m: best.mainDaily, pool: `V${best.v} ${best.pair} ${best.feeLabel}`, tvl, at: Date.now() };
-  else dailyBySym[sym] = { d: null, tvl, at: Date.now() };
+  if (best) dailyBySym[sym] = { d: best.dayPct, m: best.mainDaily, pool: `V${best.v} ${best.pair} ${best.feeLabel}`, tvl, w, at: Date.now() };
+  else dailyBySym[sym] = { d: null, tvl, w, at: Date.now() };
 }
 
 async function getTokenPoolDetail(sym, force) {
@@ -660,6 +712,28 @@ async function getTokenPoolDetail(sym, force) {
   return promise;
 }
 
+// 把 lastStats 分组/打包进 detailCache + dailyBySym (全量扫描与细采样重算共用)
+function publishStats(windowH) {
+  const byAddr = {};
+  for (const t of registry) if (t.addr) byAddr[t.addr.toLowerCase()] = t.sym;
+  const grouped = {};
+  for (const s of lastStats) {
+    for (const side of new Set([s.t0, s.t1])) {
+      const sm = byAddr[side];
+      if (!sm) continue;
+      (grouped[sm] = grouped[sm] || []).push(presentPool(sm, side, s));
+    }
+  }
+  const now = Date.now();
+  for (const t of registry) {
+    const data = packDetail(t.sym, grouped[t.sym] || [], windowH);
+    detailCache[t.sym] = { at: now, data };
+    noteDaily(t.sym, data);
+  }
+  saveDaily();
+  return Object.keys(grouped).length;
+}
+
 // 全局日化扫描: 一次算完所有真实池, 填满首页「最高日化」列 + 所有代币的详情缓存
 async function globalSweep() {
   if (sweeping) return sweeping;
@@ -673,28 +747,45 @@ async function globalSweep() {
     fgHistory.push({ at: r.sampleAt, fg: r.fgNow });
     fgHistory = fgHistory.filter(s => r.sampleAt - s.at < 26 * 3600 * 1000);
     saveFg();
-    const byAddr = {};
-    for (const t of registry) if (t.addr) byAddr[t.addr.toLowerCase()] = t.sym;
-    const grouped = {};
-    for (const s of r.stats) {
-      for (const side of new Set([s.t0, s.t1])) {
-        const sm = byAddr[side];
-        if (!sm) continue;
-        (grouped[sm] = grouped[sm] || []).push(presentPool(sm, side, s));
-      }
-    }
-    const now = Date.now();
-    for (const t of registry) {
-      const data = packDetail(t.sym, grouped[t.sym] || [], r.windowH);
-      detailCache[t.sym] = { at: now, data };
-      noteDaily(t.sym, data);
-    }
-    sweepAt = now;
-    saveDaily();
-    console.log(`[stocktokens] daily sweep done: ${r.stats.length} pools -> ${Object.keys(grouped).length} tokens in ${((now - t0) / 1000).toFixed(0)}s, fg window ${r.windowH.toFixed(2)}h, samples ${fgHistory.length}`);
+    // 细采样池集跟随本轮结果 (TVL≥$1000 的池才值得高频采)
+    fineKeys = new Set(r.stats.filter(s => s.tvl >= 1000).map(s => s.key));
+    saveFine();
+    lastStats = r.stats;
+    sweepAt = Date.now();
+    const nTok = publishStats(r.windowH);
+    console.log(`[stocktokens] daily sweep done: ${r.stats.length} pools -> ${nTok} tokens in ${((Date.now() - t0) / 1000).toFixed(0)}s, fg window ${r.windowH.toFixed(2)}h, samples ${fgHistory.length}+${fineHistory.length}`);
   })().catch(e => console.error('[stocktokens] sweep failed:', (e.stack || e.message || '').slice(0, 600)))
     .finally(() => { sweeping = null; });
   return sweeping;
+}
+
+// 细采样: 常驻定时 (不依赖页面访问), 只采 fineKeys 池的 feeGrowth (纯状态读, 2~4s),
+// 采完用上次全量扫描的池上下文零 RPC 重算全部窗口日化并重新发布
+let fineSampling = null;
+async function fineSample() {
+  if (fineSampling || sweeping || !fineKeys.size) return;
+  fineSampling = (async () => {
+    if (!rhProvider) rhProvider = new ethers.JsonRpcProvider(RH_RPC, undefined, { staticNetwork: true });
+    await ensureRegistry();
+    rebuildAddrSym();
+    const pools = poolState.pools.filter(p => isRealPool(p) && fineKeys.has(p.v === 4 ? p.id : p.pa));
+    if (!pools.length) return;
+    const idx = buildSampleIndex(Date.now());   // 基准索引先建 (天然排除本轮新样本)
+    const fg = await stage('finefg', () => sampleFeeGrowth(pools));
+    const at = Date.now();
+    fineHistory.push({ at, fg });
+    fineHistory = fineHistory.filter(s => at - s.at < FINE_KEEP);
+    saveFine();
+    if (lastStats) {
+      let n = 0;
+      for (const s of lastStats) if (fg[s.key]) { computeWins(s, fg[s.key], at, idx.samples, idx.bestByWin); n++; }
+      const wh = idx.bestByWin[1440] ? (at - idx.bestByWin[1440].at) / 3600000 : 0;
+      publishStats(wh);
+      console.log(`[stocktokens] fine sample: ${pools.length} pools sampled, ${n} recomputed, fine ring ${fineHistory.length}`);
+    }
+  })().catch(e => console.error('[stocktokens] fine sample failed:', e.message))
+    .finally(() => { fineSampling = null; });
+  return fineSampling;
 }
 
 // --- 刷新 -------------------------------------------------------------------
@@ -777,9 +868,10 @@ function buildPayload() {
       quoteAt: q ? q.at : 0,
       poolCount: pls.length,
       poolInfo,
-      day: dy && dy.d != null ? dy.d : null,        // 全部池 (TVL≥1000) 中最高的池日化
+      day: dy && dy.d != null ? dy.d : null,        // 全部池 (TVL≥1000) 中最高的池日化 (24h 主口径)
       dayPool: (dy && dy.pool) || '',
       dayMain: dy && dy.m != null ? dy.m : null,     // 该池的主力区间日化
+      dayW: dy && dy.w && Object.keys(dy.w).length ? dy.w : undefined,   // 各窗口最高日化 {分钟:{d,m,h,pool}}
       rhTvl: dy && dy.tvl != null ? dy.tvl : null,   // 该代币 RH 链真实池 (TVL≥1000) TVL 合计
     };
   }).sort((a, b) => b.turnover - a.turnover);
@@ -824,6 +916,8 @@ function mountStockTokens(app) {
       res.status(500).json({ error: e.message });
     }
   });
+  // 短窗细采样常驻定时: 采样必须连续积累才有短窗历史 (计算/发布零 RPC, 采样 2~4s/轮)
+  setInterval(() => { fineSample(); }, FINE_TTL);
 }
 
 module.exports = { mountStockTokens };

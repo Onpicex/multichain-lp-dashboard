@@ -338,6 +338,83 @@ async function getLastActivityAt(pubkeyStr) {
 }
 
 // ============================================================
+// 钱包闲置余额: native SOL + 全部 SPL token (Token + Token-2022 两个 program)
+// 定价走 Jupiter (与 LP 同源), 无价/垃圾空投币自然被 <$1 灰尘线滤掉
+// ============================================================
+const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
+const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+let lastIdleSol = null;   // 上轮成功快照, RPC 抖动时兜底
+
+// 钱包资金查询配置 (fund-config.json, 路由在 server.js); SOL 地址大小写敏感按原样匹配
+function fundWalletsSol() {
+  let cfg = { enabled: true, wallets: {} };
+  try {
+    const c = JSON.parse(fs.readFileSync(path.join(__dirname, 'fund-config.json'), 'utf8'));
+    cfg = { enabled: c.enabled !== false, wallets: (c.wallets && typeof c.wallets === 'object') ? c.wallets : {} };
+  } catch {}
+  if (!cfg.enabled) return [];
+  const sel = cfg.wallets.sol;
+  if (!Array.isArray(sel)) return WALLETS;
+  return WALLETS.filter(w => sel.includes(w.address));
+}
+
+async function fetchIdleSol(walletsSel) {
+  const raw = [];
+  const allMints = new Set([WSOL_MINT]);
+  for (const w of walletsSel) {
+    try {
+      const owner = new PublicKey(w.address);
+      const lamports = await conn.getBalance(owner);
+      const toks = [];
+      for (const pid of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+        const r = await conn.getParsedTokenAccountsByOwner(owner, { programId: pid });
+        for (const acc of r.value) {
+          const info = acc.account.data.parsed?.info;
+          const amt = info?.tokenAmount?.uiAmount;
+          if (amt > 0) { toks.push({ mint: info.mint, amount: amt }); allMints.add(info.mint); }
+        }
+        await new Promise(r2 => setTimeout(r2, 300));
+      }
+      raw.push({ w, lamports, toks });
+    } catch (e) {
+      console.error(`[SOL] idle balance failed ${w.name}:`, e.message.slice(0, 80));
+      raw.push({ w, failed: true });
+    }
+    await new Promise(r2 => setTimeout(r2, 600));
+  }
+  const mintArr = [...allMints];
+  const [symbols, prices] = await Promise.all([getTokenSymbols(mintArr), getPrices(mintArr)]);
+  const solPrice = prices[WSOL_MINT] || 0;
+
+  const byWallet = {}; let totalUSD = 0;
+  for (const entry of raw) {
+    const addr = entry.w.address;
+    if (entry.failed) {
+      // 本钱包本轮失败: 沿用上轮快照
+      const prev = lastIdleSol?.byWallet?.[addr];
+      if (prev) { byWallet[addr] = { ...prev, name: entry.w.name }; totalUSD += prev.totalUSD || 0; }
+      continue;
+    }
+    const items = [];
+    const solAmt = entry.lamports / 1e9;
+    const solVal = solAmt * solPrice;
+    if (solVal >= 1) items.push({ symbol: 'SOL', address: 'native', amount: solAmt, priceUSD: solPrice, valueUSD: solVal, native: true });
+    for (const t of entry.toks) {
+      const price = t.mint === WSOL_MINT ? solPrice : (prices[t.mint] || 0);
+      const v = t.amount * price;
+      if (v < 1) continue;
+      items.push({ symbol: symbols[t.mint]?.symbol || t.mint.slice(0, 4) + '…', address: t.mint, amount: t.amount, priceUSD: price, valueUSD: v });
+    }
+    items.sort((x, y) => y.valueUSD - x.valueUSD);
+    const wTotal = items.reduce((s, t) => s + t.valueUSD, 0);
+    byWallet[addr] = { name: entry.w.name, totalUSD: wTotal, tokens: items };  // 键=base58 原样地址(大小写敏感)
+    totalUSD += wTotal;
+  }
+  return { totalUSD, byWallet };
+}
+
+// ============================================================
 // 主拉取（结构对齐 BSC /api/positions）
 // ============================================================
 let inFlight = null;
@@ -471,9 +548,28 @@ async function _fetchAllSol() {
     return nA - nB;
   });
 
+  // 钱包闲置余额: 按 fund-config 启用/勾选过滤; 失败沿用上轮快照, 不拖累主数据
+  const fundSel = fundWalletsSol();
+  let idle = null;
+  if (fundSel.length) {
+    const prev = lastIdleSol || cache.data?.idle || null;
+    if (prev && prev.byWallet) {
+      // 兜底快照按当前勾选过滤
+      const allow = new Set(fundSel.map(w => w.address));
+      const byWallet = {}; let t = 0;
+      for (const [a, w] of Object.entries(prev.byWallet)) { if (allow.has(a)) { byWallet[a] = w; t += w.totalUSD || 0; } }
+      idle = { totalUSD: t, byWallet };
+    }
+    try {
+      idle = await fetchIdleSol(fundSel);
+      lastIdleSol = idle;
+    } catch (e) { console.error('[SOL] idle balances failed:', e.message?.slice(0, 100)); }
+  }
+
   const result = {
     wallets,
     grandTotalUSD,
+    idle,
     timestamp: Date.now(),
     chain: 'sol',
     stats: { totalActive, totalInRange, totalOutOfRange, totalFees, walletsWithActiveLP, totalWallets: WALLETS.length },
@@ -577,7 +673,15 @@ function mountSolRoutes(app, adminGuard) {
   });
 }
 
-module.exports = { mountSolRoutes };
+// 后台踢一轮刷新 (fund 配置变更时由 server.js 调用, 不阻塞不清缓存)
+function kickSolRefresh() {
+  if (inFlight) return;
+  inFlight = _fetchAllSol()
+    .catch(e => console.error('[SOL] kick refresh failed:', e.message))
+    .finally(() => { inFlight = null; });
+}
+
+module.exports = { mountSolRoutes, kickSolRefresh };
 
 // --- 服务端定时自动刷新（与 BSC 同架构，不依赖前端触发）---
 setInterval(() => {
