@@ -96,6 +96,7 @@ const EVM_CHAINS = {
     coingeckoPlatform: null,              // coingecko 不收录 RH 链, 全靠池内价 + native 价
     entryFromLogs: true,                  // 建仓价值: 无子图, 从链上事件回溯 (详情面板显示差价)
     fundingFromLogs: true,                // 初始资金(净入金): 全链 Transfer 回溯 (仅 rh; rh RPC 无 trace, 原生 ETH 直转不可见)
+    noBatch: true,                        // rh RPC 对 JSON-RPC batch 悬死 (2026-09-06), 单请求正常
   },
 };
 
@@ -237,9 +238,11 @@ function chainState(chainId) {
       if (saved && saved.data) cache = saved;
     } catch {}
     state[chainId] = {
-      provider: new ethers.JsonRpcProvider(cfg.rpc),
+      // rh RPC 对 JSON-RPC batch 请求会悬死不响应 (2026-09-06 实测: 单请求 0.2s 正常,
+      // batch>=5 挂死) —— 禁用 ethers 层批处理; 聚合本来就靠 Multicall3, HTTP batch 纯多余
+      provider: new ethers.JsonRpcProvider(cfg.rpc, undefined, cfg.noBatch ? { batchMaxCount: 1 } : {}),
       tokenCache: {}, cache, createdFile, createdCache, posFile,
-      fetchInFlight: null, v4IdCache: {},
+      fetchInFlight: null, fetchStartedAt: 0, lastPublishStart: 0, v4IdCache: {},
     };
   }
   return state[chainId];
@@ -1767,12 +1770,19 @@ function normalizePosition(chainId, pos) {
 // --- 主拉取 (SWR 缓存, 与 server.js 同策略) ---
 const CACHE_TTL = 5 * 60 * 1000; // 2026-09-05 由 10min 调快
 // 立即触发一轮后台刷新 (钱包增删后使用; 老缓存继续对外服务, 不阻塞不清空)
+// in-flight 归属登记: 只有当前登记的 promise 结束时才清标志 —— 被看门狗放弃的僵尸轮
+// 迟到 settle 时不得误清新一轮的标志 (fetchInner 内另有 fetchGen 防僵尸写缓存)
+function trackFetch(chainId, p) {
+  const st = chainState(chainId);
+  p.finally(() => { if (st.fetchInFlight === p) st.fetchInFlight = null; }).catch(() => {});
+  st.fetchInFlight = p;
+  return p;
+}
 function kickRefresh(chainId) {
   const st = chainState(chainId);
   if (st.fetchInFlight) return;
-  st.fetchInFlight = fetchInner(chainId, false)
-    .catch(e => console.error(`[${chainId}] kick refresh failed:`, e.message))
-    .finally(() => { st.fetchInFlight = null; });
+  trackFetch(chainId, fetchInner(chainId, false)
+    .catch(e => console.error(`[${chainId}] kick refresh failed:`, e.message)));
 }
 async function fetchChainPositions(chainId, forceRefresh = false) {
   const st = chainState(chainId);
@@ -1780,19 +1790,19 @@ async function fetchChainPositions(chainId, forceRefresh = false) {
   if (!forceRefresh && fresh) return st.cache.data;
   if (!forceRefresh && st.cache.data) {
     if (!st.fetchInFlight) {
-      st.fetchInFlight = fetchInner(chainId, false)
-        .catch(e => console.error(`[${chainId}] bg refresh failed:`, e.message))
-        .finally(() => { st.fetchInFlight = null; });
+      trackFetch(chainId, fetchInner(chainId, false)
+        .catch(e => console.error(`[${chainId}] bg refresh failed:`, e.message)));
     }
     return st.cache.data;
   }
   if (st.fetchInFlight) return st.fetchInFlight;
-  st.fetchInFlight = fetchInner(chainId, forceRefresh).finally(() => { st.fetchInFlight = null; });
-  return st.fetchInFlight;
+  return trackFetch(chainId, fetchInner(chainId, forceRefresh));
 }
 
 async function fetchInner(chainId, forceRefresh) {
   const st = chainState(chainId);
+  const startedAt = Date.now();
+  st.fetchStartedAt = startedAt;
   const cfg = EVM_CHAINS[chainId];
   // 强刷不再清 v4IdCache: 枚举缓存有链上 balanceOf 计数做失效判据, 计数一致即可信;
   // 清掉会触发全部钱包的全链 Transfer 重扫 (rh 手动刷新慢的主因, RPC 紧张时还会雪崩)
@@ -1940,6 +1950,13 @@ async function fetchInner(chainId, forceRefresh) {
     wallets, grandTotalUSD, idle, timestamp: Date.now(),
     stats: { totalActive, totalInRange, totalOutOfRange, totalFees, walletsWithActiveLP, totalWallets: WALLETS.length },
   };
+  if (st.lastPublishStart > startedAt) {
+    // 比本轮更晚起跑的一轮已发布 (本轮是被看门狗放弃后迟到完成的僵尸轮): 不许旧盖新;
+    // 反之没有更新数据时僵尸轮照常发布 —— RPC 慢速期慢轮的工作不浪费
+    console.log(`[${chainId}] 迟到轮次结果作废 (晚于本轮起跑的数据已发布)`);
+    return result;
+  }
+  st.lastPublishStart = startedAt;
   st.cache = { data: result, timestamp: Date.now() };
   try { fs.writeFileSync(st.posFile, JSON.stringify(st.cache)); } catch {}
   console.log(`[${chainId}] Fetch done. ${wallets.length} wallets w/ positions, ${totalActive} active, total $${grandTotalUSD.toFixed(2)}`);
@@ -2047,14 +2064,27 @@ function mountEvmRoutes(app, adminGuard) {
   console.log(`EVM adapter mounted: ${Object.keys(EVM_CHAINS).map(c => `/api/${c}/*`).join(', ')}`);
 
   // 服务端定时自动刷新 (与 BSC/SOL 同架构): 每 10 分钟后台刷一轮, 不依赖前端访问触发
+  // 看门狗: 一轮 fetch 悬死 (RPC 半死连接 300s 超时×重试叠加, 甚至永不返回) 会让 fetchInFlight
+  // 永不清空, 之后每轮 auto 都被 skip, 缓存无限变陈旧 (2026-09-06 rh 实际发生, 卡死 30min+);
+  // 超过 FETCH_STUCK_MS 判定卡死, 放弃旧 promise 强制开新一轮 (归属/代际护栏防僵尸捣乱)
+  const FETCH_STUCK_MS = 15 * 60 * 1000; // 正常 rh 一轮 ~30s, RPC 降级期 5-9min 甚至更久;
+                                         // 被放弃的慢轮迟到完成仍可发布 (lastPublishStart 排序), 不白跑
   for (const chainId of Object.keys(EVM_CHAINS)) {
     setInterval(() => {
       const st = chainState(chainId);
-      if (st.fetchInFlight) { console.log(`[${chainId}][auto] skip: fetch in flight`); return; }
-      st.fetchInFlight = fetchInner(chainId, false)
+      if (st.fetchInFlight) {
+        const stuckMs = Date.now() - (st.fetchStartedAt || 0);
+        if (st.fetchStartedAt && stuckMs > FETCH_STUCK_MS) {
+          console.error(`[${chainId}][auto] fetch 卡死 ${(stuckMs / 60000).toFixed(0)}min, 放弃旧轮强制重启刷新`);
+          st.fetchInFlight = null;
+        } else {
+          console.log(`[${chainId}][auto] skip: fetch in flight`);
+          return;
+        }
+      }
+      trackFetch(chainId, fetchInner(chainId, false)
         .then(() => console.log(`[${chainId}][auto] scheduled refresh done`))
-        .catch(e => console.error(`[${chainId}][auto] scheduled refresh failed:`, e.message))
-        .finally(() => { st.fetchInFlight = null; });
+        .catch(e => console.error(`[${chainId}][auto] scheduled refresh failed:`, e.message)));
     }, CACHE_TTL);
     // 初始资金后台队列: 启动 90s 后首跑 (错开预热), 之后随 5min 刷新周期增量续扫 (每轮每钱包 1 段×2 方向)
     if (EVM_CHAINS[chainId].fundingFromLogs) {
@@ -2068,10 +2098,9 @@ function mountEvmRoutes(app, adminGuard) {
       if (st.fetchInFlight) return;
       if (st.cache.data && Date.now() - st.cache.timestamp < CACHE_TTL / 2) { console.log(`[${chainId}][auto] 预热跳过: 缓存还新鲜`); return; }
       console.log(`[${chainId}][auto] 启动预热刷新...`);
-      st.fetchInFlight = fetchInner(chainId, false)
+      trackFetch(chainId, fetchInner(chainId, false)
         .then(() => console.log(`[${chainId}][auto] 预热刷新完成`))
-        .catch(e => console.error(`[${chainId}][auto] 预热刷新失败:`, e.message))
-        .finally(() => { st.fetchInFlight = null; });
+        .catch(e => console.error(`[${chainId}][auto] 预热刷新失败:`, e.message)));
     }, delay);
   }
 }

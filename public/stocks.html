@@ -513,7 +513,7 @@ function detailRowHtml(t) {
         <td class="l"><span class="v-badge">V${p.v}</span> <b>${escH(p.pair)}</b> <span class="fee-chip">${escH(p.feeLabel)}</span>
           <a class="pool-link" href="https://app.uniswap.org/explore/pools/robinhood/${escH(p.key)}" target="_blank" rel="noopener">↗</a></td>
         <td>${fmtUsd(p.tvl)}</td>
-        <td>${fmtUsd(p.vol24)}</td>
+        <td>${fmtUsd(p.vol24)}${p.led && p.n24 != null ? ` <span style="color:var(--text-muted);font-size:9px">${p.n24}笔</span>` : (p.vol24 != null ? ' <span style="color:var(--text-muted);font-size:9px" title="账本未覆盖，量为 费÷费率 估算">≈</span>' : '')}</td>
         <td>${fmtUsd(p.fees24)}</td>
         <td class="d-day${hot(wx.d)}"${offTip}>${fmtPct(wx.d)}${off ? '<span style="color:var(--yellow);font-size:9px">*</span>' : ''}${spikeBadge(wx.x)}</td>
         <td${rTip ? ` title="${escH(rTip)}"` : ''}>${range}${share}</td>
@@ -522,9 +522,9 @@ function detailRowHtml(t) {
       </tr>`;
     }).join('');
     inner = `<div class="dtable-wrap"><table class="dtable">
-      <thead><tr><th class="l">池子</th><th>TVL</th><th>24h 量≈</th><th>24h 费</th><th>池日化${wl}</th><th>主力区间</th><th>主力日化${wl}</th><th class="l">现价位置</th></tr></thead>
+      <thead><tr><th class="l">池子</th><th>TVL</th><th>24h 量</th><th>24h 费</th><th>池日化${wl}</th><th>主力区间</th><th>主力日化${wl}</th><th class="l">现价位置</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
-      <div class="d-note">${openData.hidden > 0 ? `已隐藏 ${openData.hidden} 个 TVL &lt; $1,000 的尘埃池。` : ''}${openData.windowH > 0 && openData.windowH < 20 ? `<b>24h 口径费收采样窗口目前仅 ${openData.windowH.toFixed(1)}h（已折算成 24h，数据随采样积累到 24h 后最准）。</b>` : ''}主力区间 = 流动性 ≥ 70% 峰值的连续价格带（附 TVL 占比；峰值候选排除自身价值 &lt; TVL×2% 的尘埃密度尖峰——单 spacing 限价单密度极高但资金极少，会把主力区间骗到远离现价的孤点）；<b>USDG 对显示美元区间；非 USDG 对（股票/股票、股票/WETH）显示池内比价区间</b>（如 4.2210 – 4.3860 PLTR/SPY = 每 1 SPY 值多少 PLTR，与 Uniswap 池页同口径，悬停看现价比价与美元折算）；费收 = 链上 feeGrowthGlobal 累计器差分（每单位流动性的实收费，动态费池亦精确），24h 费 ≈ 单位费收 × 当前活跃流动性；池日化 = 窗口内费收 ÷ 全池 TVL（折算 24h）；主力日化 = 单位流动性窗口费收 ÷ 主力区间单位仓位价值（即在主力区间做 LP 的日收益率，未年化）；24h 量 ≈ 费 ÷ 费率（动态费池无固定费率不估）；<b>「日化窗口」当前为 ${winLabel(curWin)}</b>——只改变池日化/主力日化两列的统计窗口（数值均折算为 24h 口径便于对比），24h 量/24h 费两列始终为 24h 口径；短窗数据来自每 5 分钟的常驻链上细采样（仅 TVL≥$1,000 的池）；日化带黄色 * = 实际差分窗口与所选窗口偏差较大（新池/采样尚未积累，悬停看实际窗口）；日化带 ⚠ = 窗口内有采样段被<b>伪尖峰护栏</b>剔除——套利单打穿尘埃流动性区间时，feeGrowth 差分会把极小的实付费放大成几百倍（隐含成交量 &gt; TVL×50/小时即物理不可能），剔除后数值即当前所示，整窗剔完仍不合理则显示 —。</div>`;
+      <div class="d-note">${openData.hidden > 0 ? `已隐藏 ${openData.hidden} 个 TVL &lt; $1,000 的尘埃池。` : ''}${openData.windowH > 0 && openData.windowH < 20 ? `<b>24h 口径费收采样窗口目前仅 ${openData.windowH.toFixed(1)}h（已折算成 24h，数据随采样积累到 24h 后最准）。</b>` : ''}主力区间 = 流动性 ≥ 70% 峰值的连续价格带（附 TVL 占比；峰值候选排除自身价值 &lt; TVL×2% 的尘埃密度尖峰——单 spacing 限价单密度极高但资金极少，会把主力区间骗到远离现价的孤点）；<b>USDG 对显示美元区间；非 USDG 对（股票/股票、股票/WETH）显示池内比价区间</b>（如 4.2210 – 4.3860 PLTR/SPY = 每 1 SPY 值多少 PLTR，与 Uniswap 池页同口径，悬停看现价比价与美元折算）；费/量 = <b>逐笔 swap 日志真值</b>（每 5 分钟增量扫描真实池的链上 Swap 事件逐笔入账；V4 事件自带每笔费率，动态费池亦精确；量 = 双边名义额均值，量旁小字 = 窗口内真实成交笔数）；<b>费为 LP 实收口径</b>——rh 链在收协议费（V3 按档从费中抽 1/4~1/6，V4 按 protocolFee pips，均链上实测），已逐笔扣除，与池合约 feeGrowth 记账一致；池日化 = 窗口内费收 ÷ 全池 TVL（折算 24h）；主力日化 = 单位流动性费收 ÷ 主力区间单位仓位价值（即在主力区间做 LP 的日收益率，未年化；取自池合约 feeGrowth 精确账，对多 tick 穿越大单也准）；量旁带 ≈ 的池 = 账本暂未覆盖（新入库或账本临时落后），退回 feeGrowth 累计器差分估算，此时量 ≈ 费 ÷ 费率（动态费池无量）；<b>「日化窗口」当前为 ${winLabel(curWin)}</b>——只改变池日化/主力日化两列的统计窗口（数值均折算为 24h 口径便于对比），24h 量/24h 费两列始终为 24h 口径；日化带黄色 * = 实际数据窗口与所选窗口偏差较大（新池/覆盖尚未积累，悬停看实际窗口）；日化带 ⚠ = 仅出现在估算兜底路径——窗口内有采样段被<b>伪尖峰护栏</b>剔除（套利单打穿尘埃流动性区间时差分会把极小实付费放大几百倍），账本真值路径无此问题。</div>`;
   }
   let ageStr = '';
   if (openData && openData.updatedAt) {

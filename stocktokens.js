@@ -234,7 +234,7 @@ async function checkLiquidity(entries) {
 async function scanPools() {
   if (poolScanning) return poolScanning;
   poolScanning = (async () => {
-    if (!rhProvider) rhProvider = new ethers.JsonRpcProvider(RH_RPC, undefined, { staticNetwork: true });
+    if (!rhProvider) rhProvider = new ethers.JsonRpcProvider(RH_RPC, undefined, { staticNetwork: true, batchMaxCount: 1 });
     const addrSet = new Set(registry.map(t => (t.addr || '').toLowerCase()).filter(Boolean));
     // 注册表出现新代币: 其历史池子此前在入库时被过滤掉了, 只能全量重扫 (罕见, 后台自动)
     const stored = new Set(poolState.addrs || []);
@@ -283,11 +283,11 @@ async function scanPools() {
 }
 
 // --- 池子详情 (点击行展开: 每池 量/费/日化 + 主力区间) -------------------------
-// 费收不扫 swap 日志 (rh 链一天 ~460 万笔 swap, RPC 单响应限 1 万条, 扫不动)——
-// 用链上原生累计器 feeGrowthGlobal{0,1}X128 (每单位活跃 L 的累计费, X128 定点):
+// 费/量主路径 = 滚动 swap 日志账本 (见下方 ledger 段): 逐笔真值, 12 档窗口从 5min 桶求和。
+// feeGrowthGlobal{0,1}X128 差分采样降为兜底 (账本未覆盖的池/账本落后 >10min 时):
 // 双环采样: ①全量扫描每 30min 采一次全部真实池, 留 25h 环形 (长窗口基准);
 //           ②细采样每 5min 常驻采 TVL≥$1000 的池, 留 ~2.5h 环形 (短窗口/突增探测基准)。
-// 日化按窗口差分: 每个窗口取两环中最接近「now − 窗口」的样本, 按实际时长折算 24h 口径。
+// 兜底路径按窗口差分并带伪尖峰护栏 (账本路径不需要——真值无放大机制)。
 // 流动性分布 (主力区间 = L≥70% 峰值的连续区间) 走 tickBitmap/ticks + Multicall 聚合。
 const WINDOWS = [5, 10, 15, 30, 45, 60, 120, 180, 240, 360, 720, 1440];   // 分钟; 1440 = 主口径
 // 伪尖峰护栏阈值: 差分的隐含假设是「挣费时活跃 L≈当前 L」, 套利单打穿尘埃流动性区间时
@@ -473,6 +473,9 @@ async function sampleFeeGrowth(pools) {
 // 不合理的段计 0 并计入 x; 剔完整窗合计仍不合理 (多段慢渗) → 整窗标异常 (d/m 置 null 只留 x)。
 function computeWins(st, nf, nowMs, samples, bestByWin) {
   st.win = {}; st.dayPct = null; st.fees24 = null; st.vol24 = null; st.winH = 0; st.mainDaily = null;
+  st.n24 = null; st._led = 0;
+  // 滚动 swap 日志账本优先 (逐笔真值, 无 L 假设无尖峰问题); 未覆盖/落后时退回 feeGrowth 差分估算
+  if (ledgerWins(st, nf, nowMs, samples, bestByWin)) return;
   if (!nf) return;
   const rate = (st.v === 4 && (st.fee & 0x800000)) ? 0 : st.fee / 1e6;
   const Lnow = Number(st._L);
@@ -537,7 +540,7 @@ function computeWins(st, nf, nowMs, samples, bestByWin) {
 
 // 一组池子的中性统计 (不绑定股票视角); 全局日化扫描与单代币实时刷新共用
 async function computePoolSet(pools) {
-  if (!rhProvider) rhProvider = new ethers.JsonRpcProvider(RH_RPC, undefined, { staticNetwork: true });
+  if (!rhProvider) rhProvider = new ethers.JsonRpcProvider(RH_RPC, undefined, { staticNetwork: true, batchMaxCount: 1 });
   // ① feeGrowthGlobal 采样: 每单位活跃 L 的链上累计费收, 与历史样本按窗口差分
   const fgNow = await stage('feegrowth', () => sampleFeeGrowth(pools));
   const nowMs = Date.now();
@@ -554,15 +557,20 @@ async function computePoolSet(pools) {
   const liqRes = await stage('liq', () => mc3(liqCalls));
   await stage('decimals', () => ensureDecimals(pools.flatMap(p => [p.t0, p.t1]).filter(a => a !== '0x0000000000000000000000000000000000000000')));
 
-  // ③ tickBitmap: 每池 当前word±3
+  // ③ tickBitmap: 每池 当前word±N —— N 按 tickSpacing 换算为恒定 ±46052 tick (≈±100 倍价域)。
+  // 固定 ±3 word 时窗口宽度随 ts 缩放: ts=60 覆盖 ±100x 没问题 (V3 balanceOf 普查 112 池仅 1 个 <0.85),
+  // 但 ts=5 只盖 ±1.47x —— 宽区间 LP 资金被截断 (SPY/PLTR 池实测少 21%), TVL 偏小→池日化虚高。
   const bmCalls = [], bmMeta = [];
+  const curTickOf = pools.map(() => null);
   pools.forEach((p, i) => {
     if (!s0res[i] || !p.ts) return;
     const tick = p.v === 4
       ? Number(SV2_IFACE.decodeFunctionResult('getSlot0', s0res[i])[1])
       : Number(V3P_IFACE.decodeFunctionResult('slot0', s0res[i])[1]);
+    curTickOf[i] = tick;
     const w = Math.floor(tick / p.ts) >> 8;
-    for (let d = -BITMAP_HALF; d <= BITMAP_HALF; d++) {
+    const half = Math.min(180, Math.max(BITMAP_HALF, Math.ceil(46052 / (p.ts * 256))));
+    for (let d = -half; d <= half; d++) {
       bmMeta.push({ i, w: w + d });
       bmCalls.push(p.v === 4
         ? { target: RH_STATE_VIEW, callData: SV2_IFACE.encodeFunctionData('getTickBitmap', [p.id, w + d]) }
@@ -581,10 +589,14 @@ async function computePoolSet(pools) {
     }
   });
 
-  // ④ tick liquidityNet
+  // ④ tick liquidityNet (>600 tick 的池取离现价最近的 600 个——远端 spam 限价单挤掉近端会破坏分段重建)
   const tkCalls = [], tkMeta = [];
   pools.forEach((p, i) => {
-    for (const t of ticksOf[i].slice(0, 600)) {
+    const ct = curTickOf[i];
+    const sel = ticksOf[i].length > 600 && ct != null
+      ? [...ticksOf[i]].sort((a, b) => Math.abs(a - ct) - Math.abs(b - ct)).slice(0, 600)
+      : ticksOf[i];
+    for (const t of sel) {
       tkMeta.push({ i, t });
       tkCalls.push(p.v === 4
         ? { target: RH_STATE_VIEW, callData: SV2_IFACE.encodeFunctionData('getTickLiquidity', [p.id, t]) }
@@ -712,6 +724,8 @@ function presentPool(sym, al, s) {
     feeLabel: s.v === 4 && (s.fee & 0x800000) ? '动态费' : (s.fee / 10000) + '%',
     key: s.key,
     tvl: s.tvl, vol24: s.vol24, fees24: s.fees24, dayPct: s.dayPct, winH: s.winH,
+    n24: s.n24 != null ? s.n24 : undefined,          // 24h 真实 swap 笔数 (仅账本覆盖的池)
+    led: s._led ? 1 : undefined,                     // 费/量来自逐笔 swap 账本 (非估算)
     win: s.win || {},
     mainPrice, mainRatio, mainShare: s.mainShare, mainDaily: s.mainDaily, inMain: s.inMain,
     curPrice: stockIs0 ? hp * s.p1usd : (s.p0usd > 0 && hp > 0 ? s.p0usd / hp : 0),
@@ -754,6 +768,7 @@ async function getTokenPoolDetail(sym, force) {
   if (c && c.promise) return c.promise;
   const pools = poolState.pools.filter(p => (p.t0 === al || p.t1 === al) && isRealPool(p));
   if (!pools.length) return { sym, updatedAt: Date.now(), pools: [], hidden: 0, note: poolBacklog ? 'scanning' : 'none' };
+  if (force) await ledgerScan().catch(() => {});   // 实时刷新连账本一起追到链头
   const promise = computePoolSet(pools)
     .then(r => {
       const data = packDetail(sym, r.stats.map(s => presentPool(sym, al, s)), r.windowH);
@@ -820,7 +835,7 @@ let fineSampling = null;
 async function fineSample() {
   if (fineSampling || sweeping || !fineKeys.size) return;
   fineSampling = (async () => {
-    if (!rhProvider) rhProvider = new ethers.JsonRpcProvider(RH_RPC, undefined, { staticNetwork: true });
+    if (!rhProvider) rhProvider = new ethers.JsonRpcProvider(RH_RPC, undefined, { staticNetwork: true, batchMaxCount: 1 });
     await ensureRegistry();
     rebuildAddrSym();
     const pools = poolState.pools.filter(p => isRealPool(p) && fineKeys.has(p.v === 4 ? p.id : p.pa));
@@ -841,6 +856,267 @@ async function fineSample() {
   })().catch(e => console.error('[stocktokens] fine sample failed:', e.message))
     .finally(() => { fineSampling = null; });
   return fineSampling;
+}
+
+// --- 滚动 swap 日志账本 (费/量根治: 逐笔真值取代 feeGrowth 差分估算) ----------
+// feeGrowth 差分是估算: 段内 MM 调仓失真 (SKHY 实测 9.3x)、尖峰护栏剔段陪葬真费、
+// 量=费÷费率反推、动态费池无量。「扫日志不可行」旧结论只适用无过滤全链 (460 万笔/天);
+// 真实池仅占全链 swap ~11% (探针实测): 按池过滤后每 5min 增量 ~3000 块 =
+// V3 地址数组 1 发 + V4 poolId 300/chunk ~5 发 ≈ 6 请求/7s/~2250 条, 完全可行。
+// 每笔: V3 输入侧(池视角正=流入)×费率; V4 事件自带实收 fee(uint24, 动态费亦精确),
+// 输入侧=负值(swapper 视角, NatSpec 是错的)。按 5min 桶聚合
+// {n, fee0, fee1, vol0, vol1, perL0, perL1} (人类单位; perL=每单位事件时 L 的费, 主力日化用),
+// 12 档窗口从桶求和按实际覆盖折算 24h。覆盖自 since[key] 起 (bootstrap 回填 25h,
+// 新池自进入真实池集起), 覆盖不足时窗口黄 * 同旧语义; 账本落后 >10min 整池退回 feeGrowth。
+const LEDGER_FILE = path.join(__dirname, 'stocktokens-swapledger.json');
+const T_V3_SWAP = ethers.id('Swap(address,address,int256,int256,uint160,uint128,int24)');
+const T_V4_SWAP = ethers.id('Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)');
+const LEDGER_BUCKET = 5 * 60 * 1000;       // 聚合桶宽
+const LEDGER_KEEP = 26 * 3600 * 1000;      // 桶保留 (24h 窗口 + 余量)
+const LEDGER_BACKFILL = 25 * 3600;         // bootstrap 回填秒数
+const LEDGER_SEG = 3000;                   // getLogs 段长 (9000 会 "log query timed out"; 出错自适应 /3, 下限 100)
+const LEDGER_CHUNK = 300;                  // V3 地址数组 / V4 poolId topic 数组分块
+const LEDGER_STALE = 10 * 60 * 1000;       // 账本落后此值则退回 feeGrowth 估算
+let ledger = { last: 0, lastTs: 0, since: {}, buckets: {}, pf: {} };
+let ledgerScanning = null;
+let pfAt = 0;   // 协议费缓存刷新时间
+const PF_TTL = 30 * 60 * 1000;
+try {
+  const l = JSON.parse(fs.readFileSync(LEDGER_FILE, 'utf8'));
+  if (l && l.last > 0 && l.buckets && l.since) ledger = l;
+} catch {}
+function saveLedger() {
+  try { fs.writeFileSync(LEDGER_FILE, JSON.stringify(ledger)); } catch {}
+}
+function pruneLedger() {
+  const cut = ledger.lastTs - LEDGER_KEEP;
+  for (const bt in ledger.buckets) if (+bt < cut) delete ledger.buckets[bt];
+}
+// data 里每个 word 都是 256 位补码 (int128 亦按 256 位符号扩展)
+const i256 = h => { const v = BigInt(h); return v >> 255n ? v - (1n << 256n) : v; };
+const absN = v => Number(v < 0n ? -v : v);
+
+function bucketAdd(ts, key, f0, f1, v0, v1, L) {
+  const bt = Math.floor(ts / LEDGER_BUCKET) * LEDGER_BUCKET;
+  const b = (ledger.buckets[bt] = ledger.buckets[bt] || {});
+  const e = (b[key] = b[key] || [0, 0, 0, 0, 0, 0, 0]);
+  e[0]++; e[1] += f0; e[2] += f1; e[3] += v0; e[4] += v1;
+  if (L > 0) { e[5] += f0 / L; e[6] += f1 / L; }
+}
+
+// 协议费设置 (rh 链在收 protocol fee, 审计实锤 2026-09-06): V3 slot0.feeProtocol 按档
+// 1/4 (0.05% 池) 或 1/6 (0.3% 池) 从费里抽走; V4 getSlot0.protocolFee 按方向各 12bit pips
+// (常见 1000=0.1%, hook 池可自设如 339), 且 **V4 Swap 事件的 fee 字段=含协议费的总费率**
+// (实测比值 1.1132/1.1647 vs 预测 1.1127/1.1649, 千分位吻合)。
+// LP 实收 = 总费 − 协议抽成 = feeGrowth 记账口径; 仪表盘日化用 LP 实收, 入账时即扣。
+// 设置可由治理改动但极罕见, 30min 刷一次, 持久化在 ledger.pf。
+async function refreshProtocolFees(pools) {
+  if (Date.now() - pfAt < PF_TTL && ledger.pf && Object.keys(ledger.pf).length) return;
+  const calls = pools.map(p => p.v === 4
+    ? { target: RH_STATE_VIEW, callData: SV2_IFACE.encodeFunctionData('getSlot0', [p.id]) }
+    : { target: p.pa, callData: V3P_IFACE.encodeFunctionData('slot0', []) });
+  const res = await mc3(calls);
+  const pf = (ledger.pf = ledger.pf || {});
+  res.forEach((r, i) => {
+    if (!r) return;
+    const p = pools[i];
+    try {
+      if (p.v === 4) pf[p.id] = Number(SV2_IFACE.decodeFunctionResult('getSlot0', r)[2]);
+      else pf[p.pa] = Number(V3P_IFACE.decodeFunctionResult('slot0', r)[5]);
+    } catch {}
+  });
+  pfAt = Date.now();
+}
+
+// 二分+插值找目标时刻的块号 (bootstrap 用, ±2min 足够)
+async function findBlockAt(targetSec, head, headTs) {
+  let guess = head - Math.round((headTs - targetSec) * 10);   // ~10 块/s 初猜
+  for (let i = 0; i < 6; i++) {
+    guess = Math.max(1, Math.min(head - 1, guess));
+    const g = await rhProvider.getBlock(guess);
+    const err = g.timestamp - targetSec;
+    if (Math.abs(err) < 120) return guess;
+    const bps = (head - guess) / Math.max(1, headTs - g.timestamp);   // 块/秒
+    guess -= Math.round(err * (bps > 0 && bps < 100 ? bps : 10));
+  }
+  return Math.max(1, guess);
+}
+
+async function ledgerScan() {
+  if (ledgerScanning) return ledgerScanning;
+  ledgerScanning = (async () => {
+    if (!rhProvider) rhProvider = new ethers.JsonRpcProvider(RH_RPC, undefined, { staticNetwork: true, batchMaxCount: 1 });
+    await ensureRegistry();
+    rebuildAddrSym();
+    const pools = poolState.pools.filter(isRealPool);
+    if (!pools.length) return;
+    await ensureDecimals(pools.flatMap(p => [p.t0, p.t1]).filter(a => a !== '0x0000000000000000000000000000000000000000'));
+    await refreshProtocolFees(pools);
+    const headBlk = await rhProvider.getBlock('latest');
+    const head = headBlk.number, headTs = headBlk.timestamp;
+    if (!ledger.last) {   // bootstrap: 回填 25h
+      const from = await findBlockAt(headTs - LEDGER_BACKFILL, head, headTs);
+      const b0 = await rhProvider.getBlock(from);
+      ledger.last = from - 1;
+      ledger.lastTs = b0.timestamp * 1000;
+      console.log(`[stocktokens] ledger bootstrap: backfill from block ${from} (${new Date(ledger.lastTs).toISOString()}), ${head - from} blocks to go`);
+    }
+    if (ledger.last >= head) return;
+    const v3p = {}, v4p = {};
+    for (const p of pools) {
+      const k = p.v === 4 ? p.id : p.pa;
+      if (ledger.since[k] == null) ledger.since[k] = ledger.lastTs;   // 覆盖起点 = 入集时账本时刻
+      if (p.v === 3) v3p[p.pa] = p; else v4p[p.id.toLowerCase()] = p;
+    }
+    const v3addrs = Object.keys(v3p), v4ids = Object.keys(v4p);
+    const t0 = Date.now();
+    let b = ledger.last + 1, anchorB = ledger.last, anchorTs = ledger.lastTs, seg = LEDGER_SEG;
+    let nlogs = 0, nseg = 0, fails = 0;
+    while (b <= head) {
+      const end = Math.min(b + seg - 1, head);
+      const batches = [];
+      try {
+        for (let i = 0; i < v3addrs.length; i += LEDGER_CHUNK) {
+          batches.push(await getLogsRetry(rhProvider, { address: v3addrs.slice(i, i + LEDGER_CHUNK), topics: [T_V3_SWAP], fromBlock: b, toBlock: end }));
+          await sleep(80);
+        }
+        for (let i = 0; i < v4ids.length; i += LEDGER_CHUNK) {
+          batches.push(await getLogsRetry(rhProvider, { address: RH_V4_POOL_MANAGER, topics: [T_V4_SWAP, v4ids.slice(i, i + LEDGER_CHUNK)], fromBlock: b, toBlock: end }));
+          await sleep(80);
+        }
+      } catch (e) {
+        // 超限/超时/瞬时错误一律先降段重试 (降段对所有错误都是安全方向), 失败过多才止步
+        fails++;
+        if (fails <= 12 && seg > 100) { seg = Math.max(100, Math.floor(seg / 3)); await sleep(400); continue; }
+        console.error(`[stocktokens] ledger scan stop at block ${b} (seg ${seg}, fails ${fails}):`, String(e.message || e).slice(0, 160));
+        break;   // 止步, 已扫到 b-1, 下轮续 (不丢数据)
+      }
+      const blkEnd = end === head ? headBlk : await rhProvider.getBlock(end).catch(() => null);
+      if (!blkEnd) break;
+      const tsEnd = blkEnd.timestamp * 1000;
+      const rate = end > anchorB ? (tsEnd - anchorTs) / (end - anchorB) : 0;
+      for (const logs of batches) {
+        for (const l of logs) {
+          const ts = anchorTs + (l.blockNumber - anchorB) * rate;
+          const d = l.data;
+          if (d.length < 2 + 64 * 5) continue;
+          if (l.address.toLowerCase() === RH_V4_POOL_MANAGER.toLowerCase()) {
+            const p = v4p[(l.topics[1] || '').toLowerCase()];
+            if (!p || d.length < 2 + 64 * 6) continue;
+            const a0 = i256('0x' + d.slice(2, 66)), a1 = i256('0x' + d.slice(66, 130));
+            const L = Number(BigInt('0x' + d.slice(194, 258)));
+            const feePpm = parseInt(d.slice(322, 386), 16) || 0;   // 事件 fee = 含协议费的总费率
+            const h0 = absN(a0) / 10 ** (decCache[p.t0] ?? 18);
+            const h1 = absN(a1) / 10 ** (decCache[p.t1] ?? 18);
+            // V4 swapper 视角: 负 = swapper 付出 = 输入侧, 费从输入侧收;
+            // LP 实收费率 = 事件总费率 − 输入方向协议费 pips (0for1=低 12bit, 1for0=高 12bit)
+            const pf4 = ledger.pf[p.id] || 0;
+            const eff0 = Math.max(0, feePpm - (pf4 & 0xfff)), eff1 = Math.max(0, feePpm - (pf4 >> 12));
+            bucketAdd(ts, p.id, a0 < 0n ? h0 * eff0 / 1e6 : 0, a1 < 0n ? h1 * eff1 / 1e6 : 0, h0, h1, L);
+          } else {
+            const p = v3p[l.address.toLowerCase()];
+            if (!p) continue;
+            const a0 = i256('0x' + d.slice(2, 66)), a1 = i256('0x' + d.slice(66, 130));
+            const L = Number(BigInt('0x' + d.slice(194, 258)));
+            const h0 = absN(a0) / 10 ** (decCache[p.t0] ?? 18);
+            const h1 = absN(a1) / 10 ** (decCache[p.t1] ?? 18);
+            // V3 池子视角: 正 = 流入池子 = 输入侧; LP 实收 = 费 × (1 − 1/feeProtocol 该侧 nibble)
+            const fp = ledger.pf[p.pa] || 0;
+            const x0 = fp & 0xf, x1 = fp >> 4;
+            const rt0 = p.fee / 1e6 * (x0 > 0 ? 1 - 1 / x0 : 1);
+            const rt1 = p.fee / 1e6 * (x1 > 0 ? 1 - 1 / x1 : 1);
+            bucketAdd(ts, p.pa, a0 > 0n ? h0 * rt0 : 0, a1 > 0n ? h1 * rt1 : 0, h0, h1, L);
+          }
+          nlogs++;
+        }
+      }
+      ledger.last = end; ledger.lastTs = tsEnd;
+      anchorB = end; anchorTs = tsEnd;
+      b = end + 1;
+      nseg++;
+      fails = 0;   // 计数语义 = 连续失败 (长回填会零散撞上瞬时超时, 累计计数会误停)
+      if (nseg % 40 === 0) {
+        pruneLedger(); saveLedger();
+        console.log(`[stocktokens] ledger catchup: at block ${end}, +${nlogs} swaps, ${((Date.now() - t0) / 1000).toFixed(0)}s`);
+      }
+      if (seg < LEDGER_SEG) seg = Math.min(LEDGER_SEG, seg * 2);   // 降段后逐步恢复
+      await sleep(120);
+    }
+    pruneLedger();
+    saveLedger();
+    if (nseg) console.log(`[stocktokens] ledger: +${nlogs} swaps → block ${ledger.last} (${nseg} segs ${((Date.now() - t0) / 1000).toFixed(0)}s, lag ${((Date.now() - ledger.lastTs) / 60000).toFixed(1)}min)`);
+  })().catch(e => console.error('[stocktokens] ledger scan failed:', String(e.message || e).slice(0, 300)))
+    .finally(() => { ledgerScanning = null; });
+  return ledgerScanning;
+}
+
+// 账本窗口计算: 覆盖足够时替代 feeGrowth 差分, 填好 st.win/dayPct/fees24/vol24/... 返 true。
+// 窗口起点取整到桶边界 (bFrom ≤ 理想起点), 覆盖时长 = lastTs - bFrom, 按实际覆盖折算 24h;
+// 费/量按当前池上下文价格 (p0usd/p1usd, ≤30min 旧) 折美元, 量 = 双边名义额均值。
+// 主力日化优先用 Δfg 差分 (链上精确 per-L 账): 多 tick 穿越 swap 在极端 L 方差池
+// (如套利通道池) 事件只带终态 L, 账本 perL 近似会失真 (审计实测单侧可偏 5 倍);
+// Δfg 无此问题且无需尖峰护栏 (perL 本身无 ×L 放大机制); 无样本时退回账本 perL。
+function ledgerWins(st, nf, nowMs, samples, bestByWin) {
+  if (!ledger.last || nowMs - ledger.lastTs > LEDGER_STALE) return false;
+  const since = ledger.since[st.key];
+  if (since == null) return false;
+  const end = ledger.lastTs;
+  const rows = [];
+  for (const bt in ledger.buckets) {
+    const e = ledger.buckets[bt][st.key];
+    if (e) rows.push([+bt, e]);
+  }
+  let any = false;
+  for (const wm of WINDOWS) {
+    const bFrom = Math.floor(Math.max(nowMs - wm * 60000, since) / LEDGER_BUCKET) * LEDGER_BUCKET;
+    const covered = end - bFrom;
+    if (covered < 90 * 1000) continue;
+    let n = 0, f0 = 0, f1 = 0, v0 = 0, v1 = 0, pl0 = 0, pl1 = 0;
+    for (const [bt, e] of rows) {
+      if (bt < bFrom) continue;
+      n += e[0]; f0 += e[1]; f1 += e[2]; v0 += e[3]; v1 += e[4]; pl0 += e[5]; pl1 += e[6];
+    }
+    const scale = 86400000 / covered;
+    const fees = (f0 * st.p0usd + f1 * st.p1usd) * scale;
+    const vol = (v0 * st.p0usd + v1 * st.p1usd) / 2 * scale;
+    const dayPct = st.tvl > 0 ? fees / st.tvl * 100 : null;
+    let mainDaily = null;
+    if (nf && st._vperl > 0) {
+      const target = nowMs - wm * 60000;
+      let rf = null, rAt = 0;
+      const gb = bestByWin && bestByWin[wm];
+      if (gb && gb.fg[st.key]) { rf = gb.fg[st.key]; rAt = gb.at; }
+      else if (samples) {
+        let bd = Infinity;
+        for (const s of samples) {
+          if (!s.fg[st.key]) continue;
+          const dd = Math.abs(s.at - target);
+          if (dd < bd) { bd = dd; rf = s.fg[st.key]; rAt = s.at; }
+        }
+      }
+      if (rf && nowMs - rAt > 60000) {
+        const g0 = Number(BigInt(nf[0]) - BigInt(rf[0])) / 2 ** 128 / 10 ** st.dec0 * st.p0usd;
+        const g1 = Number(BigInt(nf[1]) - BigInt(rf[1])) / 2 ** 128 / 10 ** st.dec1 * st.p1usd;
+        if (g0 >= 0 && g1 >= 0) mainDaily = (g0 + g1) * (86400000 / (nowMs - rAt)) / st._vperl * 100;
+      }
+    }
+    if (mainDaily == null) {   // 无 fg 样本: 账本 perL 兜底
+      const perL = (pl0 * st.p0usd + pl1 * st.p1usd) * scale;
+      mainDaily = st._vperl > 0 ? perL / st._vperl * 100 : null;
+    }
+    st.win[wm] = {
+      d: dayPct == null ? null : +dayPct.toPrecision(4),
+      m: mainDaily == null ? null : +mainDaily.toPrecision(4),
+      h: +(covered / 3600000).toFixed(2),
+    };
+    any = true;
+    if (wm === 1440) {
+      st.dayPct = dayPct; st.fees24 = fees; st.vol24 = vol;
+      st.winH = covered / 3600000; st.mainDaily = mainDaily; st.n24 = n;
+    }
+  }
+  if (any) st._led = 1;
+  return any;
 }
 
 // --- 刷新 -------------------------------------------------------------------
@@ -973,7 +1249,13 @@ function mountStockTokens(app) {
     }
   });
   // 短窗细采样常驻定时: 采样必须连续积累才有短窗历史 (计算/发布零 RPC, 采样 2~4s/轮)
-  setInterval(() => { fineSample(); }, FINE_TTL);
+  // 账本先扫后采: fineSample 的重算/发布用上刚更新的账本 (顺序保证短窗覆盖时长为正)
+  setInterval(async () => {
+    try { await ledgerScan(); } catch {}
+    fineSample();
+  }, FINE_TTL);
+  // 启动 30s 后踢一次账本 (bootstrap 回填 25h 约 6~15min, 后台跑, 期间窗口自动退回 feeGrowth)
+  setTimeout(() => { ledgerScan(); }, 30 * 1000);
 }
 
-module.exports = { mountStockTokens };
+module.exports = { mountStockTokens, _ledger: { ledgerScan, ledgerWins, state: () => ledger } };
