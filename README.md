@@ -26,3 +26,8 @@ node server.js
 - `WALLETS` — 钱包地址列表
 - `GRAPH_KEYS` — The Graph API Keys
 - `PORT` — 监听端口
+
+## 关于「Robinhood 股票代币 × 美股成交额」页
+2026-09-06 起该页面拆分为独立项目（独立进程/端口/数据目录），本仓库不再包含其代码。
+本仪表盘仅保留一处松耦合：`evm-adapter.js` 只读该项目数据目录的 registry/cache 两个文件
+做 rh 链闲置余额定价（`STOCKTOKENS_DIR` 可配，缺失自动降级）。

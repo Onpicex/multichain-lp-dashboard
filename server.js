@@ -1645,14 +1645,8 @@ try {
   console.error('EVM adapter failed to mount:', e.message);
 }
 
-// --- Robinhood 股票代币 x 美股成交额 (/api/stocktokens) ---
-try {
-  const { mountStockTokens } = require('./stocktokens');
-  mountStockTokens(app);
-  console.log('StockTokens mounted (/api/stocktokens)');
-} catch (e) {
-  console.error('StockTokens failed to mount:', e.message);
-}
+// --- Robinhood 股票代币 x 美股成交额: 2026-09-06 拆分为独立项目 /home/ubuntu/rh-stocktokens ---
+// (独立进程 :5180 + rh-stocktokens.service; nginx 直接反代, 与本服务再无代码关系)
 
 // --- LP 出区间 Telegram 通知 (哨兵 bot, /api/notify/*) ---
 try {

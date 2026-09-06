@@ -1465,17 +1465,20 @@ async function getUSDPrices(chainId, tokenAddresses, positionsData) {
 // 垃圾空投币天然进不了候选集, 无需再做 spam 过滤, 仅滤 <$1 灰尘
 const ERC20_BAL_ABI = ['function balanceOf(address) view returns (uint256)'];
 const MC3_NATIVE_ABI = ['function getEthBalance(address addr) view returns (uint256)'];
+// rh 股票代币注册表/行情来自独立项目 rh-stocktokens (2026-09-06 拆分): 只读其数据目录做
+// 闲置余额定价——文档化松耦合, 文件缺失/项目停用时 catch 兜底自动降级
+const STOCKS_DIR = process.env.STOCKTOKENS_DIR || path.join(__dirname, '..', 'rh-stocktokens');
 let rhRegistryCache = { list: null, ts: 0 };
 function rhStockTokens() {
   if (rhRegistryCache.list && Date.now() - rhRegistryCache.ts < 3600e3) return rhRegistryCache.list;
   try {
-    const reg = JSON.parse(fs.readFileSync(path.join(__dirname, 'stocktokens-registry.json'), 'utf8'));
+    const reg = JSON.parse(fs.readFileSync(path.join(STOCKS_DIR, 'stocktokens-registry.json'), 'utf8'));
     rhRegistryCache = { list: reg.map(t => ({ addr: t.addr.toLowerCase(), sym: t.sym })), ts: Date.now() };
   } catch { rhRegistryCache = { list: [], ts: Date.now() }; }
   return rhRegistryCache.list;
 }
 function rhStockQuotes() {
-  try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'stocktokens-cache.json'), 'utf8')).quotes || {}; }
+  try { return JSON.parse(fs.readFileSync(path.join(STOCKS_DIR, 'stocktokens-cache.json'), 'utf8')).quotes || {}; }
   catch { return {}; }
 }
 // 候选 ERC20 集合 (小写地址); lpTokenAddrs = 本轮 LP 头寸涉及的 token
