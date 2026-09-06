@@ -75,6 +75,41 @@
   .win-sel:focus, .win-sel:hover { border-color: var(--accent); }
   .hint { font-size: 11px; color: var(--text-muted); }
 
+  /* 多重条件筛选 */
+  .filter-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--surface); color: var(--text-dim); border: 1px solid var(--border);
+    font: 600 12px var(--font); padding: 8px 12px; border-radius: 8px; cursor: pointer;
+  }
+  .filter-btn:hover { border-color: var(--accent); color: var(--text); }
+  .filter-btn.on { background: var(--accent-dim); color: var(--accent); border-color: var(--accent); }
+  .f-badge {
+    background: var(--accent); color: #fff; font: 700 10px var(--font);
+    min-width: 16px; height: 16px; border-radius: 8px; padding: 0 4px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .filter-panel {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 12px 14px; margin-bottom: 12px;
+  }
+  .f-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px 14px; }
+  .f-label { font-size: 10px; font-weight: 600; color: var(--text-muted); letter-spacing: .05em; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .f-row { display: flex; gap: 6px; align-items: center; margin-top: 4px; }
+  .f-in, .f-sel {
+    width: 100%; min-width: 0; background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); font: 500 11.5px var(--mono); padding: 5px 8px; outline: none;
+  }
+  .f-sel { font-family: var(--font); cursor: pointer; }
+  .f-in:focus, .f-sel:focus { border-color: var(--accent); }
+  .f-in.bad { border-color: var(--red); }
+  .f-sep { color: var(--text-muted); font-size: 11px; }
+  .f-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+  .f-clear {
+    background: none; border: 1px solid var(--border); color: var(--text-dim);
+    font: 600 11px var(--font); padding: 5px 12px; border-radius: 6px; cursor: pointer;
+  }
+  .f-clear:hover { border-color: var(--red); color: var(--red); }
+
   .tbl-wrap {
     background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
     overflow-x: auto; -webkit-overflow-scrolling: touch;
@@ -140,11 +175,13 @@
   .tok-sym { font: 700 13px var(--font); }
   .tok-sym a { color: var(--text); text-decoration: none; }
   .tok-sym a:hover { color: var(--accent); }
+  /* 名字与地址分离: 名字自己截断, 地址链接永不被裁剪 (长名如 TSM 曾把地址挤出可点区) */
   .tok-name {
     font: 400 10.5px var(--font); color: var(--text-muted);
-    max-width: 200px; overflow: hidden; text-overflow: ellipsis;
+    display: flex; align-items: baseline; gap: 6px; max-width: 220px;
   }
-  .tok-addr { color: var(--text-muted); text-decoration: none; font-size: 9.5px; font-family: var(--mono); }
+  .tok-nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 0 1 auto; }
+  .tok-addr { color: var(--text-muted); text-decoration: none; font-size: 9.5px; font-family: var(--mono); flex-shrink: 0; }
   .tok-addr:hover { color: var(--accent); }
 
   .chg-up { color: var(--green); }
@@ -237,7 +274,16 @@
       <option value="720">日化窗口 · 12 小时</option>
       <option value="1440" selected>日化窗口 · 24 小时</option>
     </select>
+    <button class="filter-btn" id="filterBtn" title="多重条件筛选（条件之间为 AND）">⚡ 筛选<span class="f-badge" id="fBadge" hidden></span></button>
     <span class="hint" id="rowCount"></span>
+  </div>
+
+  <div class="filter-panel" id="filterPanel" hidden>
+    <div class="f-grid" id="fFields"></div>
+    <div class="f-foot">
+      <span class="hint">条件之间为 AND；数值支持 k / m / b 后缀（如 500k、1.2m）；留空即不限；「最高日化」按当前所选日化窗口过滤。</span>
+      <button class="f-clear" id="fClear">清除全部</button>
+    </div>
   </div>
 
   <div id="errBox" class="err-box" style="display:none"></div>
@@ -272,7 +318,8 @@
     「RH 池」= 该代币在 Robinhood Chain 上的<b>真实</b> Uniswap V3/V4 池子数：当前有流动性、对手币为 USDG/WETH/ETH/官方代币、费率≤10% 或动态费（RH 链 bot 垃圾池泛滥，三重过滤后才计数；链上事件全量扫描 + Multicall 流动性核验，每 10 分钟增量同步；悬停看对手币与费率，点击跳 Uniswap 代币页）。
     <b>点击任意行</b>展开该代币全部池子的详情：TVL、24h 量/费、池日化、主力区间与主力区间日化（TVL &lt; $1,000 的尘埃池已过滤）。
     「RH TVL」= 该代币在 RH 链全部真实池（TVL≥$1,000）的 TVL 合计。「最高日化」= 该代币全部池子（TVL≥$1,000）中最高的池日化，悬停显示来源池与其主力日化；详情面板可「实时刷新」单个代币。
-    <b>「日化窗口」下拉</b>可把日化统计窗口在 5 分钟 ~ 24 小时之间切换（也作用于详情面板的池日化/主力日化）：短窗用于捕捉<b>交易突增</b>导致的日化拉升，数值一律折算为 24h 口径便于对比；短窗数据由每 5 分钟一次的常驻链上细采样支撑（仅 TVL≥$1,000 的池），实际差分窗口与所选窗口偏差较大时数值带黄 *（悬停看实际窗口）。
+    <b>「日化窗口」下拉</b>可把日化统计窗口在 5 分钟 ~ 24 小时之间切换（也作用于详情面板的池日化/主力日化）：短窗用于捕捉<b>交易突增</b>导致的日化拉升，数值一律折算为 24h 口径便于对比；短窗数据由每 5 分钟一次的常驻链上细采样支撑（仅 TVL≥$1,000 的池），实际差分窗口与所选窗口偏差较大时数值带黄 *（悬停看实际窗口）；带 ⚠ = 该窗口剔除过伪尖峰采样段（套利单打穿尘埃流动性导致的费收放大，隐含成交量物理不可能）。
+    <b>「⚡ 筛选」</b>支持多重条件组合（AND）：价格/涨跌/成交量/成交额/市值/RH 池数/RH TVL/最高日化的最小~最大区间 + 板块，数值支持 k/m/b 后缀；「最高日化」条件按当前所选日化窗口过滤（例：窗口切 15 分钟 + 日化 ≥5 + RH TVL ≥100k = 筛突增且有真实深度的标的）；条件保存在浏览器本地，与搜索框叠加生效。
   </div>
 </div>
 
@@ -292,11 +339,91 @@ try {
   if (WIN_OPTS.includes(w)) curWin = w;
 } catch {}
 const winLabel = m => m >= 60 ? (m / 60) + '小时' : m + '分钟';
-// 当前窗口下该代币的最高日化 {d,m,pool,h}; 24h 用主口径旧字段 (兼容旧缓存)
+// 当前窗口下该代币的最高日化 {d,m,pool,h,x}; 24h 用主口径旧字段 (兼容旧缓存)
 function dayOf(t) {
-  if (curWin === 1440) return t.day == null ? null : { d: t.day, m: t.dayMain, pool: t.dayPool, h: null };
+  if (curWin === 1440) return t.day == null ? null : { d: t.day, m: t.dayMain, pool: t.dayPool, h: null, x: t.dayX };
   const x = t.dayW && t.dayW[curWin];
   return x && x.d != null ? x : null;
+}
+// 伪尖峰护栏徽标: x = 窗口内被剔除的物理不可能费收采样段数 (套利单打穿尘埃流动性区间,
+// feeGrowth 差分会把几毛钱费放大成几千刀; 判据 = 段隐含成交量 > TVL×50/小时)
+function spikeBadge(x) {
+  if (!x) return '';
+  return `<span style="color:var(--yellow);font-size:9px;cursor:help" title="已剔除 ${x} 个异常费收采样段（套利单打穿尘埃流动性区间造成的伪尖峰，隐含成交量物理不可能），当前数值为剔除后结果">⚠</span>`;
+}
+
+// --- 多重条件筛选 (AND 组合; 数值支持 k/m/b 后缀; 无该项数据的行不通过该项条件) ---
+const F_FIELDS = [
+  { k: 'price',     label: '价格 $',            get: t => t.price > 0 ? t.price : null },
+  { k: 'chgPct',    label: '涨跌 %',            get: t => t.src ? t.chgPct : null },
+  { k: 'volume',    label: '成交量 股',         get: t => t.volume > 0 ? t.volume : null },
+  { k: 'turnover',  label: '成交额 $',          get: t => t.turnover > 0 ? t.turnover : null },
+  { k: 'marketCap', label: '市值 $',            get: t => t.marketCap > 0 ? t.marketCap : null },
+  { k: 'poolCount', label: 'RH 池数',           get: t => t.poolCount || 0 },
+  { k: 'rhTvl',     label: 'RH TVL $',          get: t => t.rhTvl > 0 ? t.rhTvl : null },
+  { k: 'day',       label: '最高日化 %·当前窗口', get: t => { const x = dayOf(t); return x ? x.d : null; } },
+];
+let filters = {};   // {字段k: {min:'原始串', max:'原始串'}, sector: ''}
+let filterOpen = false;
+try { const f = JSON.parse(localStorage.getItem('stkFilter') || 'null'); if (f && typeof f === 'object' && f) filters = f; } catch {}
+try { filterOpen = localStorage.getItem('stkFilterOpen') === '1'; } catch {}
+
+function parseFVal(s) {
+  s = String(s ?? '').trim().replace(/[$%\s,，]/g, '');
+  if (!s) return null;                       // 留空 = 不限
+  const m = s.match(/^(-?\d*\.?\d+)([kKmMbB]?)$/);
+  if (!m) return NaN;                        // 填了但解析不了 = 标红且该条件不生效
+  return parseFloat(m[1]) * ({ k: 1e3, m: 1e6, b: 1e9 }[m[2].toLowerCase()] || 1);
+}
+const okNum = v => v != null && !Number.isNaN(v);
+const fCond = k => { const c = filters[k] || {}; return [parseFVal(c.min), parseFVal(c.max)]; };
+function activeFilterCount() {
+  let n = 0;
+  for (const f of F_FIELDS) { const [mn, mx] = fCond(f.k); if (okNum(mn) || okNum(mx)) n++; }
+  if (filters.sector) n++;
+  return n;
+}
+function passFilters(t) {
+  for (const f of F_FIELDS) {
+    const [mn, mx] = fCond(f.k);
+    if (!okNum(mn) && !okNum(mx)) continue;
+    const v = f.get(t);
+    if (v == null) return false;
+    if (okNum(mn) && v < mn) return false;
+    if (okNum(mx) && v > mx) return false;
+  }
+  if (filters.sector && t.sector !== filters.sector) return false;
+  return true;
+}
+function saveFilters() { try { localStorage.setItem('stkFilter', JSON.stringify(filters)); } catch {} }
+function buildFilterPanel() {
+  $('fFields').innerHTML = F_FIELDS.map(f => {
+    const c = filters[f.k] || {};
+    return `<div class="f-item"><div class="f-label" title="${escH(f.label)}">${escH(f.label)}</div><div class="f-row">
+      <input class="f-in" data-fk="${f.k}" data-fb="min" placeholder="最小" value="${escH(c.min || '')}" autocomplete="off">
+      <span class="f-sep">–</span>
+      <input class="f-in" data-fk="${f.k}" data-fb="max" placeholder="最大" value="${escH(c.max || '')}" autocomplete="off">
+    </div></div>`;
+  }).join('') + `<div class="f-item"><div class="f-label">板块</div><div class="f-row">
+      <select class="f-sel" id="fSector"><option value="">全部板块</option></select></div></div>`;
+  $('fFields').addEventListener('input', e => {
+    const el = e.target;
+    if (!el.dataset || !el.dataset.fk) return;
+    const c = filters[el.dataset.fk] = filters[el.dataset.fk] || {};
+    c[el.dataset.fb] = el.value;
+    el.classList.toggle('bad', Number.isNaN(parseFVal(el.value)));
+    saveFilters(); render();
+  });
+  $('fSector').addEventListener('change', () => { filters.sector = $('fSector').value; saveFilters(); render(); });
+}
+// 板块下拉选项从数据惰性填充 (行情来源 Nasdaq 才有 sector)
+function syncSectorOpts() {
+  const sel = $('fSector');
+  if (!data || !sel || sel.options.length > 1) return;
+  for (const s of [...new Set(data.tokens.map(t => t.sector).filter(Boolean))].sort()) {
+    const o = document.createElement('option'); o.value = s; o.textContent = s; sel.appendChild(o);
+  }
+  if (filters.sector) sel.value = filters.sector;
 }
 
 const $ = id => document.getElementById(id);
@@ -343,6 +470,10 @@ function fmtRangePrice(v) {
   if (v >= 1) return v.toFixed(2);
   return v.toFixed(4);
 }
+function fmtRatio(v) {
+  if (!(v > 0) || !isFinite(v)) return '?';
+  return v >= 1000 ? v.toFixed(0) : String(+v.toPrecision(5));
+}
 function detailRowHtml(t) {
   let inner;
   if (openLoading) {
@@ -356,13 +487,25 @@ function detailRowHtml(t) {
     const wl = curWin === 1440 ? '' : '·' + winLabel(curWin);
     const rows = openData.pools.map(p => {
       // 超出现价 10 倍的区间边界显示成 ∞/0 (宽区间/全区间语义, 边界值是扫描窗口截断产物)
-      const rb = v => p.curPrice > 0 && v > p.curPrice * 10 ? '∞' : (p.curPrice > 0 && v < p.curPrice / 10 ? '0' : fmtRangePrice(v));
-      const range = p.mainPrice ? `$${rb(p.mainPrice[0])} – $${rb(p.mainPrice[1])}` : '—';
+      // USDG 对显示美元区间; 非 USDG 对 (股票/股票、股票/WETH) 显示池内比价区间 (对手币 per 1 本币),
+      // 与 Uniswap 池页同口径, 美元折算与现价放悬停
+      const [vSym, cSym] = p.pair.split('/');
+      let range = '—', rTip = '';
+      if (p.usdQuote !== false || !p.mainRatio) {
+        const rb = v => p.curPrice > 0 && v > p.curPrice * 10 ? '∞' : (p.curPrice > 0 && v < p.curPrice / 10 ? '0' : fmtRangePrice(v));
+        if (p.mainPrice) range = `$${rb(p.mainPrice[0])} – $${rb(p.mainPrice[1])}`;
+      } else {
+        const rr = v => p.curRatio > 0 && v > p.curRatio * 10 ? '∞' : (p.curRatio > 0 && v < p.curRatio / 10 ? '0' : fmtRatio(v));
+        range = `${rr(p.mainRatio[0])} – ${rr(p.mainRatio[1])} <span style="color:var(--text-muted);font-size:10px">${escH(cSym)}/${escH(vSym)}</span>`;
+        rTip = `现价 ${fmtRatio(p.curRatio)} ${cSym}/${vSym}` + (p.curPrice > 0 ? `（US$${fmtRangePrice(p.curPrice)}）` : '')
+          + (p.mainPrice ? ` · 区间折美元 ≈ $${fmtRangePrice(p.mainPrice[0])} – $${fmtRangePrice(p.mainPrice[1])}` : '')
+          + `；${cSym}/${vSym} = 每 1 ${vSym} 值多少 ${cSym}`;
+      }
       const share = p.mainShare > 0 ? ` <span style="color:var(--text-muted)">(${p.mainShare.toFixed(0)}%TVL)</span>` : '';
       const st = p.mainPrice ? (p.inMain ? '<span class="in-dot in"></span>在区间' : '<span class="in-dot out"></span>出区间') : '—';
       const hot = v => v != null && v >= 0.1 ? ' hot' : '';
       // 日化两列跟随所选窗口 (24h 用主口径旧字段, 兼容旧缓存)
-      const wx = (curWin === 1440 || !p.win) ? { d: p.dayPct, m: p.mainDaily, h: p.winH } : (p.win[curWin] || { d: null, m: null, h: 0 });
+      const wx = (curWin === 1440 || !p.win) ? { d: p.dayPct, m: p.mainDaily, h: p.winH, x: p.win && p.win[1440] ? p.win[1440].x : undefined } : (p.win[curWin] || { d: null, m: null, h: 0 });
       const exp = curWin / 60;
       const off = curWin === 1440 ? (wx.h > 0 && wx.h < 20) : (wx.h > 0 && Math.abs(wx.h - exp) > Math.max(exp * 0.5, 0.03));
       const offTip = off ? ` title="实际费收窗口 ${(+wx.h).toFixed(2)}h，已折算 24h 口径"` : '';
@@ -372,8 +515,8 @@ function detailRowHtml(t) {
         <td>${fmtUsd(p.tvl)}</td>
         <td>${fmtUsd(p.vol24)}</td>
         <td>${fmtUsd(p.fees24)}</td>
-        <td class="d-day${hot(wx.d)}"${offTip}>${fmtPct(wx.d)}${off ? '<span style="color:var(--yellow);font-size:9px">*</span>' : ''}</td>
-        <td>${range}${share}</td>
+        <td class="d-day${hot(wx.d)}"${offTip}>${fmtPct(wx.d)}${off ? '<span style="color:var(--yellow);font-size:9px">*</span>' : ''}${spikeBadge(wx.x)}</td>
+        <td${rTip ? ` title="${escH(rTip)}"` : ''}>${range}${share}</td>
         <td class="d-day${hot(wx.m)}">${fmtPct(wx.m)}</td>
         <td class="l">${st}</td>
       </tr>`;
@@ -381,7 +524,7 @@ function detailRowHtml(t) {
     inner = `<div class="dtable-wrap"><table class="dtable">
       <thead><tr><th class="l">池子</th><th>TVL</th><th>24h 量≈</th><th>24h 费</th><th>池日化${wl}</th><th>主力区间</th><th>主力日化${wl}</th><th class="l">现价位置</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
-      <div class="d-note">${openData.hidden > 0 ? `已隐藏 ${openData.hidden} 个 TVL &lt; $1,000 的尘埃池。` : ''}${openData.windowH > 0 && openData.windowH < 20 ? `<b>24h 口径费收采样窗口目前仅 ${openData.windowH.toFixed(1)}h（已折算成 24h，数据随采样积累到 24h 后最准）。</b>` : ''}主力区间 = 流动性 ≥ 70% 峰值的连续价格带（附 TVL 占比）；费收 = 链上 feeGrowthGlobal 累计器差分（每单位流动性的实收费，动态费池亦精确），24h 费 ≈ 单位费收 × 当前活跃流动性；池日化 = 窗口内费收 ÷ 全池 TVL（折算 24h）；主力日化 = 单位流动性窗口费收 ÷ 主力区间单位仓位价值（即在主力区间做 LP 的日收益率，未年化）；24h 量 ≈ 费 ÷ 费率（动态费池无固定费率不估）；<b>「日化窗口」当前为 ${winLabel(curWin)}</b>——只改变池日化/主力日化两列的统计窗口（数值均折算为 24h 口径便于对比），24h 量/24h 费两列始终为 24h 口径；短窗数据来自每 5 分钟的常驻链上细采样（仅 TVL≥$1,000 的池）；日化带黄色 * = 实际差分窗口与所选窗口偏差较大（新池/采样尚未积累，悬停看实际窗口）。</div>`;
+      <div class="d-note">${openData.hidden > 0 ? `已隐藏 ${openData.hidden} 个 TVL &lt; $1,000 的尘埃池。` : ''}${openData.windowH > 0 && openData.windowH < 20 ? `<b>24h 口径费收采样窗口目前仅 ${openData.windowH.toFixed(1)}h（已折算成 24h，数据随采样积累到 24h 后最准）。</b>` : ''}主力区间 = 流动性 ≥ 70% 峰值的连续价格带（附 TVL 占比；峰值候选排除自身价值 &lt; TVL×2% 的尘埃密度尖峰——单 spacing 限价单密度极高但资金极少，会把主力区间骗到远离现价的孤点）；<b>USDG 对显示美元区间；非 USDG 对（股票/股票、股票/WETH）显示池内比价区间</b>（如 4.2210 – 4.3860 PLTR/SPY = 每 1 SPY 值多少 PLTR，与 Uniswap 池页同口径，悬停看现价比价与美元折算）；费收 = 链上 feeGrowthGlobal 累计器差分（每单位流动性的实收费，动态费池亦精确），24h 费 ≈ 单位费收 × 当前活跃流动性；池日化 = 窗口内费收 ÷ 全池 TVL（折算 24h）；主力日化 = 单位流动性窗口费收 ÷ 主力区间单位仓位价值（即在主力区间做 LP 的日收益率，未年化）；24h 量 ≈ 费 ÷ 费率（动态费池无固定费率不估）；<b>「日化窗口」当前为 ${winLabel(curWin)}</b>——只改变池日化/主力日化两列的统计窗口（数值均折算为 24h 口径便于对比），24h 量/24h 费两列始终为 24h 口径；短窗数据来自每 5 分钟的常驻链上细采样（仅 TVL≥$1,000 的池）；日化带黄色 * = 实际差分窗口与所选窗口偏差较大（新池/采样尚未积累，悬停看实际窗口）；日化带 ⚠ = 窗口内有采样段被<b>伪尖峰护栏</b>剔除——套利单打穿尘埃流动性区间时，feeGrowth 差分会把极小的实付费放大成几百倍（隐含成交量 &gt; TVL×50/小时即物理不可能），剔除后数值即当前所示，整窗剔完仍不合理则显示 —。</div>`;
   }
   let ageStr = '';
   if (openData && openData.updatedAt) {
@@ -402,6 +545,8 @@ function render() {
   const q = ($('searchBox').value || '').trim().toLowerCase();
   let rows = data.tokens.slice();
   if (q) rows = rows.filter(t => t.sym.toLowerCase().includes(q) || (t.name || '').toLowerCase().includes(q));
+  const nActive = activeFilterCount();
+  if (nActive) rows = rows.filter(passFilters);
 
   const sv = t => sortKey === 'day' ? (dayOf(t) ? dayOf(t).d : -1) : (t[sortKey] || 0);
   rows.sort((a, b) => {
@@ -424,7 +569,7 @@ function render() {
       <td class="c-rank">${i + 1}</td>
       <td class="c-tok"><div class="tok">${logo}<div>
         <div class="tok-sym"><a href="https://www.tradingview.com/symbols/${escH(t.sym)}/" target="_blank" rel="noopener">${escH(t.sym)}</a></div>
-        <div class="tok-name" title="${escH(t.name)}">${escH(t.name)} ${addr}</div>
+        <div class="tok-name"><span class="tok-nm" title="${escH(t.name)}">${escH(t.name)}</span>${addr}</div>
       </div></div></td>
       <td>${fmtPrice(t.price)}</td>
       <td>${fmtChg(t.chgPct, t.src)}</td>
@@ -440,14 +585,20 @@ function render() {
         if (!dy) return '<span class="pool-none">—</span>';
         const exp = curWin / 60;
         const off = curWin !== 1440 && dy.h > 0 && Math.abs(dy.h - exp) > Math.max(exp * 0.5, 0.03);
-        const tip = (dy.pool || '') + (dy.m != null ? ' · 主力日化 ' + fmtPct(dy.m) : '') + (dy.h != null ? ' · 实际窗口 ' + (+dy.h).toFixed(2) + 'h' : '');
-        return `<span class="d-day${dy.d >= 0.1 ? ' hot' : ''}" title="${escH(tip)}">${fmtPct(dy.d)}${off ? '<span style="color:var(--yellow);font-size:9px">*</span>' : ''}</span>`;
+        const tip = (dy.pool || '') + (dy.m != null ? ' · 主力日化 ' + fmtPct(dy.m) : '') + (dy.h != null ? ' · 实际窗口 ' + (+dy.h).toFixed(2) + 'h' : '') + (dy.x ? ` · 已剔除 ${dy.x} 个伪尖峰采样段` : '');
+        return `<span class="d-day${dy.d >= 0.1 ? ' hot' : ''}" title="${escH(tip)}">${fmtPct(dy.d)}${off ? '<span style="color:var(--yellow);font-size:9px">*</span>' : ''}${spikeBadge(dy.x)}</span>`;
       })()}</td>
       <td>${srcBadge}</td>
     </tr>` + (t.sym === openSym ? detailRowHtml(t) : '');
   }).join('');
   $('tbody').innerHTML = html || '<tr><td colspan="11"><div class="state-box"><div class="state-text">没有匹配的代币</div></div></td></tr>';
-  $('rowCount').textContent = q ? `${rows.length} / ${data.tokens.length}` : `${data.tokens.length} 个代币`;
+  $('rowCount').textContent = (q || nActive) ? `${rows.length} / ${data.tokens.length}` : `${data.tokens.length} 个代币`;
+
+  // 筛选按钮角标 + 板块下拉惰性填充
+  $('fBadge').hidden = !nActive;
+  $('fBadge').textContent = nActive;
+  $('filterBtn').classList.toggle('on', nActive > 0);
+  syncSectorOpts();
 
   // 表头排序指示 (最高日化列头带当前窗口标签)
   const thDay = document.querySelector('thead th[data-key="day"]');
@@ -508,7 +659,20 @@ $('winSel').addEventListener('change', () => {
   curWin = parseInt($('winSel').value, 10) || 1440;
   if (!WIN_OPTS.includes(curWin)) curWin = 1440;
   try { localStorage.setItem('stkWin', String(curWin)); } catch {}
-  render();   // 全部窗口数据已在 payload 里, 切换零请求即时生效
+  render();   // 全部窗口数据已在 payload 里, 切换零请求即时生效 (日化筛选条件也跟着当前窗口)
+});
+buildFilterPanel();
+$('filterPanel').hidden = !filterOpen;
+$('filterBtn').addEventListener('click', () => {
+  filterOpen = !filterOpen;
+  $('filterPanel').hidden = !filterOpen;
+  try { localStorage.setItem('stkFilterOpen', filterOpen ? '1' : '0'); } catch {}
+});
+$('fClear').addEventListener('click', () => {
+  filters = {};
+  document.querySelectorAll('#fFields .f-in').forEach(el => { el.value = ''; el.classList.remove('bad'); });
+  const sel = $('fSector'); if (sel) sel.value = '';
+  saveFilters(); render();
 });
 
 // 点击行展开/收起池子详情; 详情里的「实时刷新」强制重算

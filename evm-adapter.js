@@ -1410,12 +1410,18 @@ async function getUSDPrices(chainId, tokenAddresses, positionsData) {
     } catch {}
   }
 
+  // 池现价可用性护栏: tick 打到 ±887272 边界=池被单向 swap 打穿(现价处零对手流动性),
+  // 现价是边界哨兵值(如 1e50)而非市场价, 不得用于定价推导
+  const TICK_EDGE = 887000;
+  const poolPriceUsable = (pos) => pos.currentPrice > 0 && Number.isFinite(pos.currentPrice)
+    && !(Number.isFinite(pos.currentTick) && Math.abs(pos.currentTick) >= TICK_EDGE);
+
   // 池内价推导 (稳定币对) — 优先 active+inRange
   const priceSource = {};
   const rank = { 'active-inrange': 3, active: 2, inactive: 1 };
   for (const pos of positionsData) {
     const t0 = pos.token0addr.toLowerCase(), t1 = pos.token1addr.toLowerCase();
-    if (pos.currentPrice <= 0) continue;
+    if (!poolPriceUsable(pos)) continue;
     let target, price;
     if (cfg.stables[t1] && !cfg.stables[t0]) { target = t0; price = pos.currentPrice; }
     else if (cfg.stables[t0] && !cfg.stables[t1]) { target = t1; price = 1 / pos.currentPrice; }
@@ -1434,9 +1440,17 @@ async function getUSDPrices(chainId, tokenAddresses, positionsData) {
   // 第二轮: 用已定价 token (如 WETH) 的池子再推导一层 (token/WETH 对)
   for (const pos of positionsData) {
     const t0 = pos.token0addr.toLowerCase(), t1 = pos.token1addr.toLowerCase();
-    if (pos.currentPrice <= 0) continue;
+    if (!poolPriceUsable(pos)) continue;
     if (prices[t1] > 0 && !prices[t0]) prices[t0] = pos.currentPrice * prices[t1];
     else if (prices[t0] > 0 && !prices[t1]) prices[t1] = prices[t0] / pos.currentPrice;
+  }
+
+  // rh 官方股票代币: 池内价不可用(唯一池被打穿/无 USDG 对)时用美股行情近似 (~15min 延迟)
+  if (chainId === 'rh') {
+    const quotes = rhStockQuotes();
+    for (const t of rhStockTokens()) {
+      if (!prices[t.addr] && quotes[t.sym]?.price > 0) prices[t.addr] = quotes[t.sym].price;
+    }
   }
 
   for (const addr of unique) if (!prices[addr]) prices[addr] = 0;

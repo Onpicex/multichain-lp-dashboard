@@ -290,6 +290,11 @@ async function scanPools() {
 // 日化按窗口差分: 每个窗口取两环中最接近「now − 窗口」的样本, 按实际时长折算 24h 口径。
 // 流动性分布 (主力区间 = L≥70% 峰值的连续区间) 走 tickBitmap/ticks + Multicall 聚合。
 const WINDOWS = [5, 10, 15, 30, 45, 60, 120, 180, 240, 360, 720, 1440];   // 分钟; 1440 = 主口径
+// 伪尖峰护栏阈值: 差分的隐含假设是「挣费时活跃 L≈当前 L」, 套利单打穿尘埃流动性区间时
+// (段内实际 L 可低至当前 L 的万分之一) 几毛钱费会被放大成几千刀 (DJT/WETH 0.05% 池实测 361 倍)。
+// 判据 = 段隐含成交量物理不可能: 真实最猛 bot 混战池 ~1×TVL/小时, 50 倍上限余量充足。
+const SPIKE_TURNOVER_CAP = 50;   // 固定费率池: 段隐含成交量 (费÷费率) 上限 = TVL×50×段小时
+const SPIKE_FEE_CAP = 0.5;       // 动态费池推不出成交量, 退用段费收上限 = TVL×0.5×段小时
 const FG_FILE = path.join(__dirname, 'stocktokens-feegrowth.json');
 const FINE_FILE = path.join(__dirname, 'stocktokens-feegrowth-fine.json');
 const FINE_TTL = 5 * 60 * 1000;          // 细采样周期
@@ -426,38 +431,74 @@ function isRealPool(p) {
   return (p.v === 4 && (p.fee & 0x800000)) || p.fee <= 100000;
 }
 
-// feeGrowth 采样 (全量扫描与细采样共用): pools -> {key: [hex0, hex1]}
+// feeGrowth 采样 (全量扫描与细采样共用): pools -> {key: [hex0, hex1, hexL?]}
+// 第 3 位 = 采样时活跃 L: 分段费收用「当段采样 L」而非「当前 L」——MM 在窗口内加减仓会让
+// Δfg×当前L 等比例虚高/虚低 (SKHY 主池实测虚高 9.3 倍); L 由 LP 增删驱动阶梯变化,
+// 5min/30min 采样粒度跟得上。旧样本无此位时下游回退当前 L (25h 环形滚动自愈)。
 async function sampleFeeGrowth(pools) {
   const fgCalls = [], fgMeta = [];
   for (const p of pools) {
     if (p.v === 4) {
       fgMeta.push({ key: p.id, both: true });
       fgCalls.push({ target: RH_STATE_VIEW, callData: SV2_IFACE.encodeFunctionData('getFeeGrowthGlobals', [p.id]) });
+      fgMeta.push({ key: p.id, liq: true });
+      fgCalls.push({ target: RH_STATE_VIEW, callData: SV2_IFACE.encodeFunctionData('getLiquidity', [p.id]) });
     } else {
       fgMeta.push({ key: p.pa, slot: 0 });
       fgCalls.push({ target: p.pa, callData: SEL_FG0 });
       fgMeta.push({ key: p.pa, slot: 1 });
       fgCalls.push({ target: p.pa, callData: SEL_FG1 });
+      fgMeta.push({ key: p.pa, liq: true });
+      fgCalls.push({ target: p.pa, callData: V3P_IFACE.encodeFunctionData('liquidity', []) });
     }
   }
   const fgRes = await mc3(fgCalls);
-  const fgNow = {};
+  const fgNow = {}, lm = {};
   fgRes.forEach((r, k) => {
     if (!r || r.length < 66) return;
     const m = fgMeta[k];
-    if (m.both) fgNow[m.key] = ['0x' + r.slice(2, 66), '0x' + r.slice(66, 130)];
+    if (m.liq) lm[m.key] = '0x' + BigInt(r).toString(16);
+    else if (m.both) fgNow[m.key] = ['0x' + r.slice(2, 66), '0x' + r.slice(66, 130)];
     else (fgNow[m.key] = fgNow[m.key] || ['0x0', '0x0'])[m.slot] = '0x' + r.slice(2, 66);
   });
+  // L 只挂在 fg 采样成功的池上 (避免凭空造出 fg=0 的假样本)
+  for (const k in fgNow) if (lm[k] != null) fgNow[k][2] = lm[k];
   return fgNow;
 }
 
-// 对单池按全部窗口做差分: 写入 st.win = {分钟: {d 池日化, m 主力日化, h 实际窗口小时}},
+// 对单池按全部窗口做差分: 写入 st.win = {分钟: {d 池日化, m 主力日化, h 实际窗口小时, x 剔除段数}},
 // 并同步 24h 主口径旧字段 (dayPct/fees24/vol24/winH/mainDaily)。nf 缺失 = 本轮没采到, 全清。
 // st 需带上下文 _L (当前活跃 L, BigInt) 与 _vperl (主力区间单位 L 仓位价值)。
+// 伪尖峰护栏: 端点差 = 相邻样本段差之和, 故按样本拆段逐段体检 (SPIKE_* 判据),
+// 不合理的段计 0 并计入 x; 剔完整窗合计仍不合理 (多段慢渗) → 整窗标异常 (d/m 置 null 只留 x)。
 function computeWins(st, nf, nowMs, samples, bestByWin) {
   st.win = {}; st.dayPct = null; st.fees24 = null; st.vol24 = null; st.winH = 0; st.mainDaily = null;
   if (!nf) return;
   const rate = (st.v === 4 && (st.fee & 0x800000)) ? 0 : st.fee / 1e6;
+  const Lnow = Number(st._L);
+  const implausible = (fee, hrs) => st.tvl > 0 && hrs > 0 && fee > 0 &&
+    (rate > 0 ? fee / rate > st.tvl * SPIKE_TURNOVER_CAP * hrs
+              : fee > st.tvl * SPIKE_FEE_CAP * hrs);
+  // 该池的样本时间线 (升序) + 当前值 → 相邻段费收逐段体检好, 各窗口取后缀和
+  const chain = [];
+  for (const s of samples) if (s.fg[st.key]) chain.push({ at: s.at, fg: s.fg[st.key] });
+  chain.push({ at: nowMs, fg: nf });
+  const segs = [];   // {at 段末时刻, fee 体检后费收 USD, perL 体检后单位L费收 USD, bad}
+  for (let i = 1; i < chain.length; i++) {
+    const A = chain[i - 1].fg, B = chain[i].fg;
+    const d0 = Number(BigInt(B[0]) - BigInt(A[0]));
+    const d1 = Number(BigInt(B[1]) - BigInt(A[1]));
+    const f0 = d0 > 0 ? d0 / 2 ** 128 / 10 ** st.dec0 * st.p0usd : 0;
+    const f1 = d1 > 0 ? d1 / 2 ** 128 / 10 ** st.dec1 * st.p1usd : 0;
+    const perL = f0 + f1;
+    // 该段 L = 两端采样 L 均值 (费在段内挣得, 段间 L 阶梯变化); 缺哪端用哪端, 全缺回退当前 L
+    const La = A[2] != null ? Number(BigInt(A[2])) : null;
+    const Lb = B[2] != null ? Number(BigInt(B[2])) : null;
+    const Lseg = La != null && Lb != null ? (La + Lb) / 2 : (La != null ? La : (Lb != null ? Lb : Lnow));
+    const fee = perL * Lseg;
+    const bad = implausible(fee, (chain[i].at - chain[i - 1].at) / 3600000);
+    segs.push({ at: chain[i].at, fee: bad ? 0 : fee, perL: bad ? 0 : perL, bad });
+  }
   for (const wm of WINDOWS) {
     const target = nowMs - wm * 60000;
     let rf = null, rAt = 0;
@@ -474,18 +515,18 @@ function computeWins(st, nf, nowMs, samples, bestByWin) {
     }
     const dt = rf ? nowMs - rAt : 0;
     if (!rf || dt <= 60000) continue;
-    const d0 = Number(BigInt(nf[0]) - BigInt(rf[0]));
-    const d1 = Number(BigInt(nf[1]) - BigInt(rf[1]));
-    const f0 = d0 > 0 ? d0 / 2 ** 128 / 10 ** st.dec0 * st.p0usd : 0;
-    const f1 = d1 > 0 ? d1 / 2 ** 128 / 10 ** st.dec1 * st.p1usd : 0;
-    const feePerL = (f0 + f1) * (86400000 / dt);   // 单位 L 费收, 折算 24h
-    const fees = feePerL * Number(st._L);
+    let sum = 0, sumPerL = 0, x = 0;
+    for (const g of segs) if (g.at > rAt) { sum += g.fee; sumPerL += g.perL; if (g.bad) x++; }
+    const fees = sum * (86400000 / dt);   // 折算 24h
+    if (implausible(fees, 24)) { st.win[wm] = { d: null, m: null, h: +(dt / 3600000).toFixed(2), x: x + 1 }; continue; }
     const dayPct = st.tvl > 0 ? fees / st.tvl * 100 : null;
-    const mainDaily = st._vperl > 0 ? feePerL / st._vperl * 100 : null;
+    // 主力日化用纯单位 L 费收 (Δfg 本身), 不经过 ×L 还原——这是累计器的精确量
+    const mainDaily = st._vperl > 0 ? sumPerL * (86400000 / dt) / st._vperl * 100 : null;
     st.win[wm] = {
       d: dayPct == null ? null : +dayPct.toPrecision(4),
       m: mainDaily == null ? null : +mainDaily.toPrecision(4),
       h: +(dt / 3600000).toFixed(2),
+      ...(x > 0 ? { x } : {}),
     };
     if (wm === 1440) {
       st.dayPct = dayPct; st.fees24 = fees; st.winH = dt / 3600000; st.mainDaily = mainDaily;
@@ -596,28 +637,32 @@ async function computePoolSet(pools) {
       }
     }
     const posSegs = segs.filter(s => s.L > 0n);
-    // TVL (窗口内)
-    let tvl = 0;
-    for (const s of posSegs) {
+    // TVL (窗口内) + 各段 USD (主力判定复用)
+    const segUsds = posSegs.map(s => {
       const [a0, a1] = amountsPerL(sqrtP, tickSqrt(s.a), tickSqrt(s.b));
-      tvl += Number(s.L) * (a0 / 10 ** dec0 * p0usd + a1 / 10 ** dec1 * p1usd);
-    }
-    // 主力区间: ≥70% 峰值 L 的连续段 (含峰值段)
+      return Number(s.L) * (a0 / 10 ** dec0 * p0usd + a1 / 10 ** dec1 * p1usd);
+    });
+    let tvl = 0;
+    for (const u of segUsds) tvl += u;
+    // 主力区间: ≥70% 峰值 L 的连续段 (含峰值段)。
+    // 峰值候选须自身 USD ≥ TVL×2%: 单 spacing 尘埃限价单的 L 密度可比真仓高一个量级
+    // 但只占 TVL ~1%, 不排除会把主力区间骗到远离现价的孤点 (SPY/PLTR 池实测案例);
+    // 无合格候选时退回全局最大 L (小池全是碎单的情形)
     let main = null, mainShare = 0;
     if (posSegs.length) {
-      let mi = 0;
-      for (let j = 1; j < posSegs.length; j++) if (posSegs[j].L > posSegs[mi].L) mi = j;
+      let mi = -1;
+      for (let j = 0; j < posSegs.length; j++) {
+        if (segUsds[j] < tvl * 0.02) continue;
+        if (mi < 0 || posSegs[j].L > posSegs[mi].L) mi = j;
+      }
+      if (mi < 0) for (let j = 0; j < posSegs.length; j++) if (mi < 0 || posSegs[j].L > posSegs[mi].L) mi = j;
       const thr = posSegs[mi].L * 7n / 10n;
       let lo = mi, hi = mi;
       while (lo > 0 && posSegs[lo - 1].L >= thr && posSegs[lo - 1].b === posSegs[lo].a) lo--;
       while (hi < posSegs.length - 1 && posSegs[hi + 1].L >= thr && posSegs[hi + 1].a === posSegs[hi].b) hi++;
       main = { a: posSegs[lo].a, b: posSegs[hi].b };
       let mUsd = 0;
-      for (let j = lo; j <= hi; j++) {
-        const s = posSegs[j];
-        const [a0, a1] = amountsPerL(sqrtP, tickSqrt(s.a), tickSqrt(s.b));
-        mUsd += Number(s.L) * (a0 / 10 ** dec0 * p0usd + a1 / 10 ** dec1 * p1usd);
-      }
+      for (let j = lo; j <= hi; j++) mUsd += segUsds[j];
       mainShare = tvl > 0 ? mUsd / tvl : 0;
     }
     // 主力区间单位 L 仓位价值 (各窗口主力日化共用分母)
@@ -644,16 +689,23 @@ async function computePoolSet(pools) {
 function presentPool(sym, al, s) {
   const stockIs0 = s.t0 === al;
   const symOf = a => addrToSymGlobal[a] || (a.slice(0, 6) + '…');
-  let mainPrice = null;
-  if (s.main && (s.p0usd > 0 || s.p1usd > 0)) {
-    const hpAt = t => Math.pow(1.0001, t) * Math.pow(10, s.dec0 - s.dec1);
-    let lo, hi;
-    if (stockIs0) { lo = hpAt(s.main.a) * s.p1usd; hi = hpAt(s.main.b) * s.p1usd; }
-    else { lo = s.p0usd / hpAt(s.main.b); hi = s.p0usd / hpAt(s.main.a); }
-    if (lo > hi) { const t = lo; lo = hi; hi = t; }
-    mainPrice = [lo, hi];
-  }
+  const hpAt = t => Math.pow(1.0001, t) * Math.pow(10, s.dec0 - s.dec1);
   const hp = (s.sqrtP * s.sqrtP) * Math.pow(10, s.dec0 - s.dec1);
+  let mainPrice = null, mainRatio = null;
+  if (s.main) {
+    // 池内比价区间 (对手币 per 1 本币) —— 非 USDG 对的展示主体, 美元折算降为悬停参考
+    mainRatio = stockIs0 ? [hpAt(s.main.a), hpAt(s.main.b)] : [1 / hpAt(s.main.b), 1 / hpAt(s.main.a)];
+    if (mainRatio[0] > mainRatio[1]) mainRatio = [mainRatio[1], mainRatio[0]];
+    mainRatio = [+mainRatio[0].toPrecision(6), +mainRatio[1].toPrecision(6)];
+    if (s.p0usd > 0 || s.p1usd > 0) {
+      let lo, hi;
+      if (stockIs0) { lo = hpAt(s.main.a) * s.p1usd; hi = hpAt(s.main.b) * s.p1usd; }
+      else { lo = s.p0usd / hpAt(s.main.b); hi = s.p0usd / hpAt(s.main.a); }
+      if (lo > hi) { const t = lo; lo = hi; hi = t; }
+      mainPrice = [lo, hi];
+    }
+  }
+  const curRatio = stockIs0 ? hp : (hp > 0 ? 1 / hp : 0);
   return {
     v: s.v,
     pair: `${sym}/${symOf(stockIs0 ? s.t1 : s.t0)}`,
@@ -661,8 +713,10 @@ function presentPool(sym, al, s) {
     key: s.key,
     tvl: s.tvl, vol24: s.vol24, fees24: s.fees24, dayPct: s.dayPct, winH: s.winH,
     win: s.win || {},
-    mainPrice, mainShare: s.mainShare, mainDaily: s.mainDaily, inMain: s.inMain,
+    mainPrice, mainRatio, mainShare: s.mainShare, mainDaily: s.mainDaily, inMain: s.inMain,
     curPrice: stockIs0 ? hp * s.p1usd : (s.p0usd > 0 && hp > 0 ? s.p0usd / hp : 0),
+    curRatio: curRatio > 0 ? +curRatio.toPrecision(6) : 0,
+    usdQuote: (stockIs0 ? s.t1 : s.t0) === '0x5fc5360d0400a0fd4f2af552add042d716f1d168',   // 对手币是否 USDG
   };
 }
 
@@ -680,11 +734,12 @@ function noteDaily(sym, data) {
     tvl += p.tvl;   // 只合计 TVL≥$1000 的真实池 (与详情表之和一致)
     if (p.dayPct != null && (!best || p.dayPct > best.dayPct)) best = p;
     if (p.win) for (const k in p.win) {
-      const x = p.win[k];
-      if (x.d != null && (!w[k] || x.d > w[k].d)) w[k] = { d: x.d, m: x.m, h: x.h, pool: `V${p.v} ${p.pair} ${p.feeLabel}` };
+      const e = p.win[k];
+      if (e.d != null && (!w[k] || e.d > w[k].d)) w[k] = { d: e.d, m: e.m, h: e.h, pool: `V${p.v} ${p.pair} ${p.feeLabel}`, ...(e.x ? { x: e.x } : {}) };
     }
   }
-  if (best) dailyBySym[sym] = { d: best.dayPct, m: best.mainDaily, pool: `V${best.v} ${best.pair} ${best.feeLabel}`, tvl, w, at: Date.now() };
+  const bx = best && best.win && best.win[1440] && best.win[1440].x;   // 最高池 24h 窗口的伪尖峰剔除段数
+  if (best) dailyBySym[sym] = { d: best.dayPct, m: best.mainDaily, pool: `V${best.v} ${best.pair} ${best.feeLabel}`, tvl, w, at: Date.now(), ...(bx ? { x: bx } : {}) };
   else dailyBySym[sym] = { d: null, tvl, w, at: Date.now() };
 }
 
@@ -871,7 +926,8 @@ function buildPayload() {
       day: dy && dy.d != null ? dy.d : null,        // 全部池 (TVL≥1000) 中最高的池日化 (24h 主口径)
       dayPool: (dy && dy.pool) || '',
       dayMain: dy && dy.m != null ? dy.m : null,     // 该池的主力区间日化
-      dayW: dy && dy.w && Object.keys(dy.w).length ? dy.w : undefined,   // 各窗口最高日化 {分钟:{d,m,h,pool}}
+      dayX: dy && dy.x ? dy.x : undefined,           // 该池 24h 窗口被伪尖峰护栏剔除的采样段数
+      dayW: dy && dy.w && Object.keys(dy.w).length ? dy.w : undefined,   // 各窗口最高日化 {分钟:{d,m,h,pool,x}}
       rhTvl: dy && dy.tvl != null ? dy.tvl : null,   // 该代币 RH 链真实池 (TVL≥1000) TVL 合计
     };
   }).sort((a, b) => b.turnover - a.turnover);
