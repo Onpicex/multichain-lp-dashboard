@@ -22,3 +22,5 @@ stocktokens-*.json
 token-meta-sol.json
 fund-config.json
 funding-cache-*.json
+snapshots.json
+snapshot-config.json

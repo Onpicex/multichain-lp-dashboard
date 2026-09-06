@@ -1656,6 +1656,14 @@ try {
   console.error('Notifier failed to mount:', e.message);
 }
 
+// --- 资金每日快照 (/api/snapshot/*): 每天到点把钱包余额+LP 价值按钱包落盘, 供「资金快照」页看增减 ---
+try {
+  const { mountSnapshot } = require('./snapshot');
+  mountSnapshot(app, adminGuard);
+} catch (e) {
+  console.error('Snapshot failed to mount:', e.message);
+}
+
 // --- 钱包资金查询配置 (/api/fund/config): 启用开关 + 按链勾选钱包 ---
 // wallets.<chain> 未设置 = 该链全部钱包参与; [] = 全不参与; 数组 = 勾选子集
 const FUND_CFG_FILE = path.join(__dirname, 'fund-config.json');
