@@ -24,3 +24,12 @@ fund-config.json
 funding-cache-*.json
 snapshots.json
 snapshot-config.json
+# 2026-09-10 补: 09-07~09-09 新增的运行数据与凭据, 一律不入脱敏仓
+.lpauth-token
+auth-users-lp.json
+fund-config.json
+funding-cache-*.json
+v4collect-cache-*.json
+snapshot-config.json
+snapshots.json
+token-meta-sol.json

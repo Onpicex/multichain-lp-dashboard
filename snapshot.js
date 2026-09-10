@@ -14,7 +14,9 @@ const CFG_FILE = process.env.SNAPSHOT_CFG_FILE || path.join(__dirname, 'snapshot
 const DATA_FILE = process.env.SNAPSHOT_DATA_FILE || path.join(__dirname, 'snapshots.json');
 const PORT = parseInt(process.env.PORT || '1788');
 
-const CHAIN_API = { bsc: '/api', sol: '/api/sol', eth: '/api/eth', rh: '/api/rh', base: '/api/base' };
+// arc 为预接线链: /api/arc/positions 返回合法空载荷 (n=0), 会被下面的 `if (!s.n) continue` 干净跳过,
+// 不会计入 failed, 所以现在就登记进来是无害的, 主网上线时不必再回来改这里。
+const CHAIN_API = { bsc: '/api', sol: '/api/sol', eth: '/api/eth', rh: '/api/rh', base: '/api/base', arc: '/api/arc' };
 const CHAINS = Object.keys(CHAIN_API);
 const DEFAULT_CFG = { enabled: true, time: '00:05', tz: 'Asia/Shanghai', wallets: {} };
 const FRESH_MS = 12 * 60 * 1000;   // 链缓存年龄门槛: 超过则等一轮后台刷新

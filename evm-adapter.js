@@ -98,6 +98,45 @@ const EVM_CHAINS = {
     fundingFromLogs: true,                // 初始资金(净入金): 全链 Transfer 回溯 (仅 rh; rh RPC 无 trace, 原生 ETH 直转不可见)
     noBatch: true,                        // rh RPC 对 JSON-RPC batch 悬死 (2026-09-06), 单请求正常
   },
+  // --- Arc (Circle 稳定币 L1, chainId 5042): 预接线, 主网上线前不抓任何数据 ---
+  // 现状 (2026-09-08 实测): 主网 RPC 公网不可达 (rpc.arc.io 无响应 / rpc.mainnet.arc.io 返 Cloudflare 页 /
+  //   arc.drpc.org 返 Unknown network); 测试网 (chainId 5042002, rpc.testnet.arc.io) 可达但 eth_getCode 证实
+  //   Uniswap V3/V4 一个都没部署。故 pending=true: 不进刷新调度、/positions 直接返空载荷, 零 RPC 请求。
+  // ⚠ 下列合约地址来源 = Uniswap 官方 sdk-core 的 ARC_ADDRESSES, **尚未链上验证**
+  //   (本文件其余链的地址都带链上验证日期, 别把 Arc 当同级信任)。
+  // 上线切活: 见文件末尾 [ARC-GO-LIVE] 步骤, 先跑 node tools/arc-check.js 验证。
+  arc: {
+    name: 'Arc',
+    pending: true,                        // ← 主网上线并自检通过后改 false (唯一开关)
+    pendingDate: '2026-09-16',            // 官方公布的主网上线日 (arc.io)
+    chainId: 5042,                        // Uniswap sdk-core ChainId.ARC = 5042
+    rpc: process.env.ARC_RPC || 'https://rpc.arc.io',   // 占位: 主网 RPC 尚未公开, 以官方 docs.arc.io/arc/references/connect-to-arc 为准
+    v3: {
+      npm: '0x39654a85a4c05127f5fd6ed22caec077a0fb1377',      // sdk-core, 未链上验证
+      factory: '0xf0db7b58379503491d857db50ac9ece64c653918',   // sdk-core, 未链上验证
+    },
+    v4: {
+      pm: '0x6049c9a0e26405c0985f9e3685c87d0ae917f82b',           // sdk-core v4PositionManager, 未链上验证
+      stateView: '0xf3334192d15450cdd385c8b70e03f9a6bd9e673b',    // 与 rh 同址 (同一套确定性部署)
+      poolManager: '0x8366a39cc670b4001a1121b8f6a443a643e40951',  // 与 rh 同址
+      deployBlock: null,   // V4 Transfer 日志枚举起点; 待 tools/arc-check.js 探出后填 (无浏览器可用, 必需)
+    },
+    v3SubgraphId: null,                   // Arc 无 The Graph 子图
+    v4SubgraphId: null,
+    blockscout: null,                     // 主网浏览器未定 (testnet.arcscan.app 只是测试网) -> V4 枚举只能走日志
+    // Arc 的 gas 代币就是 USDC: 原生 18 位小数, ERC-20 接口预编译 0x3600… 是 6 位小数的同一笔余额。
+    // 链上没有 wrapped USDC ("There is no wrapped USDC address on Arc"), 故 wrappedNative 指向该预编译。
+    stables: {
+      '0x3600000000000000000000000000000000000000': 'USDC',
+    },
+    wrappedNative: '0x3600000000000000000000000000000000000000',
+    nativeSymbol: 'USDC',
+    nativePriceId: 'usd-coin',
+    nativeIsAliased: true,                // ⚠ 原生币与 wrappedNative 是同一笔钱的两种表示(非 ETH/WETH 那种两笔),
+                                          //   闲置余额只认 ERC-20 那笔, 否则同一笔 USDC 会被算两遍
+    coingeckoPlatform: null,              // coingecko 尚未收录 Arc
+    entryFromLogs: true,                  // 建仓价值: 无子图, 同 rh 走链上事件回溯
+  },
 };
 
 // --- ABIs (与 server.js 同款) ---
@@ -256,6 +295,9 @@ function loadWallets(chainId) {
 function saveWallets(chainId, wallets) {
   fs.writeFileSync(walletsFile(chainId), JSON.stringify(wallets, null, 2), 'utf8');
 }
+// 启用中的钱包 (enabled 缺省=启用; false=停用: 不抓仓位/不查余额/不回溯资金, 只保留在钱包列表里)
+function isWalletOn(w) { return w.enabled !== false; }
+function loadActiveWallets(chainId) { return loadWallets(chainId).filter(isWalletOn); }
 
 // --- token 信息 ---
 async function getTokenInfo(chainId, address) {
@@ -1531,7 +1573,9 @@ async function fetchIdleBalances(chainId, WALLETS, tokens, usdPrices) {
   for (const w of WALLETS) {
     const items = [];
     const nat = res[ri++];
-    if (nat) {
+    // nativeIsAliased (Arc): 原生币与 wrappedNative 预编译是同一笔余额的两种表示, 记了原生再记 ERC-20 会翻倍;
+    // 只认 ERC-20 那笔 (规范小数位)。ETH/WETH 那种"两笔独立的钱"不置此位, 行为不变。
+    if (nat && !cfg.nativeIsAliased) {
       const amount = Number(nat[0]) / 1e18;
       const v = amount * nativePrice;
       if (v >= 1) items.push({ symbol: cfg.nativeSymbol, address: 'native', amount, priceUSD: nativePrice, valueUSD: v, native: true });
@@ -1561,6 +1605,36 @@ function dropIdleWallet(idle, addr) {
   if (!idle || !idle.byWallet || !idle.byWallet[addr]) return;
   delete idle.byWallet[addr];
   idle.totalUSD = Object.values(idle.byWallet).reduce((s, w) => s + (w.totalUSD || 0), 0);
+}
+
+// 从已定价的钱包结果重算合计与统计 (剔除钱包后零 RPC 更新, 口径与主循环一致: 费含非活跃仓)
+function summarizeWallets(walletResults) {
+  let grandTotalUSD = 0, totalActive = 0, totalInRange = 0, totalOutOfRange = 0, totalFees = 0, walletsWithActiveLP = 0;
+  for (const wr of walletResults) {
+    let hasActive = false;
+    for (const pos of wr.positions || []) {
+      totalFees += pos.feesValueUSD || 0;
+      if (pos.liquidityActive) { totalActive++; hasActive = true; if (pos.inRange) totalInRange++; else totalOutOfRange++; }
+    }
+    grandTotalUSD += wr.totalUSD || 0;
+    if (hasActive) walletsWithActiveLP++;
+  }
+  return { grandTotalUSD, totalActive, totalInRange, totalOutOfRange, totalFees, walletsWithActiveLP };
+}
+// 把钱包从本链缓存/兜底快照里就地剔除并重算合计+统计 (删除/换地址/停用共用, 零 RPC 立即生效)
+function dropWalletFromCache(chainId, addr) {
+  const st = chainState(chainId);
+  if (st.cache.data) {
+    const d = st.cache.data;
+    d.wallets = (d.wallets || []).filter(w => w.address.toLowerCase() !== addr);
+    const sm = summarizeWallets(d.wallets);
+    d.grandTotalUSD = sm.grandTotalUSD;
+    d.stats = { ...(d.stats || {}), ...sm, totalWallets: loadActiveWallets(chainId).length };
+    dropIdleWallet(d.idle, addr);
+    try { fs.writeFileSync(st.posFile, JSON.stringify(st.cache)); } catch {}
+  }
+  dropIdleWallet(st.lastIdle, addr);
+  if (st.lastGood) delete st.lastGood[addr];
 }
 
 // --- 钱包资金查询配置 (fund-config.json, 路由在 server.js): 启用开关 + 按链勾选 ---
@@ -1738,7 +1812,7 @@ async function runFundingQueue(chainId) {
   if (fundingRunning[chainId]) return;
   fundingRunning[chainId] = true;
   try {
-    const WALLETS = fundSelected(loadFundCfgEvm(), chainId, loadWallets(chainId));
+    const WALLETS = fundSelected(loadFundCfgEvm(), chainId, loadActiveWallets(chainId));
     for (const w of WALLETS) {
       try {
         const r = await scanWalletFunding(chainId, w);
@@ -1802,6 +1876,152 @@ async function fetchChainPositions(chainId, forceRefresh = false) {
   return trackFetch(chainId, fetchInner(chainId, forceRefresh));
 }
 
+// =============================================================
+// 最后领费时间 lastCollectAt —— 「当前日化」的计时起点 (分子=未领手续费, 分母=距上次领取)
+// 缺了它, 领费后分子归零而分母继续从建仓算, 日化被系统性低估且越老越低.
+// - eth/base V3: 子图 PositionSnapshot —— 「累计已领 >= 当前总已领」的最早一条快照即最后一次 Collect
+//   (Collect 实体的 owner 恒为 NPM 无法按钱包过滤, 故不用它)
+// - eth/base V4: 子图 ModifyLiquidity 按 pool+ticks+origin 反查 (V4 子图无 salt/tokenId 字段).
+//   V4 任何 modifyLiquidity 都会顺带把手续费结算给 owner, 所以「最近一笔」就是费归零的时刻.
+//   ⚠ 同一 EOA 在同池开了区间完全相同的两仓会撞在一起 (与建仓回溯的 pool+ticks+origin 同款取舍)
+// - rh: 无子图 → 扫 PoolManager 日志 (topics: poolId + sender=PositionManager), data 里 salt=tokenId 匹配.
+//   每池一个游标增量扫: rh 出块 0.1s, 一轮 5min 只有 ~3000 块, 稳态成本 = 每池 1 次 getLogs.
+//   首扫回看上限 500 万块 (~5.8 天), 更早的领取不追 —— 查不到就退回按建仓起算 (即改动前的行为)
+// - 一律要求晚于建仓 60s 才算「领过」: 建仓本身也是一条 ModifyLiquidity, 否则会被误判
+// =============================================================
+const COLLECT_MIN_GAP = 60000;
+const V4_COLLECT_MAX_BACKFILL = 5000000;
+
+// BigDecimal 过滤值: 子图不吃科学计数法, 极小/极大值宁可放弃该仓
+function decStr(v) {
+  if (!(v > 0) || !isFinite(v)) return null;
+  const s = v.toFixed(18);
+  return (s.includes("e") || s.includes("E")) ? null : s;
+}
+
+async function v3LastCollectSubgraph(chainId, positions) {
+  const cfg = EVM_CHAINS[chainId];
+  const jobs = [];
+  for (const p of positions) {
+    const cf = p.collectedFees || {};
+    const useT0 = cf.token0 > 0;
+    const s = decStr((useT0 ? cf.token0 : cf.token1) * 0.999999);   // 浮点等值比较不可靠, 留 1e-6 余量
+    if (!s) continue;                       // 从未领过 → 计时起点保持建仓时间
+    jobs.push({ p, field: useT0 ? "collectedFeesToken0_gte" : "collectedFeesToken1_gte", s });
+  }
+  for (let i = 0; i < jobs.length; i += 30) {
+    const batch = jobs.slice(i, i + 30);
+    const q = batch.map((j, k) => `p${k}: positionSnapshots(where:{position:"${j.p.tokenId}",${j.field}:"${j.s}"},orderBy:timestamp,orderDirection:asc,first:1){timestamp}`).join(" ");
+    const d = await graphQueryRetry(cfg.v3SubgraphId, `{ ${q} }`, 2, 600);
+    if (!d) continue;
+    batch.forEach((j, k) => {
+      const ts = Number(d[`p${k}`]?.[0]?.timestamp || 0) * 1000;
+      if (ts > (j.p.createdAt || 0) + COLLECT_MIN_GAP) j.p.lastCollectAt = ts;
+    });
+  }
+}
+
+async function v4LastCollectSubgraph(chainId, positions) {
+  const cfg = EVM_CHAINS[chainId];
+  for (let i = 0; i < positions.length; i += 30) {
+    const batch = positions.slice(i, i + 30);
+    const q = batch.map((p, k) => `p${k}: modifyLiquidities(where:{pool:"${String(p.poolAddress).toLowerCase()}",tickLower:${p.tickLower},tickUpper:${p.tickUpper},origin:"${String(p.walletAddress).toLowerCase()}"},orderBy:timestamp,orderDirection:desc,first:1){timestamp}`).join(" ");
+    const d = await graphQueryRetry(cfg.v4SubgraphId, `{ ${q} }`, 2, 600);
+    if (!d) continue;
+    batch.forEach((p, k) => {
+      const ts = Number(d[`p${k}`]?.[0]?.timestamp || 0) * 1000;
+      if (ts > (p.createdAt || 0) + COLLECT_MIN_GAP) p.lastCollectAt = ts;
+    });
+  }
+}
+
+// 持久化: { at: {tokenId: ms}, cur: {poolId: 已扫到块}, seen: {tokenId: 1} }
+function v4CollectState(chainId) {
+  const st = chainState(chainId);
+  if (!st.v4CollectCache) {
+    st.v4CollectFile = path.join(__dirname, `v4collect-cache-${chainId}.json`);
+    let c = { at: {}, cur: {}, seen: {} };
+    try {
+      const s = JSON.parse(fs.readFileSync(st.v4CollectFile, "utf8"));
+      c = { at: s.at || {}, cur: s.cur || {}, seen: s.seen || {} };
+    } catch {}
+    st.v4CollectCache = c;
+  }
+  return st.v4CollectCache;
+}
+
+async function v4LastCollectRPC(chainId, positions) {
+  const st = chainState(chainId);
+  const cfg = EVM_CHAINS[chainId];
+  const c = v4CollectState(chainId);
+  const latest = await st.provider.getBlockNumber();
+  const floor = Math.max(0, latest - V4_COLLECT_MAX_BACKFILL);
+  const byPool = new Map();
+  for (const p of positions) {
+    const a = byPool.get(p.poolAddress) || []; a.push(p); byPool.set(p.poolAddress, a);
+  }
+  let dirty = false;
+  for (const [poolId, arr] of byPool) {
+    let from = c.cur[poolId] ? c.cur[poolId] + 1 : floor;
+    // 本池出现没见过的仓 (新开/新加的钱包) → 起点拉回回看窗口下沿补历史
+    if (arr.some(p => !c.seen[p.tokenId])) from = Math.min(from, floor);
+    if (from > latest) continue;
+    let logs;
+    try {
+      logs = await scanLogsChunked(chainId, {
+        address: cfg.v4.poolManager,
+        topics: [V4_MODIFY_TOPIC, poolId, ethers.zeroPadValue(cfg.v4.pm, 32)],
+      }, from, 1000000, latest);
+    } catch (e) {
+      console.error(`  [${chainId}] V4 领费扫描失败 pool ${String(poolId).slice(0, 10)}:`, e.message?.slice(0, 80));
+      continue;                              // 游标不推进, 下轮重扫同一段
+    }
+    const wanted = new Set(arr.map(p => String(p.tokenId)));
+    const last = {};
+    for (const lg of logs) {
+      // data 布局: tickLower(32B) tickUpper(32B) liquidityDelta(32B) salt(32B)
+      const salt = BigInt("0x" + lg.data.slice(2).slice(192, 256)).toString();
+      if (!wanted.has(salt)) continue;
+      const bn = parseInt(lg.blockNumber, 16);
+      if (bn > (last[salt] || 0)) last[salt] = bn;
+    }
+    for (const [tid, bn] of Object.entries(last)) {
+      const b = await withRetry(() => st.provider.getBlock(bn)).catch(() => null);
+      if (b) { c.at[tid] = b.timestamp * 1000; dirty = true; }
+    }
+    for (const p of arr) c.seen[p.tokenId] = 1;
+    c.cur[poolId] = latest;
+    dirty = true;
+  }
+  for (const p of positions) {
+    const ms = c.at[p.tokenId];
+    if (ms > (p.createdAt || 0) + COLLECT_MIN_GAP) p.lastCollectAt = ms;
+  }
+  if (dirty) { try { fs.writeFileSync(st.v4CollectFile, JSON.stringify(st.v4CollectCache)); } catch {} }
+}
+
+// 定价前统一填 lastCollectAt; 任何一条腿失败都只是退回「按建仓起算」, 不影响本轮其余数据
+async function fillLastCollect(chainId, walletResults) {
+  const cfg = EVM_CHAINS[chainId];
+  const v3 = [], v4 = [];
+  for (const wr of walletResults) for (const p of (wr.positions || [])) {
+    if (!p.liquidityActive) continue;
+    if (p.protocol === "V4") v4.push(p);
+    else if (!p.lastCollectAt) v3.push(p);   // rh V3 已由 Collect 事件扫描填好, 别覆盖
+  }
+  try {
+    if (cfg.v3SubgraphId && v3.length) await v3LastCollectSubgraph(chainId, v3);
+  } catch (e) { console.error(`  [${chainId}] V3 领费时间填充失败:`, e.message?.slice(0, 80)); }
+  try {
+    if (v4.length) {
+      if (cfg.v4SubgraphId) await v4LastCollectSubgraph(chainId, v4);
+      else await v4LastCollectRPC(chainId, v4);
+    }
+  } catch (e) { console.error(`  [${chainId}] V4 领费时间填充失败:`, e.message?.slice(0, 80)); }
+  const tot = v3.length + v4.length;
+  if (tot) console.log(`  [${chainId}] 领费时间: ${[...v3, ...v4].filter(p => p.lastCollectAt).length}/${tot} 仓有记录`);
+}
+
 async function fetchInner(chainId, forceRefresh) {
   const st = chainState(chainId);
   const startedAt = Date.now();
@@ -1810,7 +2030,7 @@ async function fetchInner(chainId, forceRefresh) {
   // 强刷不再清 v4IdCache: 枚举缓存有链上 balanceOf 计数做失效判据, 计数一致即可信;
   // 清掉会触发全部钱包的全链 Transfer 重扫 (rh 手动刷新慢的主因, RPC 紧张时还会雪崩)
 
-  const WALLETS = loadWallets(chainId);
+  const WALLETS = loadActiveWallets(chainId);
   const npm = new ethers.Contract(cfg.v3.npm, V3_NPM_ABI, st.provider);
   const factory = new ethers.Contract(cfg.v3.factory, FACTORY_ABI, st.provider);
   const v4pm = new ethers.Contract(cfg.v4.pm, V4_PM_ABI, st.provider);
@@ -1825,7 +2045,7 @@ async function fetchInner(chainId, forceRefresh) {
     if (!st.lastGood[k]) st.lastGood[k] = w;
   }
 
-  const walletResults = [];
+  let walletResults = [];
   // 串行×2并发: 每个钱包 V3+V4 并行, 钱包间小并发
   for (let i = 0; i < WALLETS.length; i += 2) {
     const batch = WALLETS.slice(i, i + 2);
@@ -1847,6 +2067,9 @@ async function fetchInner(chainId, forceRefresh) {
     walletResults.push(...r);
     await sleep(300);
   }
+
+  // 最后领费时间 (当前日化的计时起点) —— 见 fillLastCollect 顶部注释
+  await fillLastCollect(chainId, walletResults);
 
   // 定价
   const allTokens = new Set(), allPositions = [];
@@ -1911,12 +2134,21 @@ async function fetchInner(chainId, forceRefresh) {
     wr.positions.sort((a, b) => b.totalValueUSD - a.totalValueUSD);
   }
 
+  // 本轮起跑后被停用/删除的钱包不发布 (长轮次期间用户点了停用, 别让旧结果把它带回来)
+  const stillOn = new Set(loadActiveWallets(chainId).map(w => w.address.toLowerCase()));
+  const droppedMid = walletResults.filter(wr => !stillOn.has(wr.address.toLowerCase()));
+  if (droppedMid.length) {
+    for (const wr of droppedMid) if (st.lastGood) delete st.lastGood[wr.address.toLowerCase()];
+    walletResults = walletResults.filter(wr => stillOn.has(wr.address.toLowerCase()));
+    ({ grandTotalUSD, totalActive, totalInRange, totalOutOfRange, totalFees, walletsWithActiveLP } = summarizeWallets(walletResults));
+    console.log(`[${chainId}] 发布前剔除本轮中途停用/删除的钱包: ${droppedMid.map(w => w.name).join(', ')}`);
+  }
   const wallets = walletResults.filter(wr => wr.positions.length > 0);
   wallets.sort((a, b) => parseInt((a.name.match(/\d+/) || ['0'])[0]) - parseInt((b.name.match(/\d+/) || ['0'])[0]));
 
-  // 钱包闲置余额: 按 fund-config 启用/勾选过滤; 失败沿用上轮快照 (按当前勾选过滤), 不拖累主数据
+  // 钱包闲置余额: 按 fund-config 启用/勾选过滤 (已停用钱包不查); 失败沿用上轮快照 (按当前勾选过滤), 不拖累主数据
   const fundCfg = loadFundCfgEvm();
-  const fundWallets = fundSelected(fundCfg, chainId, WALLETS);
+  const fundWallets = fundSelected(fundCfg, chainId, WALLETS.filter(w => stillOn.has(w.address.toLowerCase())));
   let idle = null;
   if (fundWallets.length) {
     idle = filterIdleByWallets(st.lastIdle || st.cache.data?.idle || null, fundWallets);
@@ -1951,7 +2183,7 @@ async function fetchInner(chainId, forceRefresh) {
 
   const result = {
     wallets, grandTotalUSD, idle, timestamp: Date.now(),
-    stats: { totalActive, totalInRange, totalOutOfRange, totalFees, walletsWithActiveLP, totalWallets: WALLETS.length },
+    stats: { totalActive, totalInRange, totalOutOfRange, totalFees, walletsWithActiveLP, totalWallets: stillOn.size },
   };
   if (st.lastPublishStart > startedAt) {
     // 比本轮更晚起跑的一轮已发布 (本轮是被看门狗放弃后迟到完成的僵尸轮): 不许旧盖新;
@@ -1995,27 +2227,25 @@ function mountEvmRoutes(app, adminGuard) {
       if (idx === -1) return res.status(404).json({ error: '地址不存在' });
       const removed = wallets.splice(idx, 1)[0];
       saveWallets(chainId, wallets);
-      // 从缓存里剔除该钱包立即生效, 其余数据保留; 后台补一轮刷新总计
-      const st = chainState(chainId);
-      if (st.cache.data) {
-        st.cache.data.wallets = st.cache.data.wallets.filter(w => w.address.toLowerCase() !== addr);
-        st.cache.data.grandTotalUSD = st.cache.data.wallets.reduce((s, w) => s + (w.totalUSD || 0), 0);
-        dropIdleWallet(st.cache.data.idle, addr);
-      }
-      dropIdleWallet(st.lastIdle, addr);
-      if (st.lastGood) delete st.lastGood[addr];
+      // 从缓存里剔除该钱包立即生效 (合计/统计就地重算), 其余数据保留; 后台补一轮刷新
+      dropWalletFromCache(chainId, addr);
       kickRefresh(chainId);
       console.log(`[${chainId}] Wallet removed: ${removed.name} (${addr})`);
       res.json({ ok: true, wallets });
     });
-    // 编辑钱包: 改名和/或换地址。改名零 RPC 就地更新; 换地址=删旧+加新, 不清整链缓存
+    // 编辑钱包: 改名和/或换地址和/或启停。改名零 RPC 就地更新; 换地址=删旧+加新, 不清整链缓存;
+    // 停用=就地剔出缓存且后续轮次不再抓 (零 RPC), 启用=后台补一轮把它带回来 (同添加)
     app.patch(`${base}/wallets/:address`, adminGuard, (req, res) => {
       const cur = req.params.address.toLowerCase();
       const wallets = loadWallets(chainId);
       const idx = wallets.findIndex(w => w.address.toLowerCase() === cur);
       if (idx === -1) return res.status(404).json({ error: '地址不存在' });
-      const { name, address } = req.body || {};
-      let newName, newAddr;
+      const { name, address, enabled } = req.body || {};
+      let newName, newAddr, newEnabled;
+      if (enabled !== undefined) {
+        if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled 须为布尔值' });
+        newEnabled = enabled;
+      }
       if (name !== undefined) {
         newName = String(name).trim();
         if (!newName) return res.status(400).json({ error: '名称不能为空' });
@@ -2025,24 +2255,22 @@ function mountEvmRoutes(app, adminGuard) {
         if (!/^0x[0-9a-f]{40}$/.test(newAddr)) return res.status(400).json({ error: '无效的 EVM 地址' });
         if (newAddr !== cur && wallets.some((w, i) => i !== idx && w.address.toLowerCase() === newAddr)) return res.status(409).json({ error: '地址已存在' });
       }
-      if (newName === undefined && newAddr === undefined) return res.status(400).json({ error: '需要 name 或 address' });
+      if (newName === undefined && newAddr === undefined && newEnabled === undefined) return res.status(400).json({ error: '需要 name / address / enabled' });
       const old = { ...wallets[idx] };
       const addrChanged = newAddr !== undefined && newAddr !== cur;
+      const enabledChanged = newEnabled !== undefined && newEnabled !== isWalletOn(old);
       if (newName !== undefined) wallets[idx].name = newName;
       if (newAddr !== undefined) wallets[idx].address = newAddr;
+      if (newEnabled !== undefined) { if (newEnabled) delete wallets[idx].enabled; else wallets[idx].enabled = false; }
       saveWallets(chainId, wallets);
       const st = chainState(chainId);
       if (addrChanged) {
-        // 旧地址就地剔出缓存, 新地址靠后台刷新补进来 (与删除+添加同语义)
-        if (st.cache.data) {
-          st.cache.data.wallets = st.cache.data.wallets.filter(w => w.address.toLowerCase() !== cur);
-          st.cache.data.grandTotalUSD = st.cache.data.wallets.reduce((s, w) => s + (w.totalUSD || 0), 0);
-          dropIdleWallet(st.cache.data.idle, cur);
-          try { fs.writeFileSync(st.posFile, JSON.stringify(st.cache)); } catch {}
-        }
-        dropIdleWallet(st.lastIdle, cur);
-        if (st.lastGood) delete st.lastGood[cur];
-        kickRefresh(chainId);
+        // 旧地址就地剔出缓存, 新地址靠后台刷新补进来 (与删除+添加同语义); 停用中的钱包不抓
+        dropWalletFromCache(chainId, cur);
+        if (isWalletOn(wallets[idx])) kickRefresh(chainId);
+      } else if (enabledChanged) {
+        if (newEnabled) kickRefresh(chainId);          // 重新启用: 后台补一轮把它带回来
+        else dropWalletFromCache(chainId, cur);        // 停用: 就地剔出缓存, 零 RPC 立即生效
       } else {
         if (st.cache.data) {
           for (const w of st.cache.data.wallets) if (w.address.toLowerCase() === cur) w.name = wallets[idx].name;
@@ -2052,10 +2280,20 @@ function mountEvmRoutes(app, adminGuard) {
         if (st.lastIdle?.byWallet?.[cur]) st.lastIdle.byWallet[cur].name = wallets[idx].name;
         if (st.lastGood && st.lastGood[cur]) st.lastGood[cur].name = wallets[idx].name;
       }
-      console.log(`[${chainId}] Wallet updated: ${old.name} (${old.address}) -> ${wallets[idx].name} (${wallets[idx].address})`);
+      console.log(`[${chainId}] Wallet updated: ${old.name} (${old.address}) -> ${wallets[idx].name} (${wallets[idx].address})${enabledChanged ? (newEnabled ? ' [启用]' : ' [停用]') : ''}`);
       res.json({ ok: true, wallets });
     });
     app.get(`${base}/positions`, async (req, res) => {
+      // pending 链: 返回结构合法的空载荷而不是报错 —— 报错会让 snapshot.js 把它计入 failed,
+      // 每日快照都挂上"缺 Arc"警告; 空载荷则走既有的 `if (!s.n) continue` 被干净跳过。
+      const pcfg = EVM_CHAINS[chainId];
+      if (pcfg.pending) {
+        return res.json({
+          pending: true, pendingDate: pcfg.pendingDate || null, chainId: pcfg.chainId || null,
+          wallets: [], grandTotalUSD: 0, timestamp: Date.now(),
+          stats: { totalActive: 0, totalInRange: 0, totalOutOfRange: 0, totalFees: 0, walletsWithActiveLP: 0 },
+        });
+      }
       try {
         res.json(await fetchChainPositions(chainId, req.query.refresh === 'true'));
       } catch (e) {
@@ -2073,6 +2311,8 @@ function mountEvmRoutes(app, adminGuard) {
   const FETCH_STUCK_MS = 15 * 60 * 1000; // 正常 rh 一轮 ~30s, RPC 降级期 5-9min 甚至更久;
                                          // 被放弃的慢轮迟到完成仍可发布 (lastPublishStart 排序), 不白跑
   for (const chainId of Object.keys(EVM_CHAINS)) {
+    // pending 链(主网未上线, 如 arc): 不建定时刷新/不预热/不建 funding 队列, 一个 RPC 请求都不发
+    if (EVM_CHAINS[chainId].pending) { console.log(`[${chainId}] pending (主网未上线), 跳过刷新调度`); continue; }
     setInterval(() => {
       const st = chainState(chainId);
       if (st.fetchInFlight) {
@@ -2108,5 +2348,14 @@ function mountEvmRoutes(app, adminGuard) {
   }
 }
 
+// =============================================================
+// [ARC-GO-LIVE] Arc 主网上线切活步骤 (预计 2026-09-16)
+//   1. node tools/arc-check.js            (必要时 ARC_RPC=<官方主网 RPC> 前缀), 要求全绿
+//   2. 把自检输出的真实 rpc / v4.deployBlock / 需要时 noBatch 填进上面 EVM_CHAINS.arc,
+//      并把各地址注释从"未链上验证"改成"链上验证 <日期>"
+//   3. EVM_CHAINS.arc.pending -> false; server.js 的 CHAINS 里 arc 改 enabled:true 并删掉 pending 字段
+//   4. 加 Arc 钱包地址 -> 重启服务 -> 验证首轮抓取
+// =============================================================
 module.exports = { mountEvmRoutes, EVM_CHAINS, kickRefresh,
-  _entryTest: { getV3EntryData, getV4EntryData, getV3EntrySubgraph, getV4EntrySubgraph, getTokenInfo } };  // 建仓回溯的独立验证入口
+  _entryTest: { getV3EntryData, getV4EntryData, getV3EntrySubgraph, getV4EntrySubgraph, getTokenInfo } };
+module.exports._collectTest = { fillLastCollect };   // 领费时间的独立验证入口 (tools/collect-check.js)  // 建仓回溯的独立验证入口

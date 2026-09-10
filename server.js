@@ -6,6 +6,12 @@ const { ethers } = require('ethers');
 const fs = require('fs');
 const app = express();
 app.use(express.json());
+
+// 2026-09-09 登录页模式 (原 nginx Basic Auth 弹窗)。必须在业务路由之前挂载。
+// 注意: 真正的鉴权闸门在 nginx (map $cookie_lpauth $lp_ok), 本模块只负责
+// 校验用户名口令并下发 nginx 认识的 cookie —— 见 lp-auth.js 顶部说明。
+const { mountLpAuth } = require("./lp-auth");
+mountLpAuth(app);
 const PORT = parseInt(process.env.PORT || '1788');
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 
@@ -16,6 +22,9 @@ const CHAINS = [
   { id: 'eth',  name: 'Ethereum', enabled: true },
   { id: 'rh',   name: 'Robinhood', enabled: true },
   { id: 'base', name: 'Base', enabled: false },
+  // Arc (Circle 稳定币 L1, chainId 5042): 主网预计 2026-09-16 上线, 现为预接线状态。
+  // pending 字段是前端"待主网"角标+占位页的唯一真源; 上线后改 enabled:true 并删掉 pending。
+  { id: 'arc',  name: 'Arc', enabled: false, pending: '2026-09-16' },
 ];
 
 // Optional admin guard for mutating endpoints (set ADMIN_TOKEN in .env to enable)
@@ -48,6 +57,9 @@ function saveWallets(wallets) {
 }
 
 let WALLETS = loadWallets();
+// 启用中的钱包 (enabled 缺省=启用; false=停用: 不抓仓位/不查余额, 只保留在列表里)
+function isWalletOn(w) { return w.enabled !== false; }
+function activeWallets() { return WALLETS.filter(isWalletOn); }
 const BSC_RPC = process.env.BSC_RPC || 'https://bsc-dataseed.binance.org';
 // Ankr Advanced API: 支持逗号分隔多个 endpoint 轮动使用 (分摊限流)
 const ANKR_ADVANCED_URLS = (process.env.ANKR_ADVANCED_URL || (process.env.BSC_RPC?.includes('ankr.com') ? process.env.BSC_RPC.replace('/bsc/', '/multichain/') : ''))
@@ -1274,10 +1286,11 @@ async function _fetchPositionsInner(forceRefresh = false) {
   const v4pm = new ethers.Contract(V4_POSITION_MANAGER, V4_POSITION_MANAGER_ABI, provider);
   const stateView = new ethers.Contract(V4_STATE_VIEW, V4_STATE_VIEW_ABI, provider);
 
-  console.log(`Fetching V3+V4 positions for ${WALLETS.length} wallets (concurrency: ${MAX_CONCURRENT})...`);
+  const ACTIVE = activeWallets();
+  console.log(`Fetching V3+V4 positions for ${ACTIVE.length} wallets (concurrency: ${MAX_CONCURRENT})...`);
 
   // Fetch all wallets: V3 + V4 combined
-  const walletResults = await asyncPool(MAX_CONCURRENT, WALLETS, async (wallet) => {
+  let walletResults = await asyncPool(MAX_CONCURRENT, ACTIVE, async (wallet) => {
     const [v3positions, v4positions] = await Promise.all([
       fetchWalletPositions(wallet, v3pm, factory),
       fetchWalletV4Positions(wallet, v4pm, stateView),
@@ -1286,6 +1299,8 @@ async function _fetchPositionsInner(forceRefresh = false) {
     await sleep(500);
     return { address: wallet.address, name: wallet.name, positions: allPositions, totalUSD: 0 };
   });
+  // 本轮起跑后被停用/删除的钱包不发布 (WALLETS 是活的全局列表, 路由已同步改过)
+  walletResults = walletResults.filter(wr => activeWallets().some(w => w.address.toLowerCase() === (wr.address || '').toLowerCase()));
 
   // For active V3 positions: fill in createdAt (chain fallback) + lastCollectAt
   const activeV3Positions = [];
@@ -1469,7 +1484,7 @@ async function _fetchPositionsInner(forceRefresh = false) {
   const fundCfg = loadFundCfg();
   const fundSel = fundCfg.wallets.bsc;
   const fundWallets = !fundCfg.enabled ? []
-    : (!Array.isArray(fundSel) ? WALLETS : WALLETS.filter(w => fundSel.some(a => String(a).toLowerCase() === w.address.toLowerCase())));
+    : (!Array.isArray(fundSel) ? activeWallets() : activeWallets().filter(w => fundSel.some(a => String(a).toLowerCase() === w.address.toLowerCase())));
   let idle = null;
   if (fundWallets.length) {
     idle = lastIdleBsc || cache.data?.idle || null;
@@ -1490,7 +1505,7 @@ async function _fetchPositionsInner(forceRefresh = false) {
       totalOutOfRange,
       totalFees,
       walletsWithActiveLP,
-      totalWallets: WALLETS.length,
+      totalWallets: activeWallets().length,
     },
   };
 
@@ -1551,6 +1566,46 @@ app.get('/api/chains', (req, res) => {
   res.json(CHAINS);
 });
 
+// 从已定价的钱包结果重算合计与统计 (剔除钱包后零 RPC 更新, 口径与主循环一致: 费含非活跃仓)
+function summarizeWallets(walletResults) {
+  let grandTotalUSD = 0, totalActive = 0, totalInRange = 0, totalOutOfRange = 0, totalFees = 0, walletsWithActiveLP = 0;
+  for (const wr of walletResults) {
+    let hasActive = false;
+    for (const pos of wr.positions || []) {
+      totalFees += pos.feesValueUSD || 0;
+      if (pos.liquidityActive) { totalActive++; hasActive = true; if (pos.inRange) totalInRange++; else totalOutOfRange++; }
+    }
+    grandTotalUSD += wr.totalUSD || 0;
+    if (hasActive) walletsWithActiveLP++;
+  }
+  return { grandTotalUSD, totalActive, totalInRange, totalOutOfRange, totalFees, walletsWithActiveLP };
+}
+// 停用钱包: 就地剔出缓存 (合计/统计/闲置余额一起重算), 零 RPC 立即生效
+function dropBscWalletFromCache(addr) {
+  const fixIdle = (idle) => {
+    if (!idle || !idle.byWallet || !idle.byWallet[addr]) return;
+    delete idle.byWallet[addr];
+    idle.totalUSD = Object.values(idle.byWallet).reduce((s, w) => s + (w.totalUSD || 0), 0);
+  };
+  if (cache.data) {
+    const d = cache.data;
+    d.wallets = (d.wallets || []).filter(w => (w.address || '').toLowerCase() !== addr);
+    const sm = summarizeWallets(d.wallets);
+    d.grandTotalUSD = sm.grandTotalUSD;
+    d.stats = { ...(d.stats || {}), ...sm, totalWallets: activeWallets().length };
+    fixIdle(d.idle);
+    savePosCache();
+  }
+  fixIdle(lastIdleBsc);
+}
+// 重新启用钱包: 后台补一轮把它带回来, 不清老数据 (与 EVM 适配器 kickRefresh 同语义)
+function kickBscRefresh() {
+  if (fetchInFlight) return;
+  fetchInFlight = _fetchPositionsInner(false)
+    .catch(e => console.error('[BSC] kick refresh failed:', e.message))
+    .finally(() => { fetchInFlight = null; });
+}
+
 // --- Wallet management API ---
 app.get('/api/wallets', (req, res) => {
   res.json(WALLETS);
@@ -1586,8 +1641,12 @@ app.patch('/api/wallets/:address', adminGuard, (req, res) => {
   const cur = req.params.address.toLowerCase();
   const idx = WALLETS.findIndex(w => w.address.toLowerCase() === cur);
   if (idx === -1) return res.status(404).json({ error: '地址不存在' });
-  const { name, address } = req.body || {};
-  let newName, newAddr;
+  const { name, address, enabled } = req.body || {};
+  let newName, newAddr, newEnabled;
+  if (enabled !== undefined) {
+    if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled 须为布尔值' });
+    newEnabled = enabled;
+  }
   if (name !== undefined) {
     newName = String(name).trim();
     if (!newName) return res.status(400).json({ error: '名称不能为空' });
@@ -1597,20 +1656,25 @@ app.patch('/api/wallets/:address', adminGuard, (req, res) => {
     if (!/^0x[0-9a-f]{40}$/.test(newAddr)) return res.status(400).json({ error: '无效的 BSC 地址' });
     if (newAddr !== cur && WALLETS.some((w, i) => i !== idx && w.address.toLowerCase() === newAddr)) return res.status(409).json({ error: '地址已存在' });
   }
-  if (newName === undefined && newAddr === undefined) return res.status(400).json({ error: '需要 name 或 address' });
+  if (newName === undefined && newAddr === undefined && newEnabled === undefined) return res.status(400).json({ error: '需要 name / address / enabled' });
   const old = { ...WALLETS[idx] };
   const addrChanged = newAddr !== undefined && newAddr !== cur;
+  const enabledChanged = newEnabled !== undefined && newEnabled !== isWalletOn(old);
   if (newName !== undefined) WALLETS[idx].name = newName;
   if (newAddr !== undefined) WALLETS[idx].address = newAddr;
+  if (newEnabled !== undefined) { if (newEnabled) delete WALLETS[idx].enabled; else WALLETS[idx].enabled = false; }
   saveWallets(WALLETS);
   if (addrChanged) {
     cache = { data: null, timestamp: 0 };
+  } else if (enabledChanged) {
+    if (newEnabled) kickBscRefresh();       // 重新启用: 后台补一轮带回来
+    else dropBscWalletFromCache(cur);       // 停用: 就地剔出缓存, 零 RPC
   } else if (cache.data) {
     // 只改名: 缓存里就地改显示名, 不触发重拉
     for (const w of cache.data.wallets) if ((w.address || '').toLowerCase() === cur) w.name = WALLETS[idx].name;
     savePosCache();
   }
-  console.log(`Wallet updated: ${old.name} (${old.address}) -> ${WALLETS[idx].name} (${WALLETS[idx].address})`);
+  console.log(`Wallet updated: ${old.name} (${old.address}) -> ${WALLETS[idx].name} (${WALLETS[idx].address})${enabledChanged ? (newEnabled ? ' [启用]' : ' [停用]') : ''}`);
   res.json({ ok: true, wallets: WALLETS });
 });
 
@@ -1678,7 +1742,7 @@ app.post('/api/fund/config', adminGuard, (req, res) => {
   const body = req.body || {};
   const cur = loadFundCfg();
   const next = { enabled: body.enabled !== false, wallets: {} };
-  const VALID_CHAINS = ['bsc', 'sol', 'eth', 'rh', 'base'];
+  const VALID_CHAINS = ['bsc', 'sol', 'eth', 'rh', 'base', 'arc'];
   const src = (body.wallets && typeof body.wallets === 'object') ? body.wallets : cur.wallets;
   for (const [ch, arr] of Object.entries(src)) {
     if (!VALID_CHAINS.includes(ch)) continue;
@@ -1691,11 +1755,32 @@ app.post('/api/fund/config', adminGuard, (req, res) => {
   // 踢一轮当前链后台刷新, 让改动尽快生效 (其余链下轮 5min 周期自然跟上)
   const ch = String(body._chain || '');
   try {
-    if (['eth', 'rh', 'base'].includes(ch) && evmKickRefresh) evmKickRefresh(ch);
+    if (['eth', 'rh', 'base', 'arc'].includes(ch) && evmKickRefresh) evmKickRefresh(ch);
     else if (ch === 'sol' && solKickRefresh) solKickRefresh();
   } catch {}
   console.log(`[fund] config saved: enabled=${next.enabled}, chains=${Object.keys(next.wallets).join(',') || '(all default)'}`);
   res.json(loadFundCfg());
+});
+
+// --- 界面配置 (/api/ui/config): 总览页「管理钱包」面板显隐开关 (纯前端偏好, 服务端持久化以便多端一致) ---
+const UI_CFG_FILE = path.join(__dirname, 'ui-config.json');
+function loadUiCfg() {
+  try {
+    const c = JSON.parse(fs.readFileSync(UI_CFG_FILE, 'utf8'));
+    return { walletMgr: c.walletMgr !== false };
+  } catch { return { walletMgr: true }; }
+}
+app.get('/api/ui/config', (req, res) => res.json(loadUiCfg()));
+app.post('/api/ui/config', adminGuard, (req, res) => {
+  const body = req.body || {};
+  const cur = loadUiCfg();
+  const next = { walletMgr: body.walletMgr === undefined ? cur.walletMgr : body.walletMgr !== false };
+  try {
+    const tmp = UI_CFG_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2)); fs.renameSync(tmp, UI_CFG_FILE);
+  } catch (e) { return res.status(500).json({ error: '写入失败: ' + e.message }); }
+  console.log(`[ui] config saved: walletMgr=${next.walletMgr}`);
+  res.json(loadUiCfg());
 });
 
 app.listen(PORT, process.env.HOST || '0.0.0.0', () => {

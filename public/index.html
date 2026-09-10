@@ -70,6 +70,23 @@
   .chain-ico.eth { background: #627eea; }
   .chain-ico.rh { background: #00c805; color: #0a0a0a; }
   .chain-ico.base { background: #0052ff; }
+  .chain-ico.arc { background: linear-gradient(135deg, #0b3b5c, #16a3b8); color: #fff; }
+  .nav-item.pending .chain-ico { opacity: 0.75; }
+  /* 预接线链占位卡 (主网未上线) */
+  .pend-card {
+    max-width: 640px; margin: 40px auto; padding: 26px 28px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  }
+  .pend-title { font-size: 17px; font-weight: 700; color: var(--text); display: flex; align-items: center; gap: 9px; }
+  .pend-badge { font-size: 10px; font-weight: 600; color: var(--yellow); border: 1px solid var(--yellow); border-radius: 4px; padding: 1px 6px; }
+  .pend-desc { margin-top: 12px; font-size: 13px; line-height: 1.75; color: var(--text-dim); }
+  .pend-grid { margin-top: 18px; display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px; }
+  .pend-kv { padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+  .pend-kv .k { font-size: 10px; color: var(--text-muted); }
+  .pend-kv .v { margin-top: 3px; font-family: var(--mono); font-size: 13px; color: var(--text); }
+  .pend-note { margin-top: 16px; font-size: 11.5px; line-height: 1.7; color: var(--text-muted); }
+  .pend-note a { color: var(--accent); text-decoration: none; }
+  .pend-note a:hover { text-decoration: underline; }
   .chain-ico.stk { background: linear-gradient(135deg, #00c805, #059669); color: #04170a; font-size: 9px; }
   .chain-ico.doc { background: #6366f1; font-size: 9px; }
   .chain-ico.apr { background: #f59e0b; color: #1a1a1a; }
@@ -188,6 +205,7 @@
   .st-card-ico.fund { background: var(--accent-dim); }
   .st-card-ico.bell { background: var(--yellow-dim); }
   .st-card-ico.snap { background: rgba(14,165,233,0.14); }
+  .st-card-ico.wm { background: var(--green-dim); }
   .st-card-titles { min-width: 0; flex: 1; }
   .st-card-title { font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
   .st-card-desc { font-size: 11.5px; color: var(--text-muted); margin-top: 3px; line-height: 1.5; }
@@ -319,6 +337,32 @@
     transition: all 0.12s; flex-shrink: 0;
   }
   .wm-edit-btn:hover { color: var(--accent); background: var(--surface2, rgba(120,120,160,0.15)); }
+  /* 钱包启停 (小眼睛): 停用=不抓取该钱包数据 */
+  .wm-eye-btn {
+    background: transparent; border: none; color: var(--text-dim);
+    cursor: pointer; padding: 2px 6px; border-radius: 4px; display: inline-flex; align-items: center;
+    transition: all 0.12s; flex-shrink: 0;
+  }
+  .wm-eye-btn svg { width: 14px; height: 14px; display: block; }
+  .wm-eye-btn:hover { color: var(--accent); background: var(--surface2, rgba(120,120,160,0.15)); }
+  .wm-eye-btn.off { color: var(--text-muted); }
+  .wm-eye-btn.off:hover { color: var(--green); background: var(--green-dim); }
+  .wm-item.off .wm-item-name { color: var(--text-muted); font-weight: 500; text-decoration: line-through; text-decoration-color: var(--border-light); }
+  .wm-item.off .wm-item-addr { opacity: 0.55; }
+  .wm-off-tag { font-size: 9px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; white-space: nowrap; flex-shrink: 0; }
+  /* 筛选栏两级分组 (Chrome 标签组式): 组胶囊 → 点开出现组内钱包胶囊 → 点钱包看头寸; 再点组收起 */
+  .ftag.fgrp { display: inline-flex; align-items: center; gap: 6px; border-color: var(--gc); color: var(--gc); }
+  .ftag.fgrp .fdot { width: 7px; height: 7px; border-radius: 50%; background: var(--gc); flex-shrink: 0; }
+  .ftag.fgrp .fcount { font-family: var(--mono); font-size: 10px; opacity: 0.8; }
+  .ftag.fgrp .farrow { font-size: 10px; opacity: 0.7; margin-left: -2px; }
+  .ftag.fgrp.open { background: color-mix(in srgb, var(--gc) 10%, transparent); }
+  .ftag.fgrp.active { background: color-mix(in srgb, var(--gc) 18%, transparent); font-weight: 600; }
+  .fsub { display: inline-flex; align-items: center; gap: 6px; padding: 3px 6px 3px 8px; margin-left: -4px; border-radius: 8px; border: 1px dashed var(--gc); border-left: none; }
+  .fsub .fwal { padding: 4px 11px; }
+  .fsub .fwal.active { color: var(--gc); border-color: var(--gc); background: color-mix(in srgb, var(--gc) 14%, transparent); }
+  /* 实时同步指示 */
+  .live-dot { font-size: 9px; color: var(--text-muted); transition: color 0.3s; cursor: default; }
+  .live-dot.on { color: var(--green); }
   .wm-item-edit {
     display: flex; gap: 6px; align-items: center;
     padding: 6px 10px; border-radius: 6px; background: var(--surface);
@@ -667,6 +711,13 @@
   .sn-sub tr:last-child td { border-bottom: none; }
   .sn-sub .sn-name { font-family: var(--font); font-weight: 600; color: var(--text); }
   .sn-sub .sn-addr { font-family: var(--mono); font-size: 10px; color: var(--text-muted); margin-left: 6px; font-weight: 400; }
+  /* 明细表按钱包名前缀分组 (与总览筛选同一套规则): 组汇总行 + 缩进的组内钱包行 */
+  .sn-sub tr.sn-grp td { background: color-mix(in srgb, var(--gc) 10%, transparent); border-bottom: 1px solid var(--border); }
+  .sn-sub tr.sn-grp .sn-name { color: var(--gc); }
+  .sn-sub .sn-gdot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--gc); margin-right: 6px; vertical-align: 1px; }
+  .sn-sub .sn-gcount { font-family: var(--font); font-size: 10px; color: var(--text-muted); margin-left: 6px; font-weight: 400; }
+  .sn-sub tr.sn-gmem td:first-child { padding-left: 10px; border-left: 2px solid color-mix(in srgb, var(--gc) 50%, transparent); }
+  .sn-sub tr.sn-gmem .sn-name { font-weight: 500; }
   .sn-empty { padding: 44px 16px; text-align: center; color: var(--text-muted); font-size: 13px; line-height: 1.9; }
   .sn-btn2 { font-family: var(--font); font-size: 12px; font-weight: 600; color: var(--text-dim); background: transparent; border: 1px solid var(--border); padding: 6px 14px; border-radius: 6px; cursor: pointer; transition: all 0.12s; }
   .sn-btn2:hover { color: var(--text); border-color: var(--accent); }
@@ -708,14 +759,20 @@
       <button class="nav-item" data-chain="base">
         <span class="chain-ico base">B</span> <span class="chain-name">Base</span>
       </button>
+      <button class="nav-item pending" data-chain="arc">
+        <span class="chain-ico arc">A</span> <span class="chain-name">Arc</span> <span class="nav-soon">待主网</span>
+      </button>
     </nav>
     <div class="sidebar-section">工具</div>
     <nav id="toolNav">
-      <a class="nav-item" href="stocks.html" target="_blank" rel="noopener">
+      <a class="nav-item" href="http://__SERVER_IP__/stocks.html" target="_blank" rel="noopener">
         <span class="chain-ico stk">股</span> <span class="chain-name">股票代币成交额 ↗</span>
       </a>
       <a class="nav-item" href="https://docs.robinhood.com/chain/contracts/" target="_blank" rel="noopener">
         <span class="chain-ico doc">文</span> <span class="chain-name">RH 合约文档 ↗</span>
+      </a>
+      <a class="nav-item" href="http://__OLD_KANBAN_IP__/rhapr.html" target="_blank" rel="noopener">
+        <span class="chain-ico apr">%</span> <span class="chain-name">RH 股票 LP 看板 ↗</span>
       </a>
     </nav>
     <div class="sidebar-section">资金快照</div>
@@ -741,6 +798,7 @@
       <span class="header-title">头寸总览</span>
     </div>
     <div class="header-right">
+      <span class="live-dot" id="liveDot" title="实时同步：服务端每 5 分钟刷新一轮，有新数据 10 秒内自动更新到页面">●</span>
       <span class="meta-text" id="lastRefresh"></span>
       <span class="chain-tag" id="headerChainTag">BSC</span>
       <button class="refresh-btn" id="refreshBtn" onclick="loadData(true)">刷新</button>
@@ -823,6 +881,20 @@
     </div>
   </div>
   <div class="st-page">
+    <div class="st-card">
+      <div class="st-card-head">
+        <div class="st-card-ico wm">💼</div>
+        <div class="st-card-titles">
+          <div class="st-card-title">管理钱包 <span class="st-badge" id="wmStCount">0</span></div>
+          <div class="st-card-desc">在总览页显示「💼 管理钱包」面板（添加 / 编辑 / 删除钱包）· 关闭后面板隐藏，防止误删误改，需要增删钱包时再打开</div>
+        </div>
+        <label class="switch" title="显示/隐藏总览页的管理钱包面板"><input type="checkbox" id="wmEnabled" onchange="saveUiCfg()"><span class="switch-track"></span></label>
+      </div>
+      <div class="st-card-body">
+        <div class="nm-status" id="wmStStatus" style="margin-bottom:0"></div>
+        <div class="wm-error" id="wmStError"></div>
+      </div>
+    </div>
     <div class="st-card">
       <div class="st-card-head">
         <div class="st-card-ico fund">💰</div>
@@ -919,8 +991,8 @@
 
 <script>
 // --- Chain sidebar nav ---
-const CHAIN_NAMES = { bsc: 'BSC', sol: 'Solana', eth: 'Ethereum', rh: 'Robinhood', base: 'Base' };
-const CHAIN_PROTO = { bsc: 'UNISWAP V3+V4', sol: 'METEORA DLMM + RAYDIUM CLMM', eth: 'UNISWAP V3+V4', rh: 'UNISWAP V3+V4', base: 'UNISWAP V3+V4' };
+const CHAIN_NAMES = { bsc: 'BSC', sol: 'Solana', eth: 'Ethereum', rh: 'Robinhood', base: 'Base', arc: 'Arc' };
+const CHAIN_PROTO = { bsc: 'UNISWAP V3+V4', sol: 'METEORA DLMM + RAYDIUM CLMM', eth: 'UNISWAP V3+V4', rh: 'UNISWAP V3+V4', base: 'UNISWAP V3+V4', arc: 'UNISWAP V3+V4' };
 let activeChain = 'bsc';
 function apiBase() {
   if (activeChain === 'bsc') return '/api';
@@ -949,8 +1021,9 @@ document.querySelectorAll('#chainNav .nav-item').forEach(btn => {
     document.getElementById('statsBar').style.display = 'none';
     document.getElementById('idlePanel').style.display = 'none';
     document.getElementById('idleValue').textContent = '—';
-    loadWallets();
-    loadData(false);
+    liveEtag = null;   // ETag 按链
+    if (!isPending(chain)) loadWallets();   // pending 链不提供钱包管理, 也不发这个请求
+    loadData(false);                        // loadData 内部对 pending 链直接渲染占位卡, 不发请求
   });
 });
 
@@ -974,11 +1047,68 @@ document.querySelectorAll('#chainNav .nav-item').forEach(btn => {
 const RI = 5 * 60 * 1000;
 let nextR = Date.now() + RI;
 let curData = null, expId = null;
+let viewGroup = null;   // 当前筛选为分组时的组名 (render 内设置, 供闲置面板文案用)
 // 钱包筛选按链记忆 (activeChain 在上个 script 块里已恢复完毕)
 let activeF = 'all';
 try { activeF = localStorage.getItem('lpWalletF_' + activeChain) || 'all'; } catch {}
 
 function $(id) { return document.getElementById(id); }
+
+// ================= 预接线链 (主网未上线) =================
+// 真源 = 服务端 /api/chains 的 pending 字段; 拿不到时用内置默认降级 —— 宁可多显示占位卡,
+// 也不能去打一个还不存在的 RPC。主网上线后服务端删掉 pending, 前端无需改动即自动转为正常链。
+let PENDING_CHAINS = { arc: '2026-09-16' };
+const PENDING_META = {
+  arc: {
+    chainId: 5042, gas: 'USDC', site: 'https://www.arc.io/',
+    desc: 'Arc 是 Circle 的稳定币 Layer-1，用 USDC 作为 gas 代币。Uniswap V3/V4 已确认在主网上线时同步部署，本仪表盘的合约地址已按 Uniswap 官方 SDK 预置。',
+    note: '主网上线后，需先跑一次自检脚本核对合约地址与 V4 部署块，通过后本页会自动开始抓取 LP 头寸。在此之前这条链不发送任何链上请求，也不参与资金快照。',
+  },
+};
+function isPending(ch) { return !!PENDING_CHAINS[ch || activeChain]; }
+function renderPending() {
+  const ch = activeChain, date = PENDING_CHAINS[ch] || '', m = PENDING_META[ch] || {};
+  const rb = $('refreshBtn');   // 没有数据可刷, 按钮置灰免得看着像能点 (切回正常链时 loadData 的 finally 会恢复)
+  if (rb) { rb.disabled = true; rb.title = '该链主网尚未上线，暂无数据可刷新'; }
+  for (const id of ['statsBar', 'filterBar', 'idlePanel', 'walletMgr']) { const el = $(id); if (el) el.style.display = 'none'; }
+  $('idleValue').textContent = '—';
+  $('lastRefresh').textContent = '—';
+  $('countdown').textContent = '主网未上线 · 暂不抓取';
+  const kv = (k, v) => '<div class="pend-kv"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>';
+  $('content').innerHTML = '<div class="pend-card">'
+    + '<div class="pend-title">' + escH(CHAIN_NAMES[ch] || ch) + ' 主网尚未上线'
+    + (date ? '<span class="pend-badge">预计 ' + escH(date) + '</span>' : '') + '</div>'
+    + '<div class="pend-desc">' + escH(m.desc || '该链尚未上线，暂无数据。') + '</div>'
+    + '<div class="pend-grid">'
+    + kv('链 ID', m.chainId != null ? m.chainId : '—')
+    + kv('gas 代币', escH(m.gas || '—'))
+    + kv('协议', escH(CHAIN_PROTO[ch] || '—'))
+    + kv('当前状态', '预接线')
+    + '</div>'
+    + '<div class="pend-note">' + escH(m.note || '')
+    + (m.site ? '<br>官网：<a href="' + escH(m.site) + '" target="_blank" rel="noopener">' + escH(m.site) + '</a>' : '')
+    + '</div></div>';
+}
+(async function loadChainPending() {
+  try {
+    const r = await fetch('/api/chains');
+    if (!r.ok) return;
+    const list = await r.json();
+    if (!Array.isArray(list)) return;
+    const wasPending = isPending();          // 只有"本以为 pending、服务端说已上线"才需要补拉,
+    const next = {};                         // 否则每次正常打开页面都会多打一轮重复请求
+    for (const c of list) if (c && c.id && c.pending) next[c.id] = c.pending;
+    PENDING_CHAINS = next;
+    document.querySelectorAll('#chainNav .nav-item').forEach(b => {
+      const on = !!next[b.dataset.chain];
+      b.classList.toggle('pending', on);
+      const tag = b.querySelector('.nav-soon');
+      if (tag) tag.style.display = on ? '' : 'none';
+    });
+    if (isPending()) renderPending();                         // 服务端说还没上线 -> 覆盖首屏
+    else if (wasPending) { loadWallets(); loadData(false); }  // 服务端说已上线 -> 补拉一轮
+  } catch {}
+})();
 let walletList = [];
 
 // --- Wallet Manager ---
@@ -1002,7 +1132,9 @@ let wmEditing = null;   // 正在编辑的钱包地址
 function escH(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 function renderWalletList() {
-  $('wmCount').textContent = walletList.length;
+  const total = walletList.length, onN = walletList.filter(wOn).length;
+  $('wmCount').textContent = onN === total ? String(total) : `${onN}/${total}`;
+  $('wmCount').title = onN === total ? '' : `${total} 个钱包，其中 ${total - onN} 个已停用（不抓取数据）`;
   const list = $('wmList');
   list.innerHTML = walletList.map(w => {
     if (wmEditing === w.address) {
@@ -1013,12 +1145,14 @@ function renderWalletList() {
         <button class="wm-cancel-btn" onclick="cancelEditWallet()">取消</button>
       </div>`;
     }
-    return `<div class="wm-item">
+    const on = wOn(w);
+    return `<div class="wm-item${on ? '' : ' off'}">
       <div class="wm-item-left">
-        <span class="wm-item-name">${escH(w.name)}</span>
+        <span class="wm-item-name">${escH(w.name)}</span>${on ? '' : '<span class="wm-off-tag">已停用</span>'}
         <span class="wm-item-addr">${escH(w.address)}</span>
       </div>
       <div style="display:flex;flex-shrink:0;">
+        <button class="wm-eye-btn${on ? '' : ' off'}" onclick="toggleWalletEnabled('${w.address}', ${on ? 'false' : 'true'})" title="${on ? '已启用 · 点击停用（不再抓取此钱包的仓位与余额）' : '已停用 · 点击启用（恢复抓取）'}">${on ? EYE_ON : EYE_OFF}</button>
         <button class="wm-edit-btn" onclick="editWallet('${w.address}')" title="编辑">✏️</button>
         <button class="wm-del-btn" onclick="delWallet('${w.address}')" title="删除">✖</button>
       </div>
@@ -1026,6 +1160,7 @@ function renderWalletList() {
   }).join('');
   if (notifyCfg) renderNotify();
   if (fdCfg) renderFd();
+  applyUiCfg();
 }
 
 function editWallet(addr) {
@@ -1067,12 +1202,8 @@ async function saveWallet(oldAddr) {
     walletList = d.wallets;
     wmEditing = null;
     renderWalletList();
-    // 改名: 缓存已就地更新, 轻拉即可; 换地址: 新地址数据靠后台刷新, 跟进两次
+    // 改名: 缓存已就地更新, 轻拉即可; 换地址: 新地址数据靠后台刷新, 实时同步 (10s 轻探) 自动带回
     loadData(false);
-    if (addrChanged) {
-      setTimeout(() => loadData(false), 45000);
-      setTimeout(() => loadData(false), 100000);
-    }
   } catch (e) { errEl.textContent = e.message; errEl.style.display = 'block'; }
   finally { if (btn) btn.disabled = false; }
 }
@@ -1101,12 +1232,31 @@ async function addWallet() {
     walletList = d.wallets;
     renderWalletList();
     $('wmAddr').value = ''; $('wmName').value = '';
-    // 服务端已后台刷新 (老数据不清空); 这里只轻拉缓存, 稍后两次跟进等新钱包数据落地
+    // 服务端已后台刷新 (老数据不清空); 轻拉一次, 新钱包数据落地后由实时同步 (10s 轻探) 自动带回
     loadData(false);
-    setTimeout(() => loadData(false), 45000);
-    setTimeout(() => loadData(false), 100000);
   } catch (e) { errEl.textContent = e.message; errEl.style.display = 'block'; }
   finally { $('wmAddBtn').disabled = false; }
+}
+
+// --- 钱包启停 (小眼睛): 停用=服务端不再抓取该钱包 (仓位/余额/资金回溯), 列表保留可随时恢复 ---
+const EYE_ON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_OFF = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+function wOn(w) { return w.enabled !== false; }
+async function toggleWalletEnabled(addr, enable) {
+  const errEl = $('wmError');
+  errEl.style.display = 'none';
+  try {
+    const r = await fetch(apiBase() + '/wallets/' + encodeURIComponent(addr), {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !!enable })
+    });
+    const d = await r.json();
+    if (!r.ok) { errEl.textContent = d.error || '操作失败'; errEl.style.display = 'block'; return; }
+    walletList = d.wallets;
+    renderWalletList();
+    // 停用: 服务端已就地剔出缓存, 轻拉即可; 启用: 数据靠后台刷新, 实时同步 (10s 轻探) 自动带回
+    loadData(false);
+  } catch (e) { errEl.textContent = e.message; errEl.style.display = 'block'; }
 }
 
 async function delWallet(addr) {
@@ -1210,6 +1360,7 @@ function mkDet(p) {
       <div><div class="d-label">手续费 ${p.token1.symbol}</div><div class="d-val fees">${fN(p.feesOwed1)}</div>${p.token1USD?`<div class="d-sub">${fU2(p.feesOwed1*p.token1USD)}</div>`:''}</div>
       <div><div class="d-label">头寸价值</div><div class="d-val">${fU(p.positionValueUSD)}</div></div>
       <div><div class="d-label">手续费价值</div><div class="d-val fees">${fU2(p.feesValueUSD)}</div></div>
+      ${p.dailyRateCumulative ? `<div><div class="d-label">累计日化</div><div class="d-val fees">${p.dailyRateCumulative.toFixed(2)}%</div><div class="d-sub">${p.totalDays>=1 ? p.totalDays+'天'+((p.totalHours%24)>0?(p.totalHours%24)+'h':'') : (p.totalHours||0)+'h'} · ${p.protocol==='V4' ? '不含已领' : '含已领'}</div></div>` : ''}
       ${entryCells}
     </div>
     <div class="range-bar-labels"><span>下限: ${fP(p.lowerPrice)}</span><span>上限: ${fP(p.upperPrice)}</span></div>
@@ -1226,22 +1377,46 @@ function render(data) {
 
   const wA=data.wallets.filter(w=>w.positions.some(p=>p.liquidityActive))
     .sort((a,b)=>a.name.localeCompare(b.name,'zh-CN',{numeric:true})); // 按名称自然排序 (数字按大小: 2-2 排在 2-10 前)
-  // 选中钱包本轮不在数据里(已删除/临时缺失)时按「全部」显示, 但不覆盖记忆: 钱包回来筛选自动恢复
-  const curF=(activeF!=='all'&&wA.some(w=>w.address===activeF))?activeF:'all';
+  // 分组由钱包名前缀自动推导 (第一个 _ / - / 空格 之前: 甲_股票→甲, 乙-02→乙, 丙 3→丙),
+  // 同前缀 ≥2 个有活跃仓的钱包成组; 单个钱包直接作为独立胶囊。零配置, 改名即改组。
+  const byG={}; for(const w of wA){ const g=groupKey(w.name); if(g) (byG[g]=byG[g]||[]).push(w); }
+  const gmap={}, gList=[];
+  for(const [g,arr] of Object.entries(byG)) if(arr.length>=2){ gList.push(g); for(const w of arr) gmap[w.address]=g; }
+  gList.sort((a,b)=>a.localeCompare(b,'zh-CN',{numeric:true}));
+  const singles=wA.filter(w=>!gmap[w.address]);
+  // 选中钱包/分组本轮不在数据里(已删除/停用/临时缺失)时按「全部」显示, 但不覆盖记忆: 回来后筛选自动恢复
+  let curF='all';
+  if(activeF.startsWith('g:')){ if(gList.includes(activeF.slice(2))) curF=activeF; }
+  else if(activeF!=='all'&&wA.some(w=>w.address===activeF)) curF=activeF;
+  viewGroup=curF.startsWith('g:')?curF.slice(2):null;
+  const openG=viewGroup||(curF!=='all'?gmap[curF]:null)||null;   // 展开的组 = 选中的组, 或所选钱包所属的组
   const fb=$('filterBar');
   if(wA.length>1){
     fb.style.display='flex';
     let fh='<span class="filter-label">筛选</span>';
     fh+=`<button class="ftag ${curF==='all'?'active':''}" onclick="setF('all')">全部</button>`;
-    for(const w of wA) fh+=`<button class="ftag ${curF===w.address?'active':''}" onclick="setF('${w.address}')">${w.name}</button>`;
+    for(const g of gList){
+      const open=openG===g, col=groupColor(g), members=byG[g];
+      // 点组: 收起态→选中该组并展开组内钱包; 展开态→收起并回到「全部」(Chrome 标签组式)
+      fh+=`<button class="ftag fgrp${curF==='g:'+g?' active':''}${open?' open':''}" style="--gc:${col}" data-f="${open?'all':'g:'+escH(g)}" onclick="setF(this.dataset.f)" title="${open?'再点收起':'点开看组内钱包'}"><span class="fdot"></span>${escH(g)}<span class="fcount">${members.length}</span><span class="farrow">${open?'▾':'▸'}</span></button>`;
+      if(open){
+        fh+=`<span class="fsub" style="--gc:${col}">`;
+        for(const w of members) fh+=`<button class="ftag fwal${curF===w.address?' active':''}" onclick="setF('${w.address}')" title="${escH(w.name)}">${escH(groupRest(w.name)||w.name)}</button>`;
+        fh+='</span>';
+      }
+    }
+    for(const w of singles) fh+=`<button class="ftag${curF===w.address?' active':''}" onclick="setF('${w.address}')">${escH(w.name)}</button>`;
     fb.innerHTML=fh;
   } else fb.style.display='none';
 
-  let ws=curF==='all'?wA:wA.filter(w=>w.address===curF);
+  let ws=curF==='all'?wA:(viewGroup?wA.filter(w=>gmap[w.address]===viewGroup):wA.filter(w=>w.address===curF));
+  // 分组视图: 闲置余额/初始资金按组内钱包子集聚合, 复用「全部」的渲染路径
+  const idleData=viewGroup?{...data,idle:idleSubset(data.idle,new Set(ws.map(w=>w.address)))}:data;
+  const idleF=viewGroup?'all':curF;
 
-  // 统计卡跟随钱包筛选: 全部=服务端整链统计, 单钱包=从该钱包头寸就地汇总
+  // 统计卡跟随钱包筛选: 全部=服务端整链统计, 单钱包/分组=从所选钱包头寸就地汇总
   // 总价值 = 钱包余额(闲置) + LP 仓位价值; idle 数据缺失时退化为纯 LP
-  const idleT=idleTotalFor(data,curF);
+  const idleT=idleTotalFor(idleData,idleF);
   if(curF==='all'){
     const lp=data.grandTotalUSD||0;
     $('totalValue').textContent=fU(lp+(idleT||0));
@@ -1267,7 +1442,7 @@ function render(data) {
     $('totalFees').textContent=fU2(tf);
   }
 
-  renderIdle(data,curF);
+  renderIdle(idleData,idleF);
 
   if(!ws.length){ $('content').innerHTML='<div class="state-box"><div class="state-text">暂无活跃头寸</div></div>'; return; }
 
@@ -1318,6 +1493,26 @@ function setF(v){
 
 // --- 钱包余额 (闲置资金) 统计卡 + 明细面板 ---
 // 当前筛选下的闲置总额; 无 idle 数据/该钱包未参与查询返回 null (总价值卡退化为纯 LP)
+// --- 分组: 钱包名前缀 → 组名 / 去前缀后的短名; 组色=组名哈希取 Chrome 标签组 9 色 ---
+const GROUP_SEP=/^(.+?)[\s_\-－—–:：]+(.*)$/;
+function groupKey(name){ const m=String(name).match(GROUP_SEP); return m&&m[2]?m[1].trim():''; }
+function groupRest(name){ const m=String(name).match(GROUP_SEP); return m?m[2].trim():''; }
+const GROUP_COLORS=['#1a73e8','#188038','#f9ab00','#d93025','#a142f4','#007b83','#fa903e','#d01884','#5f6368'];
+function groupColor(name){ let h=0; for(const c of String(name)) h=(h*31+c.charCodeAt(0))>>>0; return GROUP_COLORS[h%GROUP_COLORS.length]; }
+// 分组视图: 只保留组内钱包的闲置余额/资金, 合计与 funding 汇总就地重算 (键=钱包地址, 与仓位数据同格式)
+function idleSubset(idle,sel){
+  if(!idle||!idle.byWallet) return idle;
+  const byWallet={}; let totalUSD=0, fin=0, fout=0, any=false; const partial=[];
+  for(const [a,w] of Object.entries(idle.byWallet)){
+    if(!sel.has(a)) continue;
+    byWallet[a]=w; totalUSD+=w.totalUSD||0;
+    if(w.funding){ any=true; if(w.funding.partial) partial.push(w.name); else { fin+=w.funding.inUSD||0; fout+=w.funding.outUSD||0; } }
+  }
+  if(!Object.keys(byWallet).length) return null;   // 组内无人参与资金查询 → 与「未参与」同处理 (卡显 —)
+  const out={totalUSD,byWallet};
+  if(any&&idle.funding) out.funding={inUSD:fin,outUSD:fout,netUSD:fin-fout,partialWallets:partial};
+  return out;
+}
 function idleTotalFor(data,curF){
   const d=data&&data.idle;
   if(!d||!d.byWallet) return null;
@@ -1338,7 +1533,7 @@ function renderIdle(data,curF){
   if(!d||!d.byWallet){
     $('idleValue').textContent='—'; $('idleArrow').textContent='▼';
     // 已被设置关闭(或数据未就绪): 点击卡片给出指引而不是没反应
-    if(idleOpen){ panel.style.display='block'; panel.innerHTML='<div class="idle-empty">资金查询未开启或数据尚未就绪 — 可在左侧「⚙ 设置 → 钱包资金查询」中启用/勾选钱包，改动后约 1 分钟生效</div>'; }
+    if(idleOpen){ panel.style.display='block'; panel.innerHTML='<div class="idle-empty">'+(viewGroup?'该分组内的钱包未参与资金查询 — 可在左侧「⚙ 设置 → 钱包资金查询」中勾选':'资金查询未开启或数据尚未就绪 — 可在左侧「⚙ 设置 → 钱包资金查询」中启用/勾选钱包，改动后约 1 分钟生效')+'</div>'; }
     else panel.style.display='none';
     return;
   }
@@ -1371,7 +1566,7 @@ function renderIdle(data,curF){
   panel.style.display='block';
   let h=mkFund(d,curF);
   if(!rows.length){
-    panel.innerHTML=h+'<div class="idle-empty">'+(curF==='all'?'本链':'该钱包')+'暂无价值 ≥ $1 的闲置代币</div>';
+    panel.innerHTML=h+'<div class="idle-empty">'+(curF==='all'?(viewGroup?'该分组':'本链'):'该钱包')+'暂无价值 ≥ $1 的闲置代币</div>';
     return;
   }
   h+='<table class="idle-table"><thead><tr><th>代币</th><th style="text-align:right">数量</th><th style="text-align:right">价格</th><th style="text-align:right">价值</th>'+(curF==='all'?'<th class="idle-ws">钱包</th>':'')+'</tr></thead><tbody>';
@@ -1439,24 +1634,57 @@ function mkFund(d,curF){
   return h;
 }
 
+// 重绘但保留用户已展开的明细行 (实时同步/轻拉时不打断查看)
+function renderKeepOpen(d){
+  const open=[...document.querySelectorAll('#content .detail-row.open')].map(e=>e.id);
+  render(d);
+  for(const id of open){ const el=$(id); if(el) el.classList.add('open'); }
+}
+let loadBusy=false, liveEtag=null, liveBusy=false;
 async function loadData(fr=false){
-  const b=$('refreshBtn'); b.disabled=true; b.textContent='加载中…';
+  if(isPending()){ renderPending(); return; }   // 预接线链: 只渲染占位卡, 不发任何请求
+  const b=$('refreshBtn'); b.disabled=true; b.title=''; b.textContent='加载中…'; loadBusy=true;
   const chainAtStart=activeChain;
   try{
     const r=await fetch(apiBase()+'/positions'+(fr?'?refresh=true':''));
     if(!r.ok) throw new Error('API 错误: '+r.status);
     const d=await r.json();
     if(chainAtStart!==activeChain) return; // 链已切走，丢弃旧数据
-    render(d);
+    liveEtag=r.headers.get('ETag');
+    renderKeepOpen(d);
     nextR=Date.now()+RI;
   }catch(e){ $('content').innerHTML='<div class="error-box"><p>⚠ '+e.message+'</p></div>'; }
-  finally{ b.disabled=false; b.textContent='刷新'; }
+  finally{ b.disabled=false; b.textContent='刷新'; loadBusy=false; }
 }
 
+// --- 实时同步: 每 10s 带 If-None-Match 轻探 /positions —— 服务端缓存没变返 304 (零流量), 变了才重绘;
+//     页面隐藏/非总览视图/正在加载时不探; 钱包启停、添加后的新数据也靠它自动带回 ---
+const LIVE_MS=10000;
+async function livePoll(){
+  if(liveBusy||loadBusy||document.hidden||settingsOpen||snapOpen||isPending()) return;
+  liveBusy=true; const chainAtStart=activeChain;
+  try{
+    const h={}; if(liveEtag) h['If-None-Match']=liveEtag;
+    const r=await fetch(apiBase()+'/positions',{headers:h});
+    if(chainAtStart!==activeChain||r.status===304||!r.ok) return;
+    liveEtag=r.headers.get('ETag');
+    const d=await r.json();
+    if(curData&&d.timestamp===curData.timestamp&&d.wallets.length===curData.wallets.length) return;
+    renderKeepOpen(d);
+    nextR=Date.now()+RI;
+    const dot=$('liveDot'); dot.classList.add('on'); setTimeout(()=>dot.classList.remove('on'),1500);
+  }catch{}
+  finally{ liveBusy=false; }
+}
+setInterval(livePoll, LIVE_MS);
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden) livePoll(); });
+
 setInterval(()=>{
+  if(isPending()) return;   // 预接线链: 不倒计时, 更不触发自动刷新
   const rem=Math.max(0,nextR-Date.now());
   const m=Math.floor(rem/60000), s=Math.floor((rem%60000)/1000);
-  $('countdown').textContent=`下次刷新: ${m}分${s}秒`;
+  $('countdown').textContent=`实时同步中 · 下次刷新: ${m}分${s}秒`;
+  if(curData) $('lastRefresh').textContent=tA(curData.timestamp);   // 「x 分钟前」随时间走
   if(rem<=0){loadData(false);nextR=Date.now()+RI;} // 自动刷新走服务端缓存TTL，不强制清缓存（手动点刷新按钮才强刷）
 },1000);
 
@@ -1478,7 +1706,7 @@ function openSettings() {
   showView('settings');
   $('stChainTag').textContent = CHAIN_NAMES[activeChain] || activeChain;
   history.replaceState(null, '', '#settings');
-  loadNotifyCfg(); loadFdCfg(); loadSpCfg();   // 进入时刷新状态
+  loadNotifyCfg(); loadFdCfg(); loadSpCfg(); loadUiCfg();   // 进入时刷新状态
 }
 function closeSettings() {
   showView('dash');
@@ -1492,6 +1720,56 @@ function openSnap() {
 function closeSnap() {
   showView('dash');
   history.replaceState(null, '', '#' + activeChain);
+}
+
+// --- 界面配置 (/api/ui/config): 总览页「💼 管理钱包」面板显隐; 服务端持久化多端一致, localStorage 缓存最近值避免首屏闪现 ---
+let uiCfg = null;
+try { if (localStorage.getItem('lpUiWm') === '0') $('walletMgr').style.display = 'none'; } catch {}
+function wmShown() { return !uiCfg || uiCfg.walletMgr !== false; }
+function wmHint() {
+  return wmShown()
+    ? '<div class="nm-hint">本链还没有已添加的钱包，先返回总览在「💼 管理钱包」中添加</div>'
+    : '<div class="nm-hint">本链还没有已添加的钱包，先在上方打开「💼 管理钱包」开关，再返回总览添加</div>';
+}
+function applyUiCfg() {
+  const show = wmShown();
+  if (uiCfg) {   // 配置未到手前不动面板 (交给 localStorage 预判), 避免默认显示又被隐藏的闪动
+    $('walletMgr').style.display = (show && !isPending()) ? '' : 'none';   // pending 链恒隐藏
+    $('wmEnabled').checked = show;
+    try { localStorage.setItem('lpUiWm', show ? '1' : '0'); } catch {}
+  }
+  $('wmStCount').textContent = walletList.length;
+  const offN = walletList.filter(w => !wOn(w)).length;
+  const cnt = `本链已添加 ${walletList.length} 个钱包${offN ? `（其中 ${offN} 个已停用，不抓取数据）` : ''}`;
+  $('wmStStatus').textContent = show
+    ? `面板显示中 · ${cnt}`
+    : `面板已隐藏 · 总览页不显示「管理钱包」入口 · ${cnt}`;
+}
+async function loadUiCfg() {
+  try {
+    const r = await fetch('/api/ui/config');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    uiCfg = await r.json();
+    applyUiCfg();
+  } catch (e) { console.error('界面配置加载失败:', e); }
+}
+async function saveUiCfg() {
+  const body = { walletMgr: $('wmEnabled').checked };
+  try {
+    const r = await fetch('/api/ui/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
+    uiCfg = await r.json();
+    applyUiCfg();
+    if (fdCfg) renderFd(); if (notifyCfg) renderNotify(); if (spCfg) renderSp();   // 空态提示文案随开关变
+    $('wmStError').style.display = 'none';
+  } catch (e) {
+    const el = $('wmStError');
+    el.textContent = '保存失败: ' + e.message;
+    el.style.display = 'block';
+    if (uiCfg) $('wmEnabled').checked = wmShown();   // 回滚拨杆
+  }
 }
 
 // --- 钱包资金查询配置 (wallets.<chain> 未设置=全部参与; []=全不参与) ---
@@ -1514,11 +1792,11 @@ function renderFd() {
   if (!fdCfg) return;
   $('fdEnabled').checked = fdCfg.enabled !== false;
   const sel = fdSelSet();
-  $('fdList').innerHTML = walletList.map(w => `<label class="wm-item nm-check">
+  $('fdList').innerHTML = walletList.map(w => `<label class="wm-item nm-check${wOn(w) ? '' : ' off'}">
       <input type="checkbox" ${(sel === null || sel.has(nmNorm(w.address))) ? 'checked' : ''} onchange="fdToggleWallet('${escH(w.address)}', this.checked)">
-      <span class="wm-item-name">${escH(w.name)}</span>
+      <span class="wm-item-name">${escH(w.name)}</span>${wOn(w) ? '' : '<span class="wm-off-tag">已停用</span>'}
       <span class="wm-item-addr">${escH(w.address)}</span>
-    </label>`).join('') || '<div class="nm-hint">本链还没有已添加的钱包，先返回总览在「💼 管理钱包」中添加</div>';
+    </label>`).join('') || wmHint();
 }
 function fdToggleWallet(addr, on) {
   // 未设置(全选)状态下首次改动: 先物化为全量列表再增删
@@ -1571,11 +1849,11 @@ function renderNotify() {
   $('nmRecover').checked = notifyCfg.notifyRecover !== false;
   $('nmInterval').value = String(notifyCfg.intervalMin || 5);
   const sel = new Set(nmSelArr().map(nmNorm));
-  $('nmList').innerHTML = walletList.map(w => `<label class="wm-item nm-check">
+  $('nmList').innerHTML = walletList.map(w => `<label class="wm-item nm-check${wOn(w) ? '' : ' off'}">
       <input type="checkbox" ${sel.has(nmNorm(w.address)) ? 'checked' : ''} onchange="nmToggleWallet('${escH(w.address)}', this.checked)">
-      <span class="wm-item-name">${escH(w.name)}</span>
+      <span class="wm-item-name">${escH(w.name)}</span>${wOn(w) ? '' : '<span class="wm-off-tag">已停用</span>'}
       <span class="wm-item-addr">${escH(w.address)}</span>
-    </label>`).join('') || '<div class="nm-hint">本链还没有已添加的钱包，先返回总览在「💼 管理钱包」中添加</div>';
+    </label>`).join('') || wmHint();
   const ch = notifyCfg.channelReady
     ? '<span style="color:var(--green)">哨兵 Telegram ●</span>'
     : '<span style="color:var(--red)">哨兵 Telegram ● 服务器未配置</span>';
@@ -1632,6 +1910,18 @@ try {
 const SN_METRICS = { total: '总资金', idle: '钱包余额', lp: 'LP 价值', fees: '待领手续费' };
 const SN_RANGES = [[30, '30 天'], [90, '90 天'], [0, '全部']];
 function snSave() { try { localStorage.setItem('snChain', snChain); localStorage.setItem('snWallet', snWallet); localStorage.setItem('snMetric', snMetric); localStorage.setItem('snRange', String(snRange)); } catch {} }
+// snWallet 取值: 'all' | 'g:<组名>' (分组) | <钱包地址>
+// 分组规则与总览筛选栏完全一致: 钱包名第一个分隔符前的前缀 (groupKey), 同前缀 >=2 个成组, 零配置改名即改组
+function snGroups(wm) {
+  const byAll = {};
+  for (const [a, n] of Object.entries(wm)) { const g = groupKey(n); if (g) (byAll[g] = byAll[g] || []).push([a, n]); }
+  const gmap = {}, gList = [], byG = {};
+  const nat = (x, y) => x[1].localeCompare(y[1], 'zh-CN', { numeric: true });
+  for (const [g, arr] of Object.entries(byAll)) if (arr.length >= 2) { gList.push(g); arr.sort(nat); byG[g] = arr; for (const [a] of arr) gmap[a] = g; }
+  gList.sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true }));
+  const singles = Object.entries(wm).filter(([a]) => !gmap[a]).sort(nat);
+  return { gList, gmap, byG, singles };
+}
 
 async function loadSnap() {
   if (!snData) $('snTable').innerHTML = '<div class="state-box"><div class="spinner"></div><div class="state-text">加载快照…</div></div>';
@@ -1663,6 +1953,11 @@ function snScope(e) {
   if (snChain === 'all') { if (!Object.keys(chs).length) return null; for (const c of Object.values(chs)) add(c); return z; }
   const c = chs[snChain]; if (!c) return null;
   if (snWallet === 'all') { add(c); return z; }
+  if (snWallet.startsWith('g:')) {   // 分组: 按当条快照里各钱包自己的名字判定组, 历史改名也能正确归属
+    const g = snWallet.slice(2); let hit = false;
+    for (const w of Object.values(c.wallets || {})) if (groupKey(w.name || '') === g) { add(w); hit = true; }
+    return hit ? z : null;
+  }
   const w = (c.wallets || {})[snWallet]; if (!w) return null;
   add(w); return z;
 }
@@ -1704,16 +1999,30 @@ function renderSnap() {
     for (const [ch, c] of Object.entries(e.chains || {})) { chainSet.add(ch); for (const [a, w] of Object.entries(c.wallets || {})) { if (!wmap[ch]) wmap[ch] = {}; wmap[ch][a] = w.name || a; } }
   }
   if (snChain !== 'all' && !chainSet.has(snChain)) snChain = 'all';
-  if (snChain !== 'all' && snWallet !== 'all' && !(wmap[snChain] || {})[snWallet]) snWallet = 'all';
+  const snGI = snChain === 'all' ? null : snGroups(wmap[snChain] || {});
+  if (snChain !== 'all' && snWallet !== 'all') {
+    if (snWallet.startsWith('g:')) { if (!snGI.gList.includes(snWallet.slice(2))) snWallet = 'all'; }
+    else if (!(wmap[snChain] || {})[snWallet]) snWallet = 'all';
+  }
   if (snChain === 'all') snWallet = 'all';
   const tb = $('snToolbar');
   if (chainSet.size) {
     let h = '<span class="filter-label">链</span><button class="ftag ' + (snChain === 'all' ? 'active' : '') + '" onclick="snSetChain(\'all\')">全部</button>';
     for (const ch of Object.keys(CHAIN_NAMES)) if (chainSet.has(ch)) h += '<button class="ftag ' + (snChain === ch ? 'active' : '') + '" onclick="snSetChain(\'' + ch + '\')">' + CHAIN_NAMES[ch] + '</button>';
     if (snChain !== 'all' && Object.keys(wmap[snChain] || {}).length > 1) {
+      // 两级分组 (Chrome 标签组式, 与总览筛选栏同款): 点组 -> 选中该组并展开组内钱包; 再点组 -> 收起回「全部」
       h += '<span class="filter-label">钱包</span><button class="ftag ' + (snWallet === 'all' ? 'active' : '') + '" onclick="snSetWallet(\'all\')">全部</button>';
-      const ws = Object.entries(wmap[snChain]).sort((a, b) => a[1].localeCompare(b[1], 'zh-CN', { numeric: true }));
-      for (const [a, n] of ws) h += '<button class="ftag ' + (snWallet === a ? 'active' : '') + '" onclick="snSetWallet(\'' + escH(a) + '\')">' + escH(n) + '</button>';
+      const openG = snWallet.startsWith('g:') ? snWallet.slice(2) : (snGI.gmap[snWallet] || null);   // 展开的组 = 选中的组, 或所选钱包所属的组
+      for (const g of snGI.gList) {
+        const open = openG === g, col = groupColor(g), mem = snGI.byG[g];
+        h += '<button class="ftag fgrp' + (snWallet === 'g:' + g ? ' active' : '') + (open ? ' open' : '') + '" style="--gc:' + col + '" data-f="' + escH(open ? 'all' : 'g:' + g) + '" onclick="snSetWallet(this.dataset.f)" title="' + (open ? '再点收起' : '点开看组内钱包') + '"><span class="fdot"></span>' + escH(g) + '<span class="fcount">' + mem.length + '</span><span class="farrow">' + (open ? '▾' : '▸') + '</span></button>';
+        if (open) {
+          h += '<span class="fsub" style="--gc:' + col + '">';
+          for (const [a, n] of mem) h += '<button class="ftag fwal' + (snWallet === a ? ' active' : '') + '" onclick="snSetWallet(\'' + escH(a) + '\')" title="' + escH(n) + '">' + escH(groupRest(n) || n) + '</button>';
+          h += '</span>';
+        }
+      }
+      for (const [a, n] of snGI.singles) h += '<button class="ftag ' + (snWallet === a ? 'active' : '') + '" onclick="snSetWallet(\'' + escH(a) + '\')">' + escH(n) + '</button>';
     }
     tb.innerHTML = h; tb.style.display = 'flex';
   } else tb.style.display = 'none';
@@ -1746,7 +2055,8 @@ function renderSnap() {
 
   // 图表
   $('snChartCard').style.display = 'block';
-  $('snChartTitle').textContent = SN_METRICS[snMetric] + '走势' + (snChain === 'all' ? '' : ' · ' + CHAIN_NAMES[snChain] + (snWallet === 'all' ? '' : ' · ' + escH((wmap[snChain] || {})[snWallet] || '')));
+  $('snChartTitle').textContent = SN_METRICS[snMetric] + '走势' + (snChain === 'all' ? '' : ' · ' + CHAIN_NAMES[snChain]
+    + (snWallet === 'all' ? '' : ' · ' + (snWallet.startsWith('g:') ? snWallet.slice(2) + ' 组' : ((wmap[snChain] || {})[snWallet] || ''))));
   $('snMetricBtns').innerHTML = Object.entries(SN_METRICS).map(([k, n]) => '<button class="ftag ' + (snMetric === k ? 'active' : '') + '" onclick="snSetMetric(\'' + k + '\')">' + n + '</button>').join('');
   $('snRangeBtns').innerHTML = SN_RANGES.map(([d, n]) => '<button class="ftag ' + (snRange === d ? 'active' : '') + '" onclick="snSetRange(' + d + ')">' + n + '</button>').join('');
   snDrawChart(ser);
@@ -1768,33 +2078,62 @@ function renderSnap() {
   }
   h += '</tbody></table>';
   $('snTable').innerHTML = h;
-  $('snNote').innerHTML = '口径：总资金 = 钱包余额（闲置代币，来自「钱包资金查询」勾选的钱包）+ LP 价值（含待领手续费）· 每日记录取快照时刻的仪表盘缓存（各链每 5 分钟自刷新）· 时间为 ' + escH(snData.tz || '') + ' · 点击行可展开' + (snChain === 'all' ? '各链' : '各钱包') + '明细；「立即快照」只更新「最新」行，不覆盖当日正式记录';
+  $('snNote').innerHTML = '口径：总资金 = 钱包余额（闲置代币，来自「钱包资金查询」勾选的钱包）+ LP 价值（含待领手续费）· 每日记录取快照时刻的仪表盘缓存（各链每 5 分钟自刷新）· 时间为 ' + escH(snData.tz || '') + ' · 点击行可展开' + (snChain === 'all' ? '各链' : (snWallet.startsWith('g:') ? '组内钱包' : '各钱包（同名前缀自动归组）')) + '明细；「立即快照」只更新「最新」行，不覆盖当日正式记录';
 }
-// 明细: 全部链视角 = 按链拆; 单链视角 = 按钱包拆; 每行附较上一条记录的差值
+// 明细: 全部链视角 = 按链拆; 单链视角 = 按钱包拆并按组分块 (组汇总行 + 组内钱包行); 每行附较上一条记录的差值
+function snSubRow(nameHtml, subHtml, v, pv, cls, style) {
+  const d = pv ? (v.total || 0) - (pv.total || 0) : null;
+  return '<tr class="' + (cls || '') + '"' + (style ? ' style="' + style + '"' : '') + '>'
+    + '<td><span class="sn-name">' + nameHtml + '</span><span class="sn-addr">' + subHtml + '</span></td>'
+    + '<td>' + fU2(v.total) + '</td><td>' + fU2(v.idle) + '</td><td>' + fU2(v.lp) + '</td><td class="sn-hm">' + fU2(v.fees) + '</td>'
+    + '<td class="sn-hm">' + (v.active || 0) + '<span style="color:var(--text-muted)">/' + (v.inRange || 0) + '内</span></td>'
+    + '<td class="' + dCls(d) + '">' + (d == null ? '<span class="sn-zero">新</span>' : fD(d) + ' <span style="font-size:10px;opacity:.8">' + fPc(d, pv.total) + '</span>') + '</td></tr>';
+}
+function snSum(list) {   // list: [[addr, walletObj], ...]
+  const z = { total: 0, lp: 0, idle: 0, fees: 0, active: 0, inRange: 0 };
+  for (const [, w] of list) for (const k in z) z[k] += Number(w[k]) || 0;
+  return z;
+}
 function snDetail(e, pe) {
-  const rows = [];
+  const head = '<table class="sn-sub"><thead><tr><th>' + (snChain === 'all' ? '链' : '钱包') + '</th><th>总资金</th><th>钱包余额</th><th>LP 价值</th><th class="sn-hm">待领费</th><th class="sn-hm">活跃仓</th><th>较上次</th></tr></thead><tbody>';
+  const empty = '<div class="idle-empty">无明细</div>';
+  let b = '';
   if (snChain === 'all') {
     for (const ch of Object.keys(CHAIN_NAMES)) {
       const c = (e.chains || {})[ch]; if (!c) continue;
       const pc = pe ? (pe.chains || {})[ch] : null;
-      rows.push({ name: CHAIN_NAMES[ch], sub: c.n + ' 钱包' + (c.stale ? ' · 数据 ' + c.stale + ' 分钟前' : ''), v: c, pv: pc });
+      b += snSubRow(escH(CHAIN_NAMES[ch]), escH(c.n + ' 钱包' + (c.stale ? ' · 数据 ' + c.stale + ' 分钟前' : '')), c, pc);
     }
-  } else {
-    const c = (e.chains || {})[snChain]; if (!c) return '';
-    const pc = pe ? (pe.chains || {})[snChain] : null;
-    for (const [a, w] of Object.entries(c.wallets || {})) rows.push({ name: w.name || a, sub: sA(a), v: w, pv: pc ? (pc.wallets || {})[a] : null, addr: a });
-    rows.sort((a, b) => (b.v.total || 0) - (a.v.total || 0));
+    return b ? head + b + '</tbody></table>' : empty;
   }
-  if (!rows.length) return '<div class="idle-empty">无明细</div>';
-  let h = '<table class="sn-sub"><thead><tr><th>' + (snChain === 'all' ? '链' : '钱包') + '</th><th>总资金</th><th>钱包余额</th><th>LP 价值</th><th class="sn-hm">待领费</th><th class="sn-hm">活跃仓</th><th>较上次</th></tr></thead><tbody>';
-  for (const r of rows) {
-    const d = r.pv ? (r.v.total || 0) - (r.pv.total || 0) : null;
-    h += '<tr><td><span class="sn-name">' + escH(r.name) + '</span><span class="sn-addr">' + escH(r.sub) + '</span></td>'
-      + '<td>' + fU2(r.v.total) + '</td><td>' + fU2(r.v.idle) + '</td><td>' + fU2(r.v.lp) + '</td><td class="sn-hm">' + fU2(r.v.fees) + '</td>'
-      + '<td class="sn-hm">' + (r.v.active || 0) + '<span style="color:var(--text-muted)">/' + (r.v.inRange || 0) + '内</span></td>'
-      + '<td class="' + dCls(d) + '">' + (d == null ? '<span class="sn-zero">新</span>' : fD(d) + ' <span style="font-size:10px;opacity:.8">' + fPc(d, r.pv.total) + '</span>') + '</td></tr>';
+  const c = (e.chains || {})[snChain]; if (!c) return '';
+  const pw = pe ? (((pe.chains || {})[snChain] || {}).wallets || null) : null;
+  const ents = Object.entries(c.wallets || {});
+  if (!ents.length) return empty;
+  // 分组按当条快照里各钱包自己的名字判定 (历史改名也正确归属); 选中某个组时只渲染该组
+  const byAll = {};
+  for (const [a, w] of ents) { const g = groupKey(w.name || ''); if (g) (byAll[g] = byAll[g] || []).push([a, w]); }
+  const selG = snWallet.startsWith('g:') ? snWallet.slice(2) : null;
+  const inG = new Set();
+  const blocks = [];
+  for (const [g, mem] of Object.entries(byAll)) {
+    if (mem.length < 2) continue;
+    for (const [a] of mem) inG.add(a);
+    if (selG && g !== selG) continue;
+    const pm = pw ? mem.filter(([a]) => pw[a]).map(([a]) => [a, pw[a]]) : [];
+    blocks.push({ g, mem: mem.slice().sort((x, y) => (y[1].total || 0) - (x[1].total || 0)), v: snSum(mem), pv: pm.length ? snSum(pm) : null });
   }
-  return h + '</tbody></table>';
+  blocks.sort((x, y) => y.v.total - x.v.total);
+  for (const blk of blocks) {
+    const st = '--gc:' + groupColor(blk.g);
+    b += snSubRow('<span class="sn-gdot"></span>' + escH(blk.g), '<span class="sn-gcount">' + blk.mem.length + ' 个钱包</span>', blk.v, blk.pv, 'sn-grp', st);
+    for (const [a, w] of blk.mem) b += snSubRow(escH(groupRest(w.name || '') || w.name || a), escH(sA(a)), w, pw ? pw[a] : null, 'sn-gmem', st);
+  }
+  if (!selG) {   // 未成组的钱包照旧平铺, 排在分组之后
+    const singles = ents.filter(([a]) => !inG.has(a)).sort((x, y) => (y[1].total || 0) - (x[1].total || 0));
+    for (const [a, w] of singles) b += snSubRow(escH(w.name || a), escH(sA(a)), w, pw ? pw[a] : null);
+  }
+  return b ? head + b + '</tbody></table>' : empty;
 }
 function snToggleRow(k) { snOpenRow = snOpenRow === k ? null : k; renderSnap(); }
 function snSetChain(c) { snChain = c; snWallet = 'all'; snOpenRow = null; snSave(); renderSnap(); }
@@ -1894,11 +2233,11 @@ function renderSp() {
   const nx = !spCfg.enabled ? '自动快照已停用' : (spCfg.todayDone ? '今日已完成，下次 明天 ' + spCfg.time : '下次 今天 ' + spCfg.time + (spCfg.running ? '（进行中…）' : ''));
   $('spStatus').innerHTML = escH(lr) + ' · ' + escH(nx) + (spCfg.lastError ? ' · <span style="color:var(--red)">上次失败: ' + escH(spCfg.lastError) + '</span>' : '');
   const sel = spSelSet();
-  $('spList').innerHTML = walletList.map(w => `<label class="wm-item nm-check">
+  $('spList').innerHTML = walletList.map(w => `<label class="wm-item nm-check${wOn(w) ? '' : ' off'}">
       <input type="checkbox" ${(sel === null || sel.has(nmNorm(w.address))) ? 'checked' : ''} onchange="spToggleWallet('${escH(w.address)}', this.checked)">
-      <span class="wm-item-name">${escH(w.name)}</span>
+      <span class="wm-item-name">${escH(w.name)}</span>${wOn(w) ? '' : '<span class="wm-off-tag">已停用</span>'}
       <span class="wm-item-addr">${escH(w.address)}</span>
-    </label>`).join('') || '<div class="nm-hint">本链还没有已添加的钱包，先返回总览在「💼 管理钱包」中添加</div>';
+    </label>`).join('') || wmHint();
 }
 function spToggleWallet(addr, on) {
   if (!Array.isArray(spCfg.wallets[activeChain])) spCfg.wallets[activeChain] = walletList.map(w => nmNorm(w.address));
@@ -1927,9 +2266,10 @@ async function saveSpCfg() {
   }
 }
 
-loadWallets();
+if (!isPending()) loadWallets();
 loadNotifyCfg();
 loadFdCfg();
+loadUiCfg();
 loadData();
 if (location.hash === '#settings') openSettings();   // 设置页刷新保持
 else if (location.hash === '#snapshot') openSnap();   // 快照页刷新保持

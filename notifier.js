@@ -13,8 +13,8 @@ const TG_CHAT = process.env.TG_CHAT_ID || '';
 const PORT = parseInt(process.env.PORT || '1788');
 
 // chain → 本地 API 前缀 (与前端 apiBase() 一致)
-const CHAIN_API = { bsc: '/api', eth: '/api/eth', rh: '/api/rh', base: '/api/base', sol: '/api/sol' };
-const CHAIN_LABEL = { bsc: 'BSC', eth: 'ETH', rh: 'RH', base: 'Base', sol: 'SOL' };
+const CHAIN_API = { bsc: '/api', eth: '/api/eth', rh: '/api/rh', base: '/api/base', sol: '/api/sol', arc: '/api/arc' };
+const CHAIN_LABEL = { bsc: 'BSC', eth: 'ETH', rh: 'RH', base: 'Base', sol: 'SOL', arc: 'Arc' };
 const CONFIRM = 2;                    // 连续 N 轮同向观测才确认翻转
 const STALE_MS = 45 * 60 * 1000;      // 链缓存超过 45min 视为过旧, 本轮跳过该链
 const TG_MAX = 3500;                  // 单条消息长度上限(TG 4096 留余量)

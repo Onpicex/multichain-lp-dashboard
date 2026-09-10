@@ -26,6 +26,9 @@ function saveWallets(w) {
   fs.writeFileSync(WALLETS_FILE, JSON.stringify(w, null, 2));
 }
 let WALLETS = loadWallets();
+// 启用中的钱包 (enabled 缺省=启用; false=停用: 不抓仓位/不查余额, 只保留在列表里)
+function isWalletOn(w) { return w.enabled !== false; }
+function activeWallets() { return WALLETS.filter(isWalletOn); }
 
 // --- cache ---
 let cache = { data: null, timestamp: 0 };
@@ -355,8 +358,8 @@ function fundWalletsSol() {
   } catch {}
   if (!cfg.enabled) return [];
   const sel = cfg.wallets.sol;
-  if (!Array.isArray(sel)) return WALLETS;
-  return WALLETS.filter(w => sel.includes(w.address));
+  if (!Array.isArray(sel)) return activeWallets();
+  return activeWallets().filter(w => sel.includes(w.address));
 }
 
 async function fetchIdleSol(walletsSel) {
@@ -437,8 +440,8 @@ async function fetchAllSol(force = false) {
 }
 
 async function _fetchAllSol() {
-  const walletResults = [];
-  for (const w of WALLETS) {
+  let walletResults = [];
+  for (const w of activeWallets()) {
     // 抓取失败(429限流等)时重试最多3轮, 每轮间隔递增, 避免把有仓钱包误判为空仓
     let met = null, ray = null;
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -465,6 +468,8 @@ async function _fetchAllSol() {
     // 钱包间歇 1.5s, 防公共 RPC 429 (15+ 钱包连扫会被打限流, 空仓漏报)
     await new Promise(r => setTimeout(r, 1500));
   }
+  // 本轮起跑后被停用/删除的钱包不发布 (SOL 一轮约 2 分钟, 期间用户可能点了停用)
+  walletResults = walletResults.filter(wr => activeWallets().some(w => w.address === wr.address));
 
   // 补 symbol（Meteora 只有 mint 地址）+ 价格
   const allMints = [];
@@ -572,7 +577,7 @@ async function _fetchAllSol() {
     idle,
     timestamp: Date.now(),
     chain: 'sol',
-    stats: { totalActive, totalInRange, totalOutOfRange, totalFees, walletsWithActiveLP, totalWallets: WALLETS.length },
+    stats: { totalActive, totalInRange, totalOutOfRange, totalFees, walletsWithActiveLP, totalWallets: activeWallets().length },
   };
   cache = { data: result, timestamp: Date.now() };
   saveCache();
@@ -601,6 +606,40 @@ function normalizeSolPosition(pos) {
 // ============================================================
 // Express 路由挂载
 // ============================================================
+// 从已定价的钱包结果重算合计与统计 (剔除钱包后零 RPC 更新, 口径与主循环一致: 费含非活跃仓)
+function summarizeWallets(walletResults) {
+  let grandTotalUSD = 0, totalActive = 0, totalInRange = 0, totalOutOfRange = 0, totalFees = 0, walletsWithActiveLP = 0;
+  for (const wr of walletResults) {
+    let hasActive = false;
+    for (const pos of wr.positions || []) {
+      totalFees += pos.feesValueUSD || 0;
+      if (pos.liquidityActive) { totalActive++; hasActive = true; if (pos.inRange) totalInRange++; else totalOutOfRange++; }
+    }
+    grandTotalUSD += wr.totalUSD || 0;
+    if (hasActive) walletsWithActiveLP++;
+  }
+  return { grandTotalUSD, totalActive, totalInRange, totalOutOfRange, totalFees, walletsWithActiveLP };
+}
+// 停用钱包: 就地剔出缓存 (合计/统计/闲置余额一起重算) + 释放 Raydium 实例, 零 RPC 立即生效
+function dropSolWalletFromCache(addr) {
+  const fixIdle = (idle) => {
+    if (!idle || !idle.byWallet || !idle.byWallet[addr]) return;
+    delete idle.byWallet[addr];
+    idle.totalUSD = Object.values(idle.byWallet).reduce((s, w) => s + (w.totalUSD || 0), 0);
+  };
+  if (cache.data) {
+    const d = cache.data;
+    d.wallets = (d.wallets || []).filter(w => w.address !== addr);
+    const sm = summarizeWallets(d.wallets);
+    d.grandTotalUSD = sm.grandTotalUSD;
+    d.stats = { ...(d.stats || {}), ...sm, totalWallets: activeWallets().length };
+    fixIdle(d.idle);
+    saveCache();
+  }
+  fixIdle(lastIdleSol);
+  delete raydiumInstances[addr];
+}
+
 function mountSolRoutes(app, adminGuard) {
   app.get('/api/sol/positions', async (req, res) => {
     try {
@@ -642,8 +681,12 @@ function mountSolRoutes(app, adminGuard) {
   app.patch('/api/sol/wallets/:address', adminGuard, (req, res) => {
     const idx = WALLETS.findIndex(w => w.address === req.params.address);
     if (idx === -1) return res.status(404).json({ error: '地址不存在' });
-    const { name, address } = req.body || {};
-    let newName, newAddr;
+    const { name, address, enabled } = req.body || {};
+    let newName, newAddr, newEnabled;
+    if (enabled !== undefined) {
+      if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled 须为布尔值' });
+      newEnabled = enabled;
+    }
     if (name !== undefined) {
       newName = String(name).trim();
       if (!newName) return res.status(400).json({ error: '名称不能为空' });
@@ -654,21 +697,26 @@ function mountSolRoutes(app, adminGuard) {
       try { new PublicKey(newAddr); } catch { return res.status(400).json({ error: '无效的 Solana 地址' }); }
       if (newAddr !== WALLETS[idx].address && WALLETS.some((w, i) => i !== idx && w.address === newAddr)) return res.status(409).json({ error: '地址已存在' });
     }
-    if (newName === undefined && newAddr === undefined) return res.status(400).json({ error: '需要 name 或 address' });
+    if (newName === undefined && newAddr === undefined && newEnabled === undefined) return res.status(400).json({ error: '需要 name / address / enabled' });
     const old = { ...WALLETS[idx] };
     const addrChanged = newAddr !== undefined && newAddr !== old.address;
+    const enabledChanged = newEnabled !== undefined && newEnabled !== isWalletOn(old);
     if (newName !== undefined) WALLETS[idx].name = newName;
     if (newAddr !== undefined) WALLETS[idx].address = newAddr;
+    if (newEnabled !== undefined) { if (newEnabled) delete WALLETS[idx].enabled; else WALLETS[idx].enabled = false; }
     saveWallets(WALLETS);
     if (addrChanged) {
       cache = { data: null, timestamp: 0 };
       delete raydiumInstances[old.address];
+    } else if (enabledChanged) {
+      if (newEnabled) kickSolRefresh();                 // 重新启用: 后台补一轮带回来 (不清老数据)
+      else dropSolWalletFromCache(old.address);         // 停用: 就地剔出缓存, 零 RPC
     } else if (cache.data) {
       // 只改名: 缓存里就地改显示名, 不触发重拉
       for (const w of (cache.data.wallets || [])) if (w.address === old.address) w.name = WALLETS[idx].name;
       saveCache();
     }
-    console.log(`[SOL] Wallet updated: ${old.name} (${old.address}) -> ${WALLETS[idx].name} (${WALLETS[idx].address})`);
+    console.log(`[SOL] Wallet updated: ${old.name} (${old.address}) -> ${WALLETS[idx].name} (${WALLETS[idx].address})${enabledChanged ? (newEnabled ? ' [启用]' : ' [停用]') : ''}`);
     res.json({ ok: true, wallets: WALLETS });
   });
 }
