@@ -22,9 +22,8 @@ const CHAINS = [
   { id: 'eth',  name: 'Ethereum', enabled: true },
   { id: 'rh',   name: 'Robinhood', enabled: true },
   { id: 'base', name: 'Base', enabled: false },
-  // Arc (Circle 稳定币 L1, chainId 5042): 主网预计 2026-09-16 上线, 现为预接线状态。
-  // pending 字段是前端"待主网"角标+占位页的唯一真源; 上线后改 enabled:true 并删掉 pending。
-  { id: 'arc',  name: 'Arc', enabled: false, pending: '2026-09-16' },
+  // Arc (Circle 稳定币 L1, chainId 5042): 主网 2026-09-16 公开, 2026-09-19 切活 (arc-check 全绿)。
+  { id: 'arc',  name: 'Arc', enabled: true },
 ];
 
 // Optional admin guard for mutating endpoints (set ADMIN_TOKEN in .env to enable)
@@ -401,8 +400,16 @@ const FACTORY_ABI = [
 // --- Providers ---
 const provider = new ethers.JsonRpcProvider(BSC_RPC);
 // Separate provider for log queries (public RPCs have different rate limits)
+// 2026-09-13: 本文件的日志扫描 (40k 块一段的 getLogs、nr_getNFTInventory) 是按 NodeReal 写的; publicnode 对 40k 块回 403、
+// 对 nr_* 回 Method not found, 三条兜底全部静默失效。.env 已切到 Pancake 前端自带的 NodeReal 公共端点 (见 pancake-bsc.js 顶部普查)。
 const LOG_RPC = process.env.LOG_RPC || 'https://bsc-rpc.publicnode.com';
-const logProvider = new ethers.JsonRpcProvider(LOG_RPC);
+// ethers v6 默认不设请求超时, RPC 一卡整轮刷新就永久悬着 → 每个请求 20s 上限 (nr_getNFTInventory 走原生 fetch 不受影响)
+const _logReq = new ethers.FetchRequest(LOG_RPC); _logReq.timeout = 20000;
+const logProvider = new ethers.JsonRpcProvider(_logReq);
+// 事件回看深度: 旧值 864000 是按 3s 出块估的"30 天", BSC 现在 0.45s 一块 (2026-09 实测), 只覆盖 4.5 天 → 改按天配置换算
+const LOG_SCAN_LOOKBACK_DAYS = parseFloat(process.env.LOG_SCAN_LOOKBACK_DAYS || '30');
+const BSC_BLOCK_SECONDS = 0.45;
+const LOG_SCAN_LOOKBACK_BLOCKS = Math.round(LOG_SCAN_LOOKBACK_DAYS * 86400 / BSC_BLOCK_SECONDS); // 30 天 ≈ 5.76M 块 ≈ 144 段 × 40k
 
 // --- Token info cache ---
 const tokenInfoCache = {};
@@ -468,7 +475,8 @@ function getTokenAmounts(liquidity, sqrtPriceX96, tickLower, tickUpper, decimals
 // --- USD Price Resolution ---
 const USDT_ADDRESS = '0x55d398326f99059fF775485246999027B3197955'.toLowerCase();
 const BUSD_ADDRESS = '0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56'.toLowerCase();
-const STABLECOINS = new Set([USDT_ADDRESS, BUSD_ADDRESS]);
+const USDC_ADDRESS = '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d'.toLowerCase(); // 2026-09-13 随 Pancake 接入补上 (Pancake 池常用 USDC 计价)
+const STABLECOINS = new Set([USDT_ADDRESS, BUSD_ADDRESS, USDC_ADDRESS]);
 
 async function getUSDPrices(tokenAddresses, positionsData) {
   const unique = [...new Set(tokenAddresses.map(a => a.toLowerCase()))];
@@ -588,6 +596,15 @@ function feeLabel(fee) {
   const map = { 100: '0.01%', 500: '0.05%', 2500: '0.25%', 3000: '0.3%', 10000: '1%' };
   if (Number(fee) === 0x800000) return '动态';  // V4 DYNAMIC_FEE_FLAG, 真实费率由 hook 决定
   return map[Number(fee)] || `${(Number(fee) / 10000).toFixed(2)}%`;
+}
+
+// --- PancakeSwap V3 (2026-09-13): 独立模块, 注入本文件的 provider/数学/缓存助手; 见 pancake-bsc.js 顶部说明 ---
+let pcsBsc = null;
+function getPcs() {
+  if (!pcsBsc) {
+    pcsBsc = require('./pancake-bsc').create({ ethers, provider, getTokenInfo, tickToPrice, sqrtPriceX96ToPrice, getTokenAmounts, feeLabel, batchedAll, withRetry, sleep, dir: __dirname });
+  }
+  return pcsBsc;
 }
 
 // --- V4 helpers ---
@@ -760,7 +777,7 @@ async function getV3LastCollectTimes(tokenIds) {
   try {
     const currentBlock = await logProvider.getBlockNumber();
     const blockStep = 40000; // nodereal supports 45k-range getLogs
-    const lookbackBlocks = 864000; // ~30 days
+    const lookbackBlocks = LOG_SCAN_LOOKBACK_BLOCKS; // 按天配置 (默认 30 天), 见顶部
     const fromBlock = Math.max(0, currentBlock - lookbackBlocks);
 
     for (const tid of toQuery) {
@@ -818,6 +835,18 @@ async function getV3LastCollectTimes(tokenIds) {
 
 // V4: get last Collect timestamps from PoolManager ModifyLiquidity events (liquidityDelta=0)
 const v4CollectCache = {};
+// 2026-09-13 事件扫描 (v4collect-logs.js) 的持久化游标: 按池的 scannedTo/floor/done + 每 tokenId 最新领费块高; 重启不重扫
+const V4_LOGSCAN_FILE = path.join(__dirname, 'v4collect-cache-bsc.json');
+let _v4LogScanStore = null;
+function v4LogScanStore() {
+  if (!_v4LogScanStore) { try { _v4LogScanStore = JSON.parse(fs.readFileSync(V4_LOGSCAN_FILE, 'utf8')); } catch { _v4LogScanStore = {}; } }
+  return _v4LogScanStore;
+}
+let _v4SaveTimer = null;
+function saveV4LogScanStore() { // 合并写 (扫描中每段都会调一次)
+  if (_v4SaveTimer) return;
+  _v4SaveTimer = setTimeout(() => { _v4SaveTimer = null; try { const tmp = V4_LOGSCAN_FILE + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(_v4LogScanStore || {})); fs.renameSync(tmp, V4_LOGSCAN_FILE); } catch {} }, 500);
+}
 const V4_COLLECT_CACHE_TTL = 30 * 60 * 1000; // 30 min for found collects
 const V4_COLLECT_MISS_TTL = 2 * 60 * 1000;  // 2 min for "not found" (retry sooner)
 const MODIFY_LIQUIDITY_TOPIC = '0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec';
@@ -842,6 +871,26 @@ async function getV4LastCollectTimes(positions) {
   }
 
   if (toQuery.length === 0) return results;
+
+  // 2026-09-13: 没配 Ankr 时改走标准 eth_getLogs 事件扫描 (v4collect-logs.js, salt==tokenId 精确归属);
+  // 旧逻辑会把 ankr_getLogs 打到 BSC_RPC 上必然失败 → V4 lastCollectAt 永远 0。有 Ankr 的仍走下面原路径。
+  if (!ANKR_ADVANCED_URL) {
+    try {
+      const { scanV4CollectsViaLogs } = require('./v4collect-logs');
+      const r = await scanV4CollectsViaLogs({
+        ethers, logProvider, poolManager: V4_POOL_MANAGER, positionManager: V4_POSITION_MANAGER,
+        positions: toQuery, lookbackBlocks: LOG_SCAN_LOOKBACK_BLOCKS, blockStep: 49999,
+        store: v4LogScanStore(), save: saveV4LogScanStore, budgetCalls: 120, budgetMs: 45000, now, log: console.log,
+      });
+      Object.assign(results, r.results);
+      for (const pos of toQuery) { const k = pos.tokenId.toString(); v4CollectCache[k] = { collectAt: r.results[k] || 0, ts: now }; }
+      console.log(`  V4 collect scan (logs): ${toQuery.length} positions, ${Object.keys(r.results).length} with collects, ${r.calls} getLogs${r.errors ? `, ${r.errors} errors` : ''}${r.budgetHit ? ', budget hit (resumes next round)' : ''}`);
+    } catch (e) {
+      console.error('  V4 collect scan (logs) failed:', e.message?.slice(0, 120));
+      for (const pos of toQuery) { const k = pos.tokenId.toString(); v4CollectCache[k] = { collectAt: v4CollectCache[k]?.collectAt || 0, ts: now }; }
+    }
+    return results;
+  }
 
   // Group by poolId to minimize queries
   const byPool = new Map();
@@ -979,7 +1028,7 @@ async function getV3MintTime(tokenId) {
   try {
     const currentBlock = await logProvider.getBlockNumber();
     const blockStep = 40000; // nodereal supports 45k-range getLogs
-    const lookback = 864000; // ~30 days
+    const lookback = LOG_SCAN_LOOKBACK_BLOCKS; // 按天配置 (默认 30 天), 见顶部
     const fromBlock = Math.max(0, currentBlock - lookback);
     const tokenIdHex = ethers.zeroPadValue(ethers.toBeHex(tokenId), 32);
 
@@ -1291,11 +1340,13 @@ async function _fetchPositionsInner(forceRefresh = false) {
 
   // Fetch all wallets: V3 + V4 combined
   let walletResults = await asyncPool(MAX_CONCURRENT, ACTIVE, async (wallet) => {
-    const [v3positions, v4positions] = await Promise.all([
+    const [v3positions, v4positions, pcsPositions] = await Promise.all([
       fetchWalletPositions(wallet, v3pm, factory),
       fetchWalletV4Positions(wallet, v4pm, stateView),
+      // PancakeSwap V3 (含 MasterChefV3 质押仓); 单独 catch, Pancake 侧出错不影响 Uniswap 仓
+      getPcs().fetchWalletPositions(wallet).catch(e => { console.error(`  [PCS] ${wallet.name} failed:`, e.message?.slice(0, 100)); return []; }),
     ]);
-    const allPositions = [...v3positions, ...v4positions];
+    const allPositions = [...v3positions, ...v4positions, ...pcsPositions];
     await sleep(500);
     return { address: wallet.address, name: wallet.name, positions: allPositions, totalUSD: 0 };
   });
@@ -1303,13 +1354,19 @@ async function _fetchPositionsInner(forceRefresh = false) {
   walletResults = walletResults.filter(wr => activeWallets().some(w => w.address.toLowerCase() === (wr.address || '').toLowerCase()));
 
   // For active V3 positions: fill in createdAt (chain fallback) + lastCollectAt
+  // (Pancake 仓 protocol 也是 'V3' 但 dex='pancake', 走自己的事件历史, 这里必须排除, 否则会拿 Pancake tokenId 去扫 Uniswap NPM)
   const activeV3Positions = [];
+  const activePcsPositions = [];
   for (const wr of walletResults) {
     for (const pos of wr.positions) {
-      if (pos.protocol === 'V3' && pos.liquidityActive) {
-        activeV3Positions.push(pos);
-      }
+      if (!pos.liquidityActive) continue;
+      if (pos.dex === 'pancake') activePcsPositions.push(pos);
+      else if (pos.protocol === 'V3') activeV3Positions.push(pos);
     }
+  }
+  if (activePcsPositions.length > 0) {
+    try { await getPcs().enrichHistory(activePcsPositions); }
+    catch (e) { console.error('[PCS] history enrich failed:', e.message?.slice(0, 120)); }
   }
 
   if (activeV3Positions.length > 0) {
@@ -1369,9 +1426,11 @@ async function _fetchPositionsInner(forceRefresh = false) {
     }
   }
 
-  // Get USD prices (once for all tokens); 闲置余额候选一并送定价 (coingecko 可覆盖 WBNB 等)
-  const idleCandBsc = [...new Set([...allTokenAddresses, ...STABLECOINS, WBNB.toLowerCase()])];
+  // Get USD prices (once for all tokens); 闲置余额候选一并送定价 (coingecko 可覆盖 WBNB 等); CAKE 为质押仓奖励计价
+  const CAKE_ADDR = require('./pancake-bsc').CAKE.toLowerCase();
+  const idleCandBsc = [...new Set([...allTokenAddresses, ...STABLECOINS, WBNB.toLowerCase(), CAKE_ADDR])];
   const usdPrices = await getUSDPrices(idleCandBsc, allPositions);
+  const cakePrice = usdPrices[CAKE_ADDR] || 0;
 
   // Calculate USD values
   let grandTotalUSD = 0;
@@ -1393,10 +1452,12 @@ async function _fetchPositionsInner(forceRefresh = false) {
       pos.token1USD = price1;
       pos.positionValueUSD = pos.amount0 * price0 + pos.amount1 * price1;
       pos.feesValueUSD = pos.feesOwed0 * price0 + pos.feesOwed1 * price1;
-      pos.totalValueUSD = pos.positionValueUSD + pos.feesValueUSD;
+      // Pancake 质押仓待领 CAKE: 计入总价值 (可随时领取的真钱), 不计入手续费口径
+      pos.rewardValueUSD = pos.pendingCake > 0 ? pos.pendingCake * cakePrice : 0;
+      pos.totalValueUSD = pos.positionValueUSD + pos.feesValueUSD + pos.rewardValueUSD;
 
-      // 建仓价值: 只读缓存, 缺失交给后台异步队列补 (子图 amountUSD 聚合)
-      {
+      // 建仓价值: 只读缓存, 缺失交给后台异步队列补 (子图 amountUSD 聚合); Pancake 无子图, 不做 (宁缺毋滥)
+      if (pos.dex !== 'pancake') {
         const kind = pos.protocol === 'V4' ? 'v4' : 'v3';
         const job = kind === 'v3'
           ? { kind, tokenId: pos.tokenId, poolAddress: pos.poolAddress, tickLower: pos.tickLower, tickUpper: pos.tickUpper, owner: pos.walletAddress, liq: pos.liquidity }
@@ -1558,6 +1619,8 @@ app.get('/api/health', (req, res) => {
       mainCacheAge: cache.timestamp ? Math.round((Date.now() - cache.timestamp) / 1000) + 's' : null,
       v4IdCacheEntries: Object.keys(v4IdCache).length,
     },
+    // PancakeSwap 事件扫描状态: 上一轮调用数/耗时/是否触顶预算 + 各日志 RPC 成败计数
+    pancake: pcsBsc ? (() => { const s = pcsBsc.stats(); return { lastRound: s.lastRound, rpcs: s.rpcs.map(r => ({ url: r.url.replace(/\/v1\/[0-9a-f]{20,}/, '/v1/…'), chunk: r.chunk, ok: r.ok, fail: r.fail, cooling: r.failUntil > Date.now() })) }; })() : null,
   });
 });
 

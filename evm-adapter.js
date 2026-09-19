@@ -98,32 +98,41 @@ const EVM_CHAINS = {
     fundingFromLogs: true,                // 初始资金(净入金): 全链 Transfer 回溯 (仅 rh; rh RPC 无 trace, 原生 ETH 直转不可见)
     noBatch: true,                        // rh RPC 对 JSON-RPC batch 悬死 (2026-09-06), 单请求正常
   },
-  // --- Arc (Circle 稳定币 L1, chainId 5042): 预接线, 主网上线前不抓任何数据 ---
-  // 现状 (2026-09-08 实测): 主网 RPC 公网不可达 (rpc.arc.io 无响应 / rpc.mainnet.arc.io 返 Cloudflare 页 /
-  //   arc.drpc.org 返 Unknown network); 测试网 (chainId 5042002, rpc.testnet.arc.io) 可达但 eth_getCode 证实
-  //   Uniswap V3/V4 一个都没部署。故 pending=true: 不进刷新调度、/positions 直接返空载荷, 零 RPC 请求。
-  // ⚠ 下列合约地址来源 = Uniswap 官方 sdk-core 的 ARC_ADDRESSES, **尚未链上验证**
-  //   (本文件其余链的地址都带链上验证日期, 别把 Arc 当同级信任)。
-  // 上线切活: 见文件末尾 [ARC-GO-LIVE] 步骤, 先跑 node tools/arc-check.js 验证。
+  // --- Arc (Circle 稳定币 L1, chainId 5042): 2026-09-19 切活 (主网 09-16 公开) ---
+  // tools/arc-check.js 2026-09-19 全绿: chainId 5042、7 个合约字节码、NPM.factory()/PositionManager.poolManager()
+  //   互指、PoolManager 部署块 1948056 (2026-05-27, 首个 V4 仓 mint 在 1954872 同日 —— 链在公开前已跑了 3 个多月)。
+  // 【RPC 限制】官方 rpc.mainnet.arc.io: getLogs 单段 ≤ 9999 块 (10000 即 "requested range too large"),
+  //   单次 ≤ 2000 条; **限速** (2026-09-19 实测: 9999 块窗 2 并行连发 30 窗只成 3 个, -32005 rate limit exceeded;
+  //   串行 + 250ms 间隔 30/30 成功, 但每次 getLogs ~2s); batch 正常; archive eth_call 至少能回溯 47 万块。
+  //   → logChunk: 9999 让所有分段扫描按它走 (其余链仍 5M), logGapMs: 250 串行限速节奏;
+  //     V4 枚举加持久化游标 (v4ids-cache-arc.json), 每 100 窗落盘, 增量只扫新块。
+  // 【枚举起点 = 主网公开上线块, 不是 PoolManager 部署块】PoolManager 2026-05-27 就部署了 (块 1948056), 但链在
+  //   09-16 才对公众开放; 按 2s/窗 从部署块扫全史 = 1970 万块 ≈ 2000 窗 × 2 请求 × 2s ≈ 2 小时/钱包, 不可行。
+  //   公开前只有 Circle/合作方能用, 用户钱包不可能有更早的仓位, 所以从 09-16 00:00 UTC 的块起扫 (60 窗 ≈ 4 分钟/钱包首扫)。
+  //   若某钱包确有更早仓位: 把 deployBlock 改回 1948056 并删掉它在 v4ids-cache-arc.json 里的游标即可 (会慢)。
+  // 【无子图 / 无 blockscout】The Graph 上 arc 无 Uniswap V3 子图, 唯一的 V4 子图落后链头 20h; explorer.arc.io
+  //   是否 Blockscout 兼容未验 → 全部走链上日志 (entryFromLogs), blockscout 保持 null。
   arc: {
     name: 'Arc',
-    pending: true,                        // ← 主网上线并自检通过后改 false (唯一开关)
-    pendingDate: '2026-09-16',            // 官方公布的主网上线日 (arc.io)
+    pending: false,                       // 2026-09-19 切活 (arc-check 全绿)
     chainId: 5042,                        // Uniswap sdk-core ChainId.ARC = 5042
-    rpc: process.env.ARC_RPC || 'https://rpc.arc.io',   // 占位: 主网 RPC 尚未公开, 以官方 docs.arc.io/arc/references/connect-to-arc 为准
+    rpc: process.env.ARC_RPC || 'https://rpc.mainnet.arc.io',   // 官方主网 RPC, 服务器 50ms
+    logChunk: 9999,                       // getLogs 单段上限 (见上), 分段扫描/倒扫/池价窗口都按它裁
+    logGapMs: 250,                        // 分段扫描串行 + 段间间隔 (官方 RPC 限速, 见上)
+    fetchStuckMs: 40 * 60 * 1000,         // 看门狗放宽: 首扫 (枚举 60 窗 + 领费扫描 150s 预算) 比 15min 默认长, 别被误判卡死开第二轮
     v3: {
-      npm: '0x39654a85a4c05127f5fd6ed22caec077a0fb1377',      // sdk-core, 未链上验证
-      factory: '0xf0db7b58379503491d857db50ac9ece64c653918',   // sdk-core, 未链上验证
+      npm: '0x39654a85a4c05127f5fd6ed22caec077a0fb1377',      // factory() 已链上验证 2026-09-19
+      factory: '0xf0db7b58379503491d857db50ac9ece64c653918',   // 链上验证 2026-09-19 (部署块 1948019)
     },
     v4: {
-      pm: '0x6049c9a0e26405c0985f9e3685c87d0ae917f82b',           // sdk-core v4PositionManager, 未链上验证
-      stateView: '0xf3334192d15450cdd385c8b70e03f9a6bd9e673b',    // 与 rh 同址 (同一套确定性部署)
-      poolManager: '0x8366a39cc670b4001a1121b8f6a443a643e40951',  // 与 rh 同址
-      deployBlock: null,   // V4 Transfer 日志枚举起点; 待 tools/arc-check.js 探出后填 (无浏览器可用, 必需)
+      pm: '0x6049c9a0e26405c0985f9e3685c87d0ae917f82b',           // poolManager() 已链上验证 2026-09-19
+      stateView: '0xf3334192d15450cdd385c8b70e03f9a6bd9e673b',    // 与 rh 同址, getSlot0/getLiquidity 链上验证 2026-09-19
+      poolManager: '0x8366a39cc670b4001a1121b8f6a443a643e40951',  // 与 rh 同址, 链上验证 2026-09-19
+      deployBlock: 21068653,  // 主网公开上线 2026-09-16 00:00 UTC 对应块 (见上); PoolManager 真部署块 = 1948056 (arc-check 二分)
     },
     v3SubgraphId: null,                   // Arc 无 The Graph 子图
     v4SubgraphId: null,
-    blockscout: null,                     // 主网浏览器未定 (testnet.arcscan.app 只是测试网) -> V4 枚举只能走日志
+    blockscout: null,                     // explorer.arc.io 是否 Blockscout 兼容未验 -> V4 枚举走日志 (有游标, 便宜)
     // Arc 的 gas 代币就是 USDC: 原生 18 位小数, ERC-20 接口预编译 0x3600… 是 6 位小数的同一笔余额。
     // 链上没有 wrapped USDC ("There is no wrapped USDC address on Arc"), 故 wrappedNative 指向该预编译。
     stables: {
@@ -276,12 +285,17 @@ function chainState(chainId) {
       const saved = JSON.parse(fs.readFileSync(posFile, 'utf8'));
       if (saved && saved.data) cache = saved;
     } catch {}
+    // V4 日志枚举的持久化游标 (见 rpcNftIdsViaTransferLogs)
+    const v4ScanFile = path.join(__dirname, `v4ids-cache-${chainId}.json`);
+    let v4Scan = {};
+    try { v4Scan = JSON.parse(fs.readFileSync(v4ScanFile, 'utf8')) || {}; } catch {}
     state[chainId] = {
       // rh RPC 对 JSON-RPC batch 请求会悬死不响应 (2026-09-06 实测: 单请求 0.2s 正常,
       // batch>=5 挂死) —— 禁用 ethers 层批处理; 聚合本来就靠 Multicall3, HTTP batch 纯多余
       provider: new ethers.JsonRpcProvider(cfg.rpc, undefined, cfg.noBatch ? { batchMaxCount: 1 } : {}),
       tokenCache: {}, cache, createdFile, createdCache, posFile,
       fetchInFlight: null, fetchStartedAt: 0, lastPublishStart: 0, v4IdCache: {},
+      v4ScanFile, v4Scan,
     };
   }
   return state[chainId];
@@ -423,15 +437,27 @@ async function rpcMintTime(chainId, nftContract, tokenId) {
   const st = chainState(chainId);
   const key = `${nftContract.toLowerCase()}-${tokenId}`;
   if (st.createdCache[key] > 0) return st.createdCache[key];
+  // 枚举游标里已经有 mint 块 → 一次 getBlock 拿时间戳, 不倒扫
+  const mbs = mintBlockFromScan(chainId, nftContract, tokenId);
+  if (mbs > 0) {
+    try {
+      const b = await st.provider.getBlock(mbs);
+      if (b) { st.createdCache[key] = b.timestamp * 1000; try { fs.writeFileSync(st.createdFile, JSON.stringify(st.createdCache)); } catch {} return st.createdCache[key]; }
+    } catch {}
+  }
   try {
     const T = ethers.id('Transfer(address,address,uint256)');
     const zero = ethers.zeroPadValue(ethers.ZeroAddress, 32);
     const tid = ethers.zeroPadValue(ethers.toBeHex(BigInt(tokenId)), 32);
     const latest = await st.provider.getBlockNumber();
-    const CHUNK = 5000000;
+    const CHUNK = EVM_CHAINS[chainId].logChunk || 5000000;   // arc: RPC 单段 ≤ 9999 块
+    // 小段链 (arc) 不能一路倒扫到创世 (2000+ 窗): 以 V4 枚举起点为地板, 段间按限速间隔
+    const floorB = EVM_CHAINS[chainId].logChunk ? (EVM_CHAINS[chainId].v4.deployBlock || 0) : 0;
+    const gapMs = EVM_CHAINS[chainId].logGapMs || 0;
     let logs = [];
-    for (let to = latest; to >= 0 && logs.length === 0; to -= CHUNK) {
-      const from = Math.max(0, to - CHUNK + 1);
+    for (let to = latest; to >= floorB && logs.length === 0; to -= CHUNK) {
+      const from = Math.max(floorB, to - CHUNK + 1);
+      if (gapMs && to !== latest) await sleep(gapMs);
       logs = await withRetry(() => st.provider.send('eth_getLogs', [{
         address: nftContract,
         fromBlock: '0x' + from.toString(16), toBlock: '0x' + to.toString(16),
@@ -454,29 +480,73 @@ async function rpcMintTime(chainId, nftContract, tokenId) {
 // --- V4 头寸枚举: 链上 Transfer 日志分段扫描 ---
 // RH 无子图, blockscout /nft 库存端点对 700+ NFT 大户既翻不完页又被限流 (2026-08-25 实测
 // 698 个只枚举到 236); 官方 RPC 全窗一次查会 "log query timed out", 5M 块分段则整链 ~4s 跑完
+// 【持久化游标 (2026-09-19, 为 Arc 加)】每钱包记 { scannedTo, held: {tokenId: 0|1} } 到 v4ids-cache-<chain>.json:
+//   每次只扫 scannedTo+1 → 链头, 事件按 (块高, logIndex) 顺序叠加到 held 上 (Transfer 的最后一条决定归属),
+//   所以增量与全量等价。Arc 若没有它, 每次重启 / 每 6h TTL 到期都要从部署块重扫 1970 万块 (≈2000 窗 × 2 请求)。
+//   中途某段失败: 抛错前先把已完成的窗落盘, 下次从那里续; 归属判定只用已扫完的事件, 不会把半截结果当真。
+//   rh 同样受益 (重启后零重扫)。
 async function rpcNftIdsViaTransferLogs(chainId, owner, nftContract, deployBlock) {
   const st = chainState(chainId);
   const T = ethers.id('Transfer(address,address,uint256)');
   const wt = ethers.zeroPadValue(owner, 32);
   const latest = await st.provider.getBlockNumber();
-  const CHUNK = 5000000;
-  const all = [];
-  for (let from = deployBlock; from <= latest; from += CHUNK) {
-    const to = Math.min(from + CHUNK - 1, latest);
-    const base = { address: nftContract, fromBlock: '0x' + from.toString(16), toBlock: '0x' + to.toString(16) };
-    const [ins, outs] = await Promise.all([
-      withRetry(() => st.provider.send('eth_getLogs', [{ ...base, topics: [T, null, wt] }])),
-      withRetry(() => st.provider.send('eth_getLogs', [{ ...base, topics: [T, wt, null] }])),
-    ]);
-    all.push(...ins, ...outs);
-  }
-  // 按 (块高, logIndex) 排序后, 每个 tokenId 的最后一条 Transfer 决定当前归属
+  const CHUNK = EVM_CHAINS[chainId].logChunk || 5000000;   // arc: RPC 单段 ≤ 9999 块
+  const gap = EVM_CHAINS[chainId].logGapMs || 0;           // arc: 官方 RPC 限速, 串行 + 间隔
+  const key = owner.toLowerCase();
+  const cur = st.v4Scan[key] && st.v4Scan[key].pm === nftContract.toLowerCase()
+    ? st.v4Scan[key]
+    : (st.v4Scan[key] = { pm: nftContract.toLowerCase(), scannedTo: deployBlock - 1, held: {}, mint: {} });
+  if (!cur.mint) cur.mint = {};
   const ownerTail = owner.slice(2).toLowerCase();
-  const evs = all.map(l => ({ bn: parseInt(l.blockNumber, 16), li: parseInt(l.logIndex, 16), to: l.topics[2], id: BigInt(l.topics[3]).toString() }));
-  evs.sort((a, b) => a.bn - b.bn || a.li - b.li);
-  const held = new Map();
-  for (const e of evs) held.set(e.id, e.to.slice(26).toLowerCase() === ownerTail);
-  return [...held.entries()].filter(([, h]) => h).map(([id]) => ({ id: BigInt(id), createdAt: 0 }));
+  const ZERO_T = ethers.zeroPadValue(ethers.ZeroAddress, 32).toLowerCase();
+  const apply = logs => {
+    const evs = logs.map(l => ({ bn: parseInt(l.blockNumber, 16), li: parseInt(l.logIndex, 16), from: l.topics[1], to: l.topics[2], id: BigInt(l.topics[3]).toString() }));
+    evs.sort((a, b) => a.bn - b.bn || a.li - b.li);
+    for (const e of evs) {
+      cur.held[e.id] = e.to.slice(26).toLowerCase() === ownerTail ? 1 : 0;
+      // mint (from=0x0) 的块顺手记下: rpcMintTime / findMintEvent 就不用再从链头倒扫找它 (小段链上一个仓要 60 窗 × 2s)
+      if (String(e.from).toLowerCase() === ZERO_T) cur.mint[e.id] = e.bn;
+    }
+  };
+  let from = Math.max(deployBlock, cur.scannedTo + 1);
+  const total = Math.max(0, Math.ceil((latest - from + 1) / CHUNK));
+  if (total > 50) console.log(`  [${chainId}] V4 枚举 ${owner.slice(0, 10)}: 从块 ${from} 起 ${total} 窗 (首扫或长期未扫), 每 100 窗落盘一次游标`);
+  let n = 0;
+  try {
+    for (; from <= latest; from += CHUNK) {
+      const to = Math.min(from + CHUNK - 1, latest);
+      const base = { address: nftContract, fromBlock: '0x' + from.toString(16), toBlock: '0x' + to.toString(16) };
+      const fIn = { ...base, topics: [T, null, wt] }, fOut = { ...base, topics: [T, wt, null] };
+      let ins, outs;
+      if (gap) {
+        // 限速链 (arc): 串行 + 间隔, 撞 -32005 退避加长 (1.5s × 次)
+        ins = await withRetry(() => st.provider.send('eth_getLogs', [fIn]), 4, 1500); await sleep(gap);
+        outs = await withRetry(() => st.provider.send('eth_getLogs', [fOut]), 4, 1500);
+      } else {
+        [ins, outs] = await Promise.all([
+          withRetry(() => st.provider.send('eth_getLogs', [fIn])),
+          withRetry(() => st.provider.send('eth_getLogs', [fOut])),
+        ]);
+      }
+      apply([...ins, ...outs]);
+      cur.scannedTo = to;
+      // 首扫几十上百窗要好几分钟: 每 100 窗落盘一次, 中途重启也能从断点续 (否则 finally 之前什么都没存)
+      if (++n % 100 === 0) saveV4Scan(chainId);
+      if (gap && from + CHUNK <= latest) await sleep(gap);
+    }
+  } finally { saveV4Scan(chainId); }   // 成败都把已扫到的游标落盘
+  return Object.entries(cur.held).filter(([, h]) => h).map(([id]) => ({ id: BigInt(id), createdAt: 0 }));
+}
+function saveV4Scan(chainId) {
+  const st = chainState(chainId);
+  try { fs.writeFileSync(st.v4ScanFile, JSON.stringify(st.v4Scan)); } catch (e) { console.error(`  [${chainId}] v4ids-cache 落盘失败:`, e.message?.slice(0, 60)); }
+}
+// 枚举游标里记过的 mint 块 (任一钱包的扫描看到过该 tokenId 的 mint 即可), 没有返 0
+function mintBlockFromScan(chainId, nftContract, tokenId) {
+  const st = chainState(chainId);
+  const pm = nftContract.toLowerCase(), id = String(tokenId);
+  for (const cur of Object.values(st.v4Scan || {})) if (cur && cur.pm === pm && cur.mint && cur.mint[id] > 0) return cur.mint[id];
+  return 0;
 }
 
 // --- V4 头寸 tokenId 发现: 子图优先, blockscout 兜底 ---
@@ -701,7 +771,10 @@ async function poolPriceNearBlock(chainId, spec, targetBlock) {
   const filt = spec.kind === 'v4'
     ? { address: cfg.v4.poolManager, topics: [V4_SWAP_TOPIC, spec.poolId] }
     : { address: spec.poolAddress, topics: [V3_SWAP_TOPIC] };
-  const windows = [[300, 50], [2000, 2000], [20000, 20000], [150000, 150000], [900000, 900000], [2500000, 2500000]];
+  // arc 那种单段 ≤ 9999 块的 RPC: 窗口只到 ±4900, 再大就是必失败的请求
+  const windows = cfg.logChunk
+    ? [[300, 50], [2000, 2000], [4900, 4900]]
+    : [[300, 50], [2000, 2000], [20000, 20000], [150000, 150000], [900000, 900000], [2500000, 2500000]];
   for (const [back, fwd] of windows) {
     const from = Math.max(0, targetBlock - back), to = Math.min(latest, targetBlock + fwd);
     let logs;
@@ -726,6 +799,7 @@ async function poolPriceNearBlock(chainId, spec, targetBlock) {
 // 一律分段扫+段间小憩; 任一段重试后仍失败则抛出, 由调用方按「本轮拿不到」处理
 async function scanLogsChunked(chainId, baseFilter, fromBlock, chunk = 5000000, toBlock = null) {
   const st = chainState(chainId);
+  chunk = Math.min(chunk, EVM_CHAINS[chainId].logChunk || Infinity);   // arc: 单段 ≤ 9999
   const latest = toBlock != null ? toBlock : await st.provider.getBlockNumber();
   const all = [];
   for (let f = fromBlock; f <= latest; f += chunk) {
@@ -734,7 +808,7 @@ async function scanLogsChunked(chainId, baseFilter, fromBlock, chunk = 5000000, 
       ...baseFilter, fromBlock: '0x' + f.toString(16), toBlock: '0x' + to.toString(16),
     }]), 3, 1000);
     all.push(...logs);
-    if (f + chunk <= latest) await sleep(120);
+    if (f + chunk <= latest) await sleep(EVM_CHAINS[chainId].logGapMs || 120);
   }
   return all;
 }
@@ -742,14 +816,31 @@ async function scanLogsChunked(chainId, baseFilter, fromBlock, chunk = 5000000, 
 // NFT mint 事件: 块高+时间戳 (从链头倒扫, 与 rpcMintTime 同套路; 顺手喂 createdCache)
 async function findMintEvent(chainId, nftContract, tokenId) {
   const st = chainState(chainId);
+  {
+    // 枚举游标里已经有 mint 块 → 直接取块时间戳 (同 rpcMintTime)
+    const mbs = mintBlockFromScan(chainId, nftContract, tokenId);
+    if (mbs > 0) {
+      try {
+        const b = await st.provider.getBlock(mbs);
+        if (b) {
+          const k = `${nftContract.toLowerCase()}-${tokenId}`;
+          if (!(st.createdCache[k] > 0)) { st.createdCache[k] = b.timestamp * 1000; try { fs.writeFileSync(st.createdFile, JSON.stringify(st.createdCache)); } catch {} }
+          return { block: mbs, ts: b.timestamp * 1000 };
+        }
+      } catch {}
+    }
+  }
   const T = ethers.id('Transfer(address,address,uint256)');
   const zero = ethers.zeroPadValue(ethers.ZeroAddress, 32);
   const tid = ethers.zeroPadValue(ethers.toBeHex(BigInt(tokenId)), 32);
   const latest = await st.provider.getBlockNumber();
-  const CHUNK = 5000000;
+  const CHUNK = EVM_CHAINS[chainId].logChunk || 5000000;   // arc: RPC 单段 ≤ 9999 块
+  const floorB = EVM_CHAINS[chainId].logChunk ? (EVM_CHAINS[chainId].v4.deployBlock || 0) : 0;   // 同 rpcMintTime: 不倒扫到创世
+  const gapMs = EVM_CHAINS[chainId].logGapMs || 0;
   let logs = [];
-  for (let to = latest; to >= 0 && logs.length === 0; to -= CHUNK) {
-    const from = Math.max(0, to - CHUNK + 1);
+  for (let to = latest; to >= floorB && logs.length === 0; to -= CHUNK) {
+    const from = Math.max(floorB, to - CHUNK + 1);
+    if (gapMs && to !== latest) await sleep(gapMs);
     logs = await withRetry(() => st.provider.send('eth_getLogs', [{
       address: nftContract, fromBlock: '0x' + from.toString(16), toBlock: '0x' + to.toString(16),
       topics: [T, zero, null, tid],
@@ -1070,7 +1161,7 @@ async function getV4EntryBaseLogs(chainId, job) {
       } catch {}
       // Swap 兜底: 窗口逐级放大, data 第 3 槽 = sqrtPriceX96
       const latestN = latest;
-      for (const back of [600, 8000, 60000, 400000]) {
+      for (const back of (cfg.logChunk ? [600, 4900] : [600, 8000, 60000, 400000])) {   // arc: 单段 ≤ 9999
         const from = Math.max(0, bn - back), to = Math.min(latestN, bn + back);
         let logs;
         try {
@@ -1710,7 +1801,7 @@ async function fundingBlockTs(chainId, block) {
 async function scanTransfersAdaptive(chainId, topics, fromBlock, toBlock, budget) {
   const st = chainState(chainId);
   const out = [];
-  let f = fromBlock, chunk = 5000000, stopped = null;
+  let f = fromBlock, chunk = Math.min(5000000, EVM_CHAINS[chainId].logChunk || 5000000), stopped = null;
   while (f <= toBlock) {
     if (out.length > budget) { stopped = 'budget'; break; }
     const to = Math.min(f + chunk - 1, toBlock);
@@ -1955,13 +2046,20 @@ async function v4LastCollectRPC(chainId, positions) {
   const cfg = EVM_CHAINS[chainId];
   const c = v4CollectState(chainId);
   const latest = await st.provider.getBlockNumber();
-  const floor = Math.max(0, latest - V4_COLLECT_MAX_BACKFILL);
+  // 小段+限速链 (arc): 回看不早于 V4 枚举起点 (主网公开块), 且每轮只给 150s 预算 —— 一个池从起点扫到链头 ≈ 60 窗 × 2s,
+  // 30 天回看窗按 0.51s/块是 500 万块 (500 窗 ≈ 17 分钟/池), 同步跑会把整轮 fetch 拖过看门狗。
+  // 没扫完的池游标不推进, 下轮接着扫; 期间这些仓的日化按建仓时点起算 (与没有领费记录时一致)。
+  const paced = !!cfg.logGapMs;
+  const floor = Math.max(0, latest - V4_COLLECT_MAX_BACKFILL, paced ? (cfg.v4.deployBlock || 0) : 0);
+  const budgetMs = paced ? 150 * 1000 : Infinity;
+  const t0 = Date.now();
   const byPool = new Map();
   for (const p of positions) {
     const a = byPool.get(p.poolAddress) || []; a.push(p); byPool.set(p.poolAddress, a);
   }
-  let dirty = false;
+  let dirty = false, skipped = 0;
   for (const [poolId, arr] of byPool) {
+    if (Date.now() - t0 > budgetMs) { skipped++; continue; }
     let from = c.cur[poolId] ? c.cur[poolId] + 1 : floor;
     // 本池出现没见过的仓 (新开/新加的钱包) → 起点拉回回看窗口下沿补历史
     if (arr.some(p => !c.seen[p.tokenId])) from = Math.min(from, floor);
@@ -1993,6 +2091,7 @@ async function v4LastCollectRPC(chainId, positions) {
     c.cur[poolId] = latest;
     dirty = true;
   }
+  if (skipped) console.log(`  [${chainId}] V4 领费扫描本轮预算用完, ${skipped} 个池留到下轮`);
   for (const p of positions) {
     const ms = c.at[p.tokenId];
     if (ms > (p.createdAt || 0) + COLLECT_MIN_GAP) p.lastCollectAt = ms;
@@ -2317,7 +2416,7 @@ function mountEvmRoutes(app, adminGuard) {
       const st = chainState(chainId);
       if (st.fetchInFlight) {
         const stuckMs = Date.now() - (st.fetchStartedAt || 0);
-        if (st.fetchStartedAt && stuckMs > FETCH_STUCK_MS) {
+        if (st.fetchStartedAt && stuckMs > (EVM_CHAINS[chainId].fetchStuckMs || FETCH_STUCK_MS)) {
           console.error(`[${chainId}][auto] fetch 卡死 ${(stuckMs / 60000).toFixed(0)}min, 放弃旧轮强制重启刷新`);
           st.fetchInFlight = null;
         } else {

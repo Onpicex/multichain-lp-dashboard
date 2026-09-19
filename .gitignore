@@ -33,3 +33,7 @@ v4collect-cache-*.json
 snapshot-config.json
 snapshots.json
 token-meta-sol.json
+# 2026-09-19 补: Arc/BSC 新增运行数据与游标
+v4ids-cache-*.json
+pcs-hist-cache-*.json
+*.orig-bak

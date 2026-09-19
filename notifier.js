@@ -52,7 +52,7 @@ function fmtP(v) {
 
 function fmtEvent(chain, walletName, p, out) {
   const pair = `${(p.token0 && p.token0.symbol) || '?'}/${(p.token1 && p.token1.symbol) || '?'}`;
-  const head = `${out ? '🔴 出区间' : '🟢 回区间'} [${CHAIN_LABEL[chain] || chain}] ${walletName} ${pair} ${p.protocol || ''} #${p.tokenId}`;
+  const head = `${out ? '🔴 出区间' : '🟢 回区间'} [${CHAIN_LABEL[chain] || chain}] ${walletName} ${pair} ${p.dex === 'pancake' ? 'CAKE ' : ''}${p.protocol || ''} #${p.tokenId}`;
   const cur = p.currentPrice, lo = p.lowerPrice, hi = p.upperPrice;
   let dir = '';
   if (cur > 0 && lo > 0 && hi > 0) {
@@ -141,7 +141,8 @@ async function _checkInner() {
 
       for (const p of (w.positions || [])) {
         if (!p.liquidityActive || typeof p.inRange !== 'boolean') continue;
-        const key = `${chain}:${addr}:${p.protocol || ''}:${p.tokenId}`;
+        // dex 前缀只在 Pancake 仓上出现 (Uniswap 仓 key 不变, 已有基线/状态不受影响); 防 Pancake 与 Uniswap V3 tokenId 撞号
+        const key = `${chain}:${addr}:${p.dex ? p.dex + '-' : ''}${p.protocol || ''}:${p.tokenId}`;
         seen.add(key);
         const out = !p.inRange;
         const rec = st.keys[key];
