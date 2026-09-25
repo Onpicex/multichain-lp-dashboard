@@ -1,5 +1,5 @@
 // ============================================================
-// Solana LP 适配器 — Meteora DLMM + Raydium CLMM
+// Solana LP 适配器 — Meteora DLMM + Raydium CLMM + Orca Whirlpool
 // 完全独立模块：不依赖 server.js 的任何 BSC 逻辑。
 // 输出与 BSC /api/positions 相同的 JSON 结构，前端零改动复用。
 // ============================================================
@@ -292,6 +292,202 @@ async function fetchRaydiumPositions(wallet) {
   return positions;
 }
 
+// ============================================================
+// Orca Whirlpool
+// 不走 SDK (新版 @orca-so/whirlpools 基于 @solana/kit, 与这里的 web3.js v1 是两套连接): 读账户按布局直接解码。
+// 布局与 sol-stocks/sol.js 同源 (2026-09-25 逐字段核过); 数量/未领费 2026-09-26 用真实仓位与
+// @orca-so/whirlpools-core 的 decreaseLiquidityQuote / collectFeesQuote 核对逐位一致。
+// 仓位 NFT 可能在 Token 或 Token-2022 program 下 (新仓默认 Token-2022), 两边都枚举。
+// ============================================================
+const ORCA_PROGRAM = new PublicKey('whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc');
+const ORCA_TICKS_PER_ARRAY = 88;
+const anchorDisc = name => require('crypto').createHash('sha256').update(`account:${name}`).digest().subarray(0, 8).toString('hex');
+const ORCA_DISC = { position: anchorDisc('Position'), whirlpool: anchorDisc('Whirlpool'), tickArray: anchorDisc('TickArray'), dynTickArray: anchorDisc('DynamicTickArray') };
+const Q128 = 1n << 128n;
+const bU128 = (b, o) => b.readBigUInt64LE(o) | (b.readBigUInt64LE(o + 8) << 64n);
+const bPk = (b, o) => new PublicKey(b.subarray(o, o + 32)).toBase58();
+const wrapSub = (a, b) => ((a - b) % Q128 + Q128) % Q128;   // fee growth 是 u128 回绕运算
+const orcaArrayStart = (tick, ts) => Math.floor(tick / (ts * ORCA_TICKS_PER_ARRAY)) * ts * ORCA_TICKS_PER_ARRAY;
+const orcaTickArrayPda = (whirlpool, start) => PublicKey.findProgramAddressSync(
+  [Buffer.from('tick_array'), new PublicKey(whirlpool).toBuffer(), Buffer.from(String(start))], ORCA_PROGRAM)[0].toBase58();
+
+async function getAccountsChunked(keys) {
+  const out = [];
+  for (let i = 0; i < keys.length; i += 100) {
+    out.push(...await conn.getMultipleAccountsInfo(keys.slice(i, i + 100).map(k => new PublicKey(k))));
+  }
+  return out;
+}
+
+// 从 tick array 里取某个 tick 的 feeGrowthOutside; 未初始化的 tick 按 0 (与合约一致)
+// 定长: 8 start i32 | 12 ticks 88×113 (0 initialized | 1 liqNet i128 | 17 liqGross | 33 fgoA u128 | 49 fgoB u128 | 65 rewards) | 9956 whirlpool
+// 变长: 8 start i32 | 12 whirlpool | 44 bitmap u128 | 60 起逐个: 1 字节 tag (0 未初始化 / 1 + 112 字节数据, 布局同上去掉 initialized)
+function orcaTickFees(b, tick, ts) {
+  const d = b.subarray(0, 8).toString('hex');
+  const start = b.readInt32LE(8);
+  const idx = (tick - start) / ts;
+  if (!Number.isInteger(idx) || idx < 0 || idx >= ORCA_TICKS_PER_ARRAY) throw new Error(`tick ${tick} 不在 array ${start}`);
+  if (d === ORCA_DISC.tickArray) {
+    const o = 12 + idx * 113;
+    if (!b[o]) return { foA: 0n, foB: 0n };
+    return { foA: bU128(b, o + 33), foB: bU128(b, o + 49) };
+  }
+  if (d === ORCA_DISC.dynTickArray) {
+    let o = 60;
+    for (let i = 0; i < idx; i++) o += b[o] === 1 ? 113 : 1;
+    if (b[o] !== 1) return { foA: 0n, foB: 0n };
+    return { foA: bU128(b, o + 1 + 32), foB: bU128(b, o + 1 + 48) };
+  }
+  throw new Error('未知 tick array 类型');
+}
+
+async function fetchOrcaPositions(wallet) {
+  const positions = [];
+  try {
+    // 1. 钱包里的 NFT (amount=1, decimals=0) → 推 Position PDA, 存在且归 Whirlpool 程序的才是 Orca 仓位
+    const owner = new PublicKey(wallet.address);
+    const nftMints = [];
+    for (const pid of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+      const r = await conn.getParsedTokenAccountsByOwner(owner, { programId: pid });
+      for (const acc of r.value) {
+        const info = acc.account.data.parsed?.info;
+        if (info?.tokenAmount?.amount === '1' && info.tokenAmount.decimals === 0) nftMints.push(info.mint);
+      }
+    }
+    if (!nftMints.length) return [];
+    const pdas = nftMints.map(m => PublicKey.findProgramAddressSync([Buffer.from('position'), new PublicKey(m).toBuffer()], ORCA_PROGRAM)[0].toBase58());
+    const posAccs = await getAccountsChunked(pdas);
+    // Position: 8 whirlpool | 40 positionMint | 72 liquidity u128 | 88 tickLower i32 | 92 tickUpper i32
+    //   96 feeGrowthCheckpointA u128 | 112 feeOwedA u64 | 120 feeGrowthCheckpointB u128 | 136 feeOwedB u64 | 144 rewards → 216
+    const raw = [];
+    posAccs.forEach((a, i) => {
+      if (!a || !a.owner.equals(ORCA_PROGRAM) || a.data.length < 216 || a.data.subarray(0, 8).toString('hex') !== ORCA_DISC.position) return;
+      const b = a.data;
+      raw.push({
+        pda: pdas[i], mint: nftMints[i], whirlpool: bPk(b, 8), liquidity: bU128(b, 72),
+        tickLower: b.readInt32LE(88), tickUpper: b.readInt32LE(92),
+        cpA: bU128(b, 96), owedA: b.readBigUInt64LE(112), cpB: bU128(b, 120), owedB: b.readBigUInt64LE(136),
+      });
+    });
+    if (!raw.length) return [];
+
+    // 2. 池子状态
+    // Whirlpool: 41 tickSpacing u16 | 43 feeTierIndexSeed u16 | 45 feeRate u16 (百万分之) | 49 liquidity | 65 sqrtPrice u128
+    //   81 tickCurrent i32 | 101 mintA | 165 feeGrowthGlobalA u128 | 181 mintB | 245 feeGrowthGlobalB u128
+    const poolIds = [...new Set(raw.map(r => r.whirlpool))];
+    const poolAccs = await getAccountsChunked(poolIds);
+    const pools = {};
+    poolAccs.forEach((a, i) => {
+      if (!a || a.data.length < 653 || a.data.subarray(0, 8).toString('hex') !== ORCA_DISC.whirlpool) return;
+      const b = a.data;
+      pools[poolIds[i]] = {
+        tickSpacing: b.readUInt16LE(41), feeTierSeed: b.readUInt16LE(43), feeRate: b.readUInt16LE(45),
+        sqrtPrice: bU128(b, 65), tickCurrent: b.readInt32LE(81),
+        mintA: bPk(b, 101), fgA: bU128(b, 165), mintB: bPk(b, 181), fgB: bU128(b, 245),
+      };
+    });
+
+    // 3. 仓位两端 tick 所在的 tick array + 两个代币 mint (取 decimals, mint 布局 44 字节处)
+    const extra = new Set();
+    for (const r of raw) {
+      const p = pools[r.whirlpool];
+      if (!p) continue;
+      extra.add(p.mintA); extra.add(p.mintB);
+      if (r.liquidity > 0n) {
+        extra.add(orcaTickArrayPda(r.whirlpool, orcaArrayStart(r.tickLower, p.tickSpacing)));
+        extra.add(orcaTickArrayPda(r.whirlpool, orcaArrayStart(r.tickUpper, p.tickSpacing)));
+      }
+    }
+    const extraKeys = [...extra];
+    const extraAccs = await getAccountsChunked(extraKeys);
+    const acct = {};
+    extraKeys.forEach((k, i) => { acct[k] = extraAccs[i]; });
+
+    for (const r of raw) {
+      try {
+        const p = pools[r.whirlpool];
+        if (!p) { console.error(`Orca pool missing: ${r.whirlpool}`); continue; }
+        const mA = acct[p.mintA], mB = acct[p.mintB];
+        if (!mA || !mB) { console.error(`Orca mint missing: ${r.whirlpool}`); continue; }
+        const decA = mA.data[44], decB = mB.data[44];
+        const px = t => Math.pow(1.0001, t) * Math.pow(10, decA - decB);
+        const inRange = p.tickCurrent >= r.tickLower && p.tickCurrent < r.tickUpper;
+
+        // 数量 (与 Raydium 同一套 V3 数学, Q64.64)
+        const L = Number(r.liquidity);
+        const sa = Math.pow(1.0001, r.tickLower / 2), sb = Math.pow(1.0001, r.tickUpper / 2), sp = Number(p.sqrtPrice) / 2 ** 64;
+        let a0 = 0, a1 = 0;
+        if (sp <= sa) a0 = L * (sb - sa) / (sa * sb);
+        else if (sp >= sb) a1 = L * (sb - sa);
+        else { a0 = L * (sb - sp) / (sp * sb); a1 = L * (sp - sa); }
+
+        // 未领手续费 = feeOwed + L × (feeGrowthInside − checkpoint) >> 64
+        let fA = r.owedA, fB = r.owedB;
+        if (r.liquidity > 0n) {
+          try {
+            const taL = acct[orcaTickArrayPda(r.whirlpool, orcaArrayStart(r.tickLower, p.tickSpacing))];
+            const taU = acct[orcaTickArrayPda(r.whirlpool, orcaArrayStart(r.tickUpper, p.tickSpacing))];
+            if (!taL || !taU) throw new Error('tick array 缺失');
+            const lo = orcaTickFees(taL.data, r.tickLower, p.tickSpacing);
+            const hi = orcaTickFees(taU.data, r.tickUpper, p.tickSpacing);
+            const inside = (fg, foL, foU) => {
+              const below = p.tickCurrent < r.tickLower ? wrapSub(fg, foL) : foL;
+              const above = p.tickCurrent < r.tickUpper ? foU : wrapSub(fg, foU);
+              return wrapSub(wrapSub(fg, below), above);
+            };
+            fA += (r.liquidity * wrapSub(inside(p.fgA, lo.foA, hi.foA), r.cpA)) >> 64n;
+            fB += (r.liquidity * wrapSub(inside(p.fgB, lo.foB, hi.foB), r.cpB)) >> 64n;
+          } catch (e) {
+            console.error(`Orca fee calc ${r.whirlpool}:`, e.message.slice(0, 100));
+          }
+        }
+        let feesOwed0 = Number(fA) / 10 ** decA, feesOwed1 = Number(fB) / 10 ** decB;
+        if (feesOwed0 < 0 || feesOwed0 > 1e12) feesOwed0 = 0;
+        if (feesOwed1 < 0 || feesOwed1 > 1e12) feesOwed1 = 0;
+
+        positions.push({
+          tokenId: r.mint.slice(0, 8),
+          positionKey: r.mint,
+          _activityKey: r.pda,
+          token0: { symbol: '', address: p.mintA, decimals: decA },
+          token1: { symbol: '', address: p.mintB, decimals: decB },
+          token0addr: p.mintA,
+          token1addr: p.mintB,
+          fee: p.feeRate,
+          // 自适应费率池 (feeTierIndexSeed ≠ tickSpacing): feeRate 只是基础费, 实际随波动上浮, 标「+」
+          feeLabel: (p.feeRate / 1e4).toFixed(2) + '%' + (p.feeTierSeed !== p.tickSpacing ? '+' : ''),
+          tickLower: r.tickLower,
+          tickUpper: r.tickUpper,
+          currentTick: p.tickCurrent,
+          liquidity: r.liquidity.toString(),
+          liquidityActive: r.liquidity > 0n,
+          inRange,
+          currentPrice: sp * sp * Math.pow(10, decA - decB),
+          lowerPrice: px(r.tickLower),
+          upperPrice: px(r.tickUpper),
+          amount0: a0 / 10 ** decA,
+          amount1: a1 / 10 ** decB,
+          feesOwed0,
+          feesOwed1,
+          poolAddress: r.whirlpool,
+          walletName: wallet.name,
+          walletAddress: wallet.address,
+          protocol: 'Whirlpool',
+          platform: 'Orca',
+          createdAt: 0,
+          lastCollectAt: 0,
+        });
+      } catch (e) {
+        console.error(`Orca position error:`, e.message.slice(0, 120));
+      }
+    }
+  } catch (e) {
+    console.error(`Orca fetch failed for ${wallet.name}:`, e.message.slice(0, 120));
+    return null;   // null = 抓取失败(如429), 上层重试; 空数组才是真没仓位
+  }
+  return positions;
+}
+
 // --- 仓位创建时间：查该账户最早一笔签名的 blockTime（永不变，持久缓存） ---
 const CREATED_CACHE_FILE = path.join(__dirname, 'created-cache-sol.json');
 let createdCache = {};
@@ -443,7 +639,7 @@ async function _fetchAllSol() {
   let walletResults = [];
   for (const w of activeWallets()) {
     // 抓取失败(429限流等)时重试最多3轮, 每轮间隔递增, 避免把有仓钱包误判为空仓
-    let met = null, ray = null;
+    let met = null, ray = null, orc = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt > 0) {
         console.log(`[SOL] ${w.name} 第${attempt + 1}次重试 (限流退避 ${attempt * 5}s)...`);
@@ -457,21 +653,22 @@ async function _fetchAllSol() {
       }
       if (met === null) met = await fetchMeteoraPositions(w);
       if (ray === null) ray = await fetchRaydiumPositions(w);
-      if (met !== null && ray !== null) break;
+      if (orc === null) orc = await fetchOrcaPositions(w);
+      if (met !== null && ray !== null && orc !== null) break;
     }
     if (conn.rpcEndpoint !== SOL_RPC) {
       conn = new Connection(SOL_RPC, 'confirmed');   // 用完备胎切回主 RPC
       raydiumInstances = {};
     }
-    if (met === null || ray === null) console.error(`[SOL] ${w.name} 3轮重试仍失败, 本轮跳过 (下轮自动刷新会再试)`);
-    walletResults.push({ address: w.address, name: w.name, positions: [...(met || []), ...(ray || [])], totalUSD: 0 });
+    if (met === null || ray === null || orc === null) console.error(`[SOL] ${w.name} 3轮重试仍失败, 本轮跳过 (下轮自动刷新会再试)`);
+    walletResults.push({ address: w.address, name: w.name, positions: [...(met || []), ...(ray || []), ...(orc || [])], totalUSD: 0 });
     // 钱包间歇 1.5s, 防公共 RPC 429 (15+ 钱包连扫会被打限流, 空仓漏报)
     await new Promise(r => setTimeout(r, 1500));
   }
   // 本轮起跑后被停用/删除的钱包不发布 (SOL 一轮约 2 分钟, 期间用户可能点了停用)
   walletResults = walletResults.filter(wr => activeWallets().some(w => w.address === wr.address));
 
-  // 补 symbol（Meteora 只有 mint 地址）+ 价格
+  // 补 symbol（Meteora/Orca 只有 mint 地址）+ 价格
   const allMints = [];
   for (const wr of walletResults) for (const p of wr.positions) allMints.push(p.token0addr, p.token1addr);
   const [symbols, prices] = await Promise.all([getTokenSymbols(allMints), getPrices(allMints)]);
@@ -492,7 +689,7 @@ async function _fetchAllSol() {
       pos.totalValueUSD = pos.positionValueUSD + pos.feesValueUSD;
 
       // === 日化（与 BSC 同口径） ===
-      // createdAt = 仓位账户最早签名的 blockTime（Meteora position PDA / Raydium NFT mint）
+      // createdAt = 仓位账户最早签名的 blockTime（Meteora position PDA / Raydium·Orca NFT mint）
       if (pos.liquidityActive && pos.positionValueUSD >= 10) {
         pos.createdAt = await getCreatedAt(pos.positionKey);
         // lastCollectAt = 仓位账户最近一笔操作（领取/加减仓都会产生签名）

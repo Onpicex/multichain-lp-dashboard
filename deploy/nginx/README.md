@@ -1,4 +1,4 @@
-# nginx 配置快照（2026-09-10）
+# nginx 配置快照（2026-09-10，2026-09-26 刷新）
 
 这台机器上 `fucklp.com` 整个域名族的路由，只存在于服务器 `/etc/nginx/` 下，
 机器挂了就得凭记忆重建 —— 故在此留一份快照。
@@ -20,6 +20,8 @@
 - `stock.fucklp.com` → 5180 的 `stocks.html`
 - `meme.fucklp.com` → 5180 的 `memes.html`
 - `lp.fucklp.com` → 5179（另含 `/1888/` V4 看板）
+- `btc.fucklp.com` → 5182（btc-gex，2026-09-22 起，鉴权在应用层复用 stkauth）
+- `/c/solstock/`、`/c/solpre/` → 5183（sol-stocks，2026-09-25 起，写在 `snippet-fucklp-app.conf`，须排在 `/c/ → 5181` 之前）
 
 ## 几条必须知道的
 - **`lp.fucklp.com` 的 server 块必须待在 `vhost-lp-dashboard.conf` 里**：它引用的

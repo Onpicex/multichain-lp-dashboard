@@ -1752,7 +1752,7 @@ app.get('/api/positions', async (req, res) => {
   }
 });
 
-// --- Solana (Meteora DLMM + Raydium CLMM) ---
+// --- Solana (Meteora DLMM + Raydium CLMM + Orca Whirlpool) ---
 let solKickRefresh = null, evmKickRefresh = null;
 try {
   const solMod = require('./sol-adapter');

@@ -52,7 +52,7 @@ function fmtP(v) {
 
 function fmtEvent(chain, walletName, p, out) {
   const pair = `${(p.token0 && p.token0.symbol) || '?'}/${(p.token1 && p.token1.symbol) || '?'}`;
-  const head = `${out ? '🔴 出区间' : '🟢 回区间'} [${CHAIN_LABEL[chain] || chain}] ${walletName} ${pair} ${p.dex === 'pancake' ? 'CAKE ' : ''}${p.protocol || ''} #${p.tokenId}`;
+  const head = `${out ? '🔴 出区间' : '🟢 回区间'} [${CHAIN_LABEL[chain] || chain}] ${walletName} ${pair} ${p.dex === 'pancake' ? 'CAKE ' : ''}${p.platform ? p.platform + ' ' : ''}${p.protocol || ''} #${p.tokenId}`;
   const cur = p.currentPrice, lo = p.lowerPrice, hi = p.upperPrice;
   let dir = '';
   if (cur > 0 && lo > 0 && hi > 0) {
