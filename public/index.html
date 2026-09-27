@@ -2665,7 +2665,7 @@ function renderPnl() {
   const rowH = r => {
     const st = r.status === 'active'
       ? '<span class="pn-st ' + (r.inRange ? 'act' : 'out') + '">' + (r.inRange === null ? '活跃' : (r.inRange ? '区间内' : '区间外')) + '</span>'
-      : '<span class="pn-st cls">已关闭' + (r.note === 'transferred' ? ' · 转出' : (r.note === 'empty' ? ' · 空仓' : '')) + '</span>';
+      : '<span class="pn-st cls">已关闭' + (r.note === 'transferred' ? ' · 转出' : (r.note === 'empty' ? ' · 空仓' : (r.note === 'unseen' ? ' · 提回未捕获' : ''))) + '</span>';
     const proto = r.dex === 'pancake' ? 'CAKE V3' : (r.platform ? r.platform.toUpperCase() + ' ' + r.protocol : r.protocol);
     const ctip = costTip(r.costBy, r.tokens);
     const cost = r.costUSD > 0 ? '<span' + (ctip ? ' class="has-tip" data-tip="' + escH(ctip) + '"' : '') + '>' + fU(r.costUSD) + '</span>' + (r.costApprox || r.incomplete ? '<span class="pn-approx" title="' + (r.incomplete ? '部分事件尚未定价' : (r.source === 'ledger' ? '部分按当时市值补齐' : '按开仓时池价估算')) + '">*</span>' : '') : '<span class="sn-zero">—</span>';

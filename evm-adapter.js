@@ -150,6 +150,9 @@ const EVM_CHAINS = {
     coingeckoPlatform: null,              // coingecko 尚未收录 Arc
     entryFromLogs: true,                  // 建仓价值: 无子图, 同 rh 走链上事件回溯
     ledgerFromLogs: true,                 // 钱包盈亏账本: 同 rh (小段+限速, 首扫按每轮预算分多轮)
+    ledgerSkipNativeScan: true,           // Arc 的原生币是 USDC (V4 池 currency0=0x0 的都算"原生池"), 按池补扫 9999 块窗 × 2s 每轮都超预算,
+                                          //   钱包 31 个仓永远算不出来 (2026-09-28); 改为只靠钱包自发交易的回执 (双边操作都带另一侧 ERC20 日志),
+                                          //   只动原生 USDC 一侧的单边加/减仓看不到 → 该仓标「提回未捕获」
   },
 };
 

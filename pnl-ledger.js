@@ -496,6 +496,7 @@ async function fetchReceipts(chainId, W, deadline) {
 async function scanV4Events(chainId, deadline) {
   const st = ledgerState(chainId);
   const cfg = cfgOf(chainId);
+  if (cfg.ledgerSkipNativeScan) return true;   // arc: 官方 RPC 太慢, 原生池不按池补扫, 只靠回执
   const latest = await stateOf(chainId).provider.getBlockNumber();
   // 收集全部钱包的 V4 仓 → 按池分组
   const byPool = new Map();
@@ -851,8 +852,10 @@ async function computeWallet(chainId, addr, livePositions) {
     let status = 'active', closeTs = 0, note = '';
     if (P.burnB) { status = 'closed'; closeTs = P.burnTs || c.lastTs; }
     else if (P.outB) { status = 'closed'; closeTs = P.outTs || c.lastTs; note = 'transferred'; }
-    else if (!liveKeys.has(key) && !P.live && c.liq <= 0n) { status = 'closed'; closeTs = c.lastTs; note = 'empty'; }
-    else if (!liveKeys.has(key) && c.liq > 0n) { status = 'active'; note = 'notlive'; }
+    else if (!liveKeys.has(key) && !P.live) {
+      // 不在看板活跃仓里 = 链上已无流动性. 事件累计还有剩余 liquidity 说明减仓 tx 没被捕获 (如 arc 只动原生 USDC 一侧的单边减仓), 标 unseen
+      status = 'closed'; closeTs = c.lastTs; note = c.liq > 0n ? 'unseen' : 'empty';
+    }
     for (const k of Object.keys(c.a)) if (Math.abs(c.a[k]) < 1e-12) c.a[k] = 0;
     P.c = {
       cost: c.cost, dep: c.dep, ret: c.ret, fees: c.fees, a: c.a, cb: c.cb, n: c.n,
@@ -965,6 +968,7 @@ function rowFromLedger(key, P, live) {
   const valueUSD = live ? (live.positionValueUSD || 0) : 0;
   const pending = live ? (live.feesValueUSD || 0) : 0;
   const closeTs = active ? 0 : (c.closeTs || 0);
+  const unseen = !active && c.note === 'unseen';   // 提回没捕获到: 净利润算不出, 不给误导数字
   const net = valueUSD + pending + c.fees + c.ret - c.cost;
   return {
     key, protocol: P.k === 'v4' ? 'V4' : 'V3', dex: P.k === 'pcs' ? 'pancake' : undefined, tokenId: P.id, pair: live ? `${live.token0.symbol}/${live.token1.symbol}` : c.pair, feeLabel: live ? live.feeLabel : null, fee: c.fee,
@@ -973,7 +977,7 @@ function rowFromLedger(key, P, live) {
     costUSD: c.cost, costApprox: c.approx, incomplete: c.inc, depositValueUSD: c.dep, adds: c.n, costBy: c.cb || null,
     valueUSD, pendingFeesUSD: pending, collectedFeesUSD: c.fees, withdrawnUSD: c.ret,
     hodlValueUSD: live ? (live.hodlValueUSD ?? null) : null, ilUSD: live ? (live.ilUSD ?? null) : null,
-    netProfitUSD: c.cost > 0 ? net : null, netProfitPct: c.cost > 0 ? net / c.cost * 100 : null,
+    netProfitUSD: c.cost > 0 && !unseen ? net : null, netProfitPct: c.cost > 0 && !unseen ? net / c.cost * 100 : null,
     tokens: live ? [live.token0, live.token1].map(t => ({ address: t.address, symbol: t.symbol })) : [c.t0, c.t1].filter(Boolean).map(t => ({ address: t.address, symbol: t.symbol })),
   };
 }
