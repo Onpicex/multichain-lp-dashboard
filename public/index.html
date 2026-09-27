@@ -197,6 +197,7 @@
     padding: 1px 7px; border-radius: 9px;
   }
   /* 设置页: 与钱包盈亏页同风格 (胶囊切换 + 表格 + 底部说明) */
+  #stTabs .sep { width: 1px; height: 16px; background: var(--border); margin: 0 6px; flex-shrink: 0; }
   .st-head { display: flex; align-items: center; gap: 14px; padding: 14px 2px 12px; border-bottom: 1px solid var(--border); }
   .st-head-main { flex: 1; min-width: 0; }
   .st-title { font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
@@ -1813,7 +1814,10 @@ function stState(key) {   // 标签上的状态摘要 (当前链)
 }
 function renderStTabs() {
   const el = $('stTabs'); if (!el) return;
-  el.innerHTML = '<span class="filter-label">功能</span>' + ST_PAGES.map(p => {
+  // 链胶囊: 设置全是按链的 (钱包列表 / 各项勾选), 在这里切链不用回总览 (左侧点链会跳回总览)
+  let ch = '<span class="filter-label">链</span>';
+  for (const c of Object.keys(CHAIN_NAMES)) { if (isPending(c)) continue; ch += `<button class="ftag${c === activeChain ? ' active' : ''}" onclick="stSetChain('${c}')">${CHAIN_NAMES[c]}</button>`; }
+  el.innerHTML = ch + '<span class="sep"></span><span class="filter-label">功能</span>' + ST_PAGES.map(p => {
     const st = stState(p.key);
     return `<button class="ftag${p.key === stKey ? ' active' : ''}" data-st="${p.key}" onclick="stSelectTab('${p.key}')" title="${escH(p.desc)}">${p.title}${st ? `<span class="fcount">${escH(st.text)}</span>` : ''}</button>`;
   }).join('');
@@ -1825,6 +1829,26 @@ function stSelectTab(key) {
   document.querySelectorAll('#settingsView .st-sub-page').forEach(sec => { sec.style.display = sec.dataset.st === stKey ? '' : 'none'; });
   document.querySelectorAll('#stTabs .ftag').forEach(b => b.classList.toggle('active', b.dataset.st === stKey));
   if (settingsOpen) history.replaceState(null, '', '#settings/' + stKey);
+}
+let stChainDirty = false;   // 在设置页切过链: 回总览时要重新拉该链数据
+function stSetChain(ch) {
+  if (ch === activeChain || isPending(ch)) return;
+  activeChain = ch;
+  try { localStorage.setItem('lpChain', ch); } catch {}
+  $('footerChain').textContent = CHAIN_NAMES[ch] || ch;
+  $('footerProto').textContent = CHAIN_PROTO[ch] || '';
+  $('headerChainTag').textContent = CHAIN_NAMES[ch] || ch;
+  $('stChainTag').textContent = CHAIN_NAMES[ch] || ch;
+  $('wmAddr').placeholder = ch === 'sol' ? 'Solana 地址 (base58)' : '0x... EVM 地址';
+  $('wmAddr').maxLength = ch === 'sol' ? 44 : 42;
+  curData = null; liveEtag = null; stChainDirty = true;
+  try { activeF = localStorage.getItem('lpWalletF_' + ch) || 'all'; } catch { activeF = 'all'; }
+  $('content').innerHTML = '<div class="state-box"><div class="spinner"></div><div class="state-text">加载链上数据…</div></div>';
+  $('statsBar').style.display = 'none'; $('idlePanel').style.display = 'none'; $('idleValue').textContent = '—';
+  walletList = [];
+  renderStTabs();
+  loadWallets();                                             // 拉完会顺带重绘各项勾选列表
+  loadNotifyCfg(); loadFdCfg(); loadSpCfg(); loadUiCfg(); loadPnCfg();
 }
 function openSettings(key) {
   showView('settings');
@@ -1843,6 +1867,7 @@ for (const fn of ['renderFd', 'renderSp', 'renderNotify', 'renderPnCfg', 'applyU
 function closeSettings() {
   showView('dash');
   history.replaceState(null, '', '#' + activeChain);
+  if (stChainDirty) { stChainDirty = false; loadData(false); }   // 设置页里切过链: 总览要重新拉这条链
 }
 function openSnap() {
   showView('snap');
