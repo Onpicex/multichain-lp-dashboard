@@ -11,6 +11,7 @@ app.use(express.json());
 // 注意: 真正的鉴权闸门在 nginx (map $cookie_lpauth $lp_ok), 本模块只负责
 // 校验用户名口令并下发 nginx 认识的 cookie —— 见 lp-auth.js 顶部说明。
 const { mountLpAuth } = require("./lp-auth");
+const pnlLedger = require('./pnl-ledger');   // 盈亏字段注入 (applyPnl) + 钱包盈亏报告 (BSC 无账本, 全部退回建仓回溯)
 mountLpAuth(app);
 const PORT = parseInt(process.env.PORT || '1788');
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
@@ -156,21 +157,24 @@ async function getV3EntryBsc(job) {
   const cache = bscEntryStore();
   const key = `v3-${job.tokenId}`;
   const cached = cache[key];
-  if (cached && cached.liq === job.liq.toString()) return cached;
+  if (cached && cached.liq === job.liq.toString() && cached.am) return cached;
   const pool = job.poolAddress.toLowerCase();
   const origin = (job.owner || '').toLowerCase();
   if (!origin) return null;
   const md = await graphQueryRetry(V3_SUBGRAPH_ID,
-    `{ mints(first:500, where:{pool:"${pool}", tickLower:${job.tickLower}, tickUpper:${job.tickUpper}, origin:"${origin}"}){ amountUSD timestamp } }`);
+    `{ mints(first:500, where:{pool:"${pool}", tickLower:${job.tickLower}, tickUpper:${job.tickUpper}, origin:"${origin}"}){ amount0 amount1 amountUSD timestamp } }`);
   if (!md) return null;
   const bd = await graphQueryRetry(V3_SUBGRAPH_ID,
-    `{ burns(first:500, where:{pool:"${pool}", tickLower:${job.tickLower}, tickUpper:${job.tickUpper}, origin:"${origin}"}){ amountUSD } }`);
+    `{ burns(first:500, where:{pool:"${pool}", tickLower:${job.tickLower}, tickUpper:${job.tickUpper}, origin:"${origin}"}){ amount0 amount1 amountUSD } }`);
   const mints = md.mints || [], burns = (bd && bd.burns) || [];
   if (mints.length === 0) return null;
-  let u = 0, ts = 0;
-  for (const m of mints) { u += Math.abs(+m.amountUSD); const t = +m.timestamp * 1000; if (!ts || t < ts) ts = t; }
+  let u = 0, ts = 0, n0 = 0, n1 = 0;
+  for (const m of mints) { u += Math.abs(+m.amountUSD); n0 += Math.abs(+m.amount0 || 0); n1 += Math.abs(+m.amount1 || 0); const t = +m.timestamp * 1000; if (!ts || t < ts) ts = t; }
   const w = burns.reduce((a, b) => a + Math.abs(+b.amountUSD), 0);
-  const data = { u, w, ts, n: mints.length, liq: job.liq.toString(), b: 0, mod: false };
+  for (const b of burns) { n0 -= Math.abs(+b.amount0 || 0); n1 -= Math.abs(+b.amount1 || 0); }
+  // am = 净存入数量 (按 token 地址, 池 token0/token1 顺序 = 链上顺序): 无常损失用
+  const am = { [String(job.t0 || '').toLowerCase()]: n0, [String(job.t1 || '').toLowerCase()]: n1 };
+  const data = { u, w, ts, n: mints.length, liq: job.liq.toString(), b: 0, mod: false, am };
   cache[key] = data; saveBscEntry();
   return data;
 }
@@ -178,23 +182,26 @@ async function getV4EntryBsc(job) {
   const cache = bscEntryStore();
   const key = `v4-${job.tokenId}`;
   const cached = cache[key];
-  if (cached && cached.liq === job.liq.toString()) return cached;
+  if (cached && cached.liq === job.liq.toString() && cached.am) return cached;
   const pool = job.poolId.toLowerCase();
   const origin = (job.owner || '').toLowerCase();
   if (!origin) return null;
   const md = await graphQueryRetry(V4_SUBGRAPH_ID,
-    `{ modifyLiquidities(first:500, where:{pool:"${pool}", tickLower:${job.tickLower}, tickUpper:${job.tickUpper}, origin:"${origin}"}){ amount amountUSD timestamp } }`);
+    `{ modifyLiquidities(first:500, where:{pool:"${pool}", tickLower:${job.tickLower}, tickUpper:${job.tickUpper}, origin:"${origin}"}){ amount amount0 amount1 amountUSD timestamp } }`);
   if (!md) return null;
   const evs = md.modifyLiquidities || [];
   if (evs.length === 0) return null;
-  let u = 0, w = 0, n = 0, ts = 0;
+  let u = 0, w = 0, n = 0, ts = 0, n0 = 0, n1 = 0;
   for (const e of evs) {
     const a = Math.abs(+e.amountUSD);
-    if (+e.amount >= 0) { u += a; n++; const t = +e.timestamp * 1000; if (!ts || t < ts) ts = t; }
+    const sg = +e.amount >= 0 ? 1 : -1;
+    n0 += sg * Math.abs(+e.amount0 || 0); n1 += sg * Math.abs(+e.amount1 || 0);
+    if (sg > 0) { u += a; n++; const t = +e.timestamp * 1000; if (!ts || t < ts) ts = t; }
     else { w += a; }
   }
   if (n === 0) return null;
-  const data = { u, w, ts, n, liq: job.liq.toString(), b: 0, mod: false };
+  const am = { [String(job.t0 || '').toLowerCase()]: n0, [String(job.t1 || '').toLowerCase()]: n1 };
+  const data = { u, w, ts, n, liq: job.liq.toString(), b: 0, mod: false, am };
   cache[key] = data; saveBscEntry();
   return data;
 }
@@ -202,12 +209,13 @@ function bscEntryPeek(kind, tokenId, currentLiq, job) {
   const cache = bscEntryStore();
   const key = `${kind}-${tokenId}`;
   const cached = cache[key];
-  if (cached && cached.liq === currentLiq.toString()) return cached;
+  const hit = cached && cached.liq === currentLiq.toString();
+  if (hit && cached.am) return cached;
   if ((bscEntryCooldown.get(key) || 0) < Date.now() && !bscEntryJobs.has(key)) {
     bscEntryJobs.set(key, job);
     setImmediate(() => runBscEntryQueue().catch(() => {}));
   }
-  return null;
+  return hit ? cached : null;   // 旧缓存只缺 am: 先沿用, 后台补算
 }
 async function runBscEntryQueue() {
   if (bscEntryWorkerBusy) return;
@@ -1459,9 +1467,10 @@ async function _fetchPositionsInner(forceRefresh = false) {
       // 建仓价值: 只读缓存, 缺失交给后台异步队列补 (子图 amountUSD 聚合); Pancake 无子图, 不做 (宁缺毋滥)
       if (pos.dex !== 'pancake') {
         const kind = pos.protocol === 'V4' ? 'v4' : 'v3';
+        const t0a = pos.token0.address, t1a = pos.token1.address;
         const job = kind === 'v3'
-          ? { kind, tokenId: pos.tokenId, poolAddress: pos.poolAddress, tickLower: pos.tickLower, tickUpper: pos.tickUpper, owner: pos.walletAddress, liq: pos.liquidity }
-          : { kind, tokenId: pos.tokenId, poolId: pos.poolAddress, tickLower: pos.tickLower, tickUpper: pos.tickUpper, owner: pos.walletAddress, liq: pos.liquidity };
+          ? { kind, tokenId: pos.tokenId, poolAddress: pos.poolAddress, tickLower: pos.tickLower, tickUpper: pos.tickUpper, owner: pos.walletAddress, liq: pos.liquidity, t0: t0a, t1: t1a }
+          : { kind, tokenId: pos.tokenId, poolId: pos.poolAddress, tickLower: pos.tickLower, tickUpper: pos.tickUpper, owner: pos.walletAddress, liq: pos.liquidity, t0: t0a, t1: t1a };
         const ed = bscEntryPeek(kind, pos.tokenId, pos.liquidity, job);
         if (ed) {
           pos.entryValueUSD = ed.u;
@@ -1469,7 +1478,13 @@ async function _fetchPositionsInner(forceRefresh = false) {
           pos.entryTs = ed.ts;
           pos.entryAdds = ed.n;
           pos.entryModified = ed.mod;
+          pos.entryAm = ed.am || null;
         }
+      }
+      // 盈亏字段: BSC 无钱包账本 → 成本 = 建仓时点价值 (approx); 已领费 V3 子图/Pancake 事件有, V4 无 (feesUnknown)
+      if (pos.entryValueUSD > 0) {
+        const priceOf = a => usdPrices[a] || 0;
+        pnlLedger.applyPnl(pos, { cost: pos.entryValueUSD, approx: true, source: 'entry', am: pos.entryAm || {}, withdrawnUSD: pos.entryWithdrawnUSD || 0, collectedUSD: pos.protocol === 'V4' ? 0 : undefined, feesUnknown: pos.protocol === 'V4' }, priceOf);
       }
 
       // === Two daily rate metrics ===
@@ -1739,6 +1754,19 @@ app.patch('/api/wallets/:address', adminGuard, (req, res) => {
   }
   console.log(`Wallet updated: ${old.name} (${old.address}) -> ${WALLETS[idx].name} (${WALLETS[idx].address})${enabledChanged ? (newEnabled ? ' [启用]' : ' [停用]') : ''}`);
   res.json({ ok: true, wallets: WALLETS });
+});
+
+// 钱包盈亏 (BSC): 无链上账本, 只有活跃仓 (成本按建仓时点价值), 历史仓位不可用
+app.get('/api/pnl', (req, res) => {
+  const addr = String(req.query.wallet || '').trim().toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(addr)) return res.status(400).json({ error: '缺少或无效的 wallet' });
+  const data = cache.data;
+  const liveWallet = (data?.wallets || []).find(w => w.address.toLowerCase() === addr) || null;
+  const wcfg = WALLETS.find(w => w.address.toLowerCase() === addr) || null;
+  const rep = pnlLedger.walletReport('bsc', addr, liveWallet);
+  let idleUSD = null;
+  for (const [a, wI] of Object.entries(data?.idle?.byWallet || {})) if (a.toLowerCase() === addr) idleUSD = wI.totalUSD || 0;
+  res.json({ chain: 'bsc', wallet: { address: addr, name: wcfg?.name || liveWallet?.name || addr, enabled: wcfg ? wcfg.enabled !== false : true }, ...rep, idleUSD, lpUSD: liveWallet ? (liveWallet.totalUSD || 0) : 0, funding: null, dataTs: data?.timestamp || 0 });
 });
 
 app.get('/api/positions', async (req, res) => {

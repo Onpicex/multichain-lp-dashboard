@@ -838,6 +838,23 @@ function dropSolWalletFromCache(addr) {
 }
 
 function mountSolRoutes(app, adminGuard) {
+  // 钱包盈亏 (SOL): 无成本/无常损失来源 (仓位账户不存入金历史, 钱包换币史需逐笔解析交易), 只给活跃仓现值/手续费; 历史仓位不可用
+  app.get('/api/sol/pnl', (req, res) => {
+    const addr = String(req.query.wallet || '').trim();
+    if (!addr) return res.status(400).json({ error: '缺少 wallet' });
+    const data = cache.data;
+    const lw = (data?.wallets || []).find(w => w.address === addr) || null;
+    const wc = WALLETS.find(w => w.address === addr) || null;
+    const positions = (lw?.positions || []).filter(p => p.liquidityActive).map(p => ({
+      key: `${p.platform || p.protocol}-${p.positionKey || p.tokenId}`, protocol: p.protocol, platform: p.platform, tokenId: p.tokenId, pair: `${p.token0.symbol}/${p.token1.symbol}`, feeLabel: p.feeLabel,
+      status: 'active', note: '', inRange: !!p.inRange, openTs: p.createdAt || 0, closeTs: 0, source: 'none',
+      costUSD: 0, costApprox: false, valueUSD: p.positionValueUSD || 0, pendingFeesUSD: p.feesValueUSD || 0, collectedFeesUSD: p.collectedFeesUSD || 0, withdrawnUSD: 0,
+      hodlValueUSD: null, ilUSD: null, netProfitUSD: null, netProfitPct: null,
+    }));
+    let idleUSD = null;
+    for (const [a, wI] of Object.entries(data?.idle?.byWallet || {})) if (a === addr) idleUSD = wI.totalUSD || 0;
+    res.json({ chain: 'sol', wallet: { address: addr, name: wc?.name || lw?.name || addr, enabled: wc ? wc.enabled !== false : true }, ledger: false, unsupported: true, positions, lots: [], idleUSD, lpUSD: lw ? (lw.totalUSD || 0) : 0, funding: null, dataTs: data?.timestamp || 0 });
+  });
   app.get('/api/sol/positions', async (req, res) => {
     try {
       res.json(await fetchAllSol(req.query.refresh === 'true'));

@@ -92,6 +92,7 @@
   .chain-ico.apr { background: #f59e0b; color: #1a1a1a; }
   .chain-ico.set { background: var(--surface-hover, #2a2d3a); color: var(--text-dim, #aaa); }
   .chain-ico.snap { background: linear-gradient(135deg, #0ea5e9, #6366f1); color: #fff; font-size: 9px; }
+  .chain-ico.pnl { background: linear-gradient(135deg, #22c55e, #0ea5e9); color: #04170a; font-size: 9px; }
   #toolNav .nav-item { text-decoration: none; }
   .nav-soon {
     margin-left: auto; font-size: 9px; font-weight: 600;
@@ -117,7 +118,7 @@
     .sidebar-logo { padding: 10px 12px; border-bottom: none; flex-shrink: 0; }
     .sidebar-section, .sidebar-footer { display: none; }
     /* 手机端: 链导航横排 + 只留图标 */
-    #chainNav, #toolNav, #snapNav, #settingsNav { display: flex; align-items: center; }
+    #chainNav, #toolNav, #snapNav, #pnlNav, #settingsNav { display: flex; align-items: center; }
     .nav-item { width: auto; flex-shrink: 0; padding: 6px 8px; margin: 8px 4px; gap: 0; }
     .nav-item .chain-name { display: none; }
     .nav-item .chain-ico { width: 26px; height: 26px; font-size: 12px; }
@@ -724,6 +725,25 @@
   .sn-btn2 { font-family: var(--font); font-size: 12px; font-weight: 600; color: var(--text-dim); background: transparent; border: 1px solid var(--border); padding: 6px 14px; border-radius: 6px; cursor: pointer; transition: all 0.12s; }
   .sn-btn2:hover { color: var(--text); border-color: var(--accent); }
   .sn-note { font-size: 10.5px; color: var(--text-muted); padding: 10px 0; line-height: 1.7; }
+  /* 钱包盈亏页 */
+  .pn-strip { grid-template-columns: repeat(6, 1fr); }
+  .pn-fund { display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 10px 2px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--text-dim); }
+  .pn-fund b { font-family: var(--mono); color: var(--text); font-weight: 600; }
+  .pn-table td.pn-pair { font-family: var(--font); font-weight: 600; color: var(--text); }
+  .pn-table td.pn-pair .fee-tag { margin-left: 4px; }
+  .pn-table .pn-id { font-family: var(--mono); font-size: 10px; color: var(--text-muted); margin-left: 6px; font-weight: 400; }
+  .pn-st { font-family: var(--font); font-size: 10.5px; border-radius: 4px; padding: 1px 6px; border: 1px solid var(--border); color: var(--text-muted); white-space: nowrap; }
+  .pn-st.act { color: var(--green); border-color: rgba(34,197,94,0.4); }
+  .pn-st.out { color: var(--yellow); border-color: rgba(245,158,11,0.4); }
+  .pn-st.cls { color: var(--text-muted); }
+  .pn-sub { display: block; font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+  .pn-sec td { background: rgba(255,255,255,0.025); font-family: var(--font); font-size: 11px; font-weight: 600; color: var(--text-dim); text-align: left; letter-spacing: 0.04em; }
+  .pn-approx { color: var(--yellow); cursor: help; }
+  @media (max-width: 768px) {
+    .pn-strip { grid-template-columns: repeat(2, 1fr); }
+    .pn-strip .stat-cell { border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); }
+    .pn-strip .stat-cell:nth-child(2n) { border-right: none; }
+  }
   .sp-time { font-family: var(--mono); font-size: 12px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; color-scheme: dark; }
   @media (max-width: 768px) {
     .sn-strip { grid-template-columns: repeat(2, 1fr); }
@@ -778,6 +798,12 @@
     <nav id="snapNav">
       <button class="nav-item" id="snNavBtn" onclick="openSnap()">
         <span class="chain-ico snap">快</span> <span class="chain-name">资金快照</span>
+      </button>
+    </nav>
+    <div class="sidebar-section">盈亏</div>
+    <nav id="pnlNav">
+      <button class="nav-item" id="pnNavBtn" onclick="openPnl()">
+        <span class="chain-ico pnl">盈</span> <span class="chain-name">钱包盈亏</span>
       </button>
     </nav>
     <div class="sidebar-section">设置</div>
@@ -984,6 +1010,27 @@
     <div class="sn-note" id="snNote"></div>
   </div>
 </div><!-- /#snapView -->
+
+<!-- 钱包盈亏页: 指定链+钱包, 全部仓位 (活跃+已关闭) 的成本/提回/手续费/无常损失/净利润 -->
+<div id="pnlView" style="display:none;">
+  <div class="header">
+    <div class="header-left">
+      <span class="header-title">钱包盈亏</span>
+    </div>
+    <div class="header-right">
+      <span class="meta-text" id="pnMeta"></span>
+      <button class="sn-btn2" onclick="closePnl()">返回总览</button>
+      <button class="refresh-btn" id="pnRefreshBtn" onclick="loadPnl(true)">刷新账本</button>
+    </div>
+  </div>
+  <div class="sn-page">
+    <div class="sn-toolbar" id="pnToolbar"></div>
+    <div class="stats-strip sn-strip pn-strip" id="pnStrip" style="display:none;"></div>
+    <div class="pn-fund" id="pnFund" style="display:none;"></div>
+    <div class="sn-tw" id="pnTable"></div>
+    <div class="sn-note" id="pnNote"></div>
+  </div>
+</div><!-- /#pnlView -->
 </div>
   </div><!-- /.main -->
 </div><!-- /.layout -->
@@ -1003,6 +1050,7 @@ document.querySelectorAll('#chainNav .nav-item').forEach(btn => {
     if (btn.classList.contains('disabled')) return;
     if (settingsOpen) closeSettings();          // 从设置页点链 = 返回该链仪表盘
     if (snapOpen) closeSnap();                  // 从快照页点链同理
+    if (pnlOpen) closePnl();                    // 从盈亏页点链同理
     if (chain === activeChain) return;
     document.querySelectorAll('#chainNav .nav-item').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
@@ -1367,8 +1415,27 @@ function mkDet(p) {
     const dstr = `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
     const sub2 = p.entryModified ? '数据不全 · 仅供参考' : (wdr > 0 ? `含已提本金 ${fU2(wdr)}` : '不含手续费');
     entryCells = `
-      <div><div class="d-label">建仓价值</div><div class="d-val">${fU(p.entryValueUSD)}</div><div class="d-sub">${dstr} 入场${p.entryAdds > 1 ? ' · ' + p.entryAdds + '笔' : ''}</div></div>
+      <div><div class="d-label">开仓时价值</div><div class="d-val">${fU(p.entryValueUSD)}</div><div class="d-sub">${dstr} 入场${p.entryAdds > 1 ? ' · ' + p.entryAdds + '笔' : ''} · 按当时池价</div></div>
       <div><div class="d-label">建仓至今差价</div><div class="d-val ${diff >= 0 ? 'gain' : 'loss'}">${sign}${fU2(Math.abs(diff))} (${sign}${Math.abs(pc).toFixed(2)}%)</div><div class="d-sub">${sub2}</div></div>`;
+  }
+  // 开仓成本 (真实购买成本) / 无常损失 / 净利润 —— 服务端 pnl-ledger.applyPnl 注入:
+  //   rh·arc 走钱包账本 (实际付出, 含换币损耗); 其他链退回开仓时点池价 (approx)
+  let pnlCells = '';
+  if (p.costBasisUSD > 0) {
+    const sg = v => v >= 0 ? '+' : '-';
+    const costSub = p.costSource === 'ledger'
+      ? (p.costApprox ? '钱包实付 · 部分按当时市值补齐' : '钱包实付 · 含换币损耗/滑点')
+      : '暂按开仓时池价估算 (本链无钱包账本)';
+    pnlCells += `<div><div class="d-label">开仓成本</div><div class="d-val">${fU(p.costBasisUSD)}${p.costApprox ? '<span class="pn-approx" title="含估算成分">*</span>' : ''}</div><div class="d-sub">${costSub}</div></div>`;
+    if (p.hodlValueUSD != null) {
+      const il = p.ilUSD || 0, pc = p.hodlValueUSD > 0 ? il / p.hodlValueUSD * 100 : 0;
+      pnlCells += `<div><div class="d-label">无常损失</div><div class="d-val ${il >= 0 ? 'gain' : 'loss'}">${sg(il)}${fU2(Math.abs(il))} (${sg(il)}${Math.abs(pc).toFixed(2)}%)</div><div class="d-sub">对比持币不动 ${fU(p.hodlValueUSD)}</div></div>`;
+    }
+    const np = p.netProfitUSD || 0, npc = p.netProfitPct || 0;
+    const parts = ['现值', '待领费'];
+    if (p.collectedFeesUSD > 0) parts.push('已领费 ' + fU2(p.collectedFeesUSD));
+    if (p.withdrawnUSD > 0) parts.push('已提 ' + fU2(p.withdrawnUSD));
+    pnlCells += `<div><div class="d-label">净利润</div><div class="d-val ${np >= 0 ? 'gain' : 'loss'}">${sg(np)}${fU2(Math.abs(np))} (${sg(np)}${Math.abs(npc).toFixed(2)}%)</div><div class="d-sub">${parts.join('+')}−成本${p.feesUnknown ? ' · 不含已领费' : ''}</div></div>`;
   }
   return `<div class="detail-inner">
     <div class="detail-grid">
@@ -1380,6 +1447,7 @@ function mkDet(p) {
       <div><div class="d-label">手续费价值</div><div class="d-val fees">${fU2(p.feesValueUSD)}</div></div>
       ${p.pendingCake > 0 ? `<div><div class="d-label">CAKE 奖励 (待领)</div><div class="d-val fees">${fN(p.pendingCake)}</div>${p.rewardValueUSD ? `<div class="d-sub">${fU2(p.rewardValueUSD)}</div>` : ''}</div>` : ''}
       ${p.dailyRateCumulative ? `<div><div class="d-label">累计日化</div><div class="d-val fees">${p.dailyRateCumulative.toFixed(2)}%</div><div class="d-sub">${p.totalDays>=1 ? p.totalDays+'天'+((p.totalHours%24)>0?(p.totalHours%24)+'h':'') : (p.totalHours||0)+'h'} · ${p.protocol==='V4' ? '不含已领' : '含已领'}</div></div>` : ''}
+      ${pnlCells}
       ${entryCells}
     </div>
     <div class="range-bar-labels"><span>下限: ${fP(p.lowerPrice)}</span><span>上限: ${fP(p.upperPrice)}</span></div>
@@ -1679,7 +1747,7 @@ async function loadData(fr=false){
 //     页面隐藏/非总览视图/正在加载时不探; 钱包启停、添加后的新数据也靠它自动带回 ---
 const LIVE_MS=10000;
 async function livePoll(){
-  if(liveBusy||loadBusy||document.hidden||settingsOpen||snapOpen||isPending()) return;
+  if(liveBusy||loadBusy||document.hidden||settingsOpen||snapOpen||pnlOpen||isPending()) return;
   liveBusy=true; const chainAtStart=activeChain;
   try{
     const h={}; if(liveEtag) h['If-None-Match']=liveEtag;
@@ -1708,15 +1776,17 @@ setInterval(()=>{
 
 // --- 设置页 (侧栏一级目录): 钱包资金查询 + 出区间通知; 与仪表盘视图互斥切换 ---
 let notifyCfg = null;
-let settingsOpen = false, snapOpen = false;
-// 三视图互斥: dash(仪表盘) / settings(设置) / snap(资金快照); 侧栏高亮随之切换
+let settingsOpen = false, snapOpen = false, pnlOpen = false;
+// 四视图互斥: dash(仪表盘) / settings(设置) / snap(资金快照) / pnl(钱包盈亏); 侧栏高亮随之切换
 function showView(name) {
-  settingsOpen = name === 'settings'; snapOpen = name === 'snap';
+  settingsOpen = name === 'settings'; snapOpen = name === 'snap'; pnlOpen = name === 'pnl';
   $('dashView').style.display = name === 'dash' ? 'block' : 'none';
   $('settingsView').style.display = settingsOpen ? 'block' : 'none';
   $('snapView').style.display = snapOpen ? 'block' : 'none';
+  $('pnlView').style.display = pnlOpen ? 'block' : 'none';
   $('stNavBtn').classList.toggle('active', settingsOpen);
   $('snNavBtn').classList.toggle('active', snapOpen);
+  $('pnNavBtn').classList.toggle('active', pnlOpen);
   document.querySelectorAll('#chainNav .nav-item').forEach(b => b.classList.toggle('active', name === 'dash' && b.dataset.chain === activeChain));
   if (name !== 'dash') { try { localStorage.setItem('lpChain', activeChain); } catch {} }   // hash 被占用, 刷新后靠它恢复链
 }
@@ -2284,6 +2354,165 @@ async function saveSpCfg() {
   }
 }
 
+// =============================================================
+// 钱包盈亏页: /api/<chain>/pnl?wallet= —— 账本里全部仓位 (活跃 + 已关闭) + 资金对照
+//   rh/arc: 服务端 pnl-ledger 按钱包 Transfer 流水 + 仓位事件重放, 成本=钱包实付; 其他链只有活跃仓 (成本按开仓时价)
+// =============================================================
+let pnChain = null, pnWallet = null, pnData = null, pnBusy = false, pnPollTimer = null;
+const pnWalletsByChain = {};
+try { pnChain = localStorage.getItem('pnChain') || null; pnWallet = localStorage.getItem('pnWallet') || null; } catch {}
+function pnApi(ch) { return ch === 'bsc' ? '/api' : '/api/' + ch; }
+function pnSave() { try { localStorage.setItem('pnChain', pnChain || ''); localStorage.setItem('pnWallet', pnWallet || ''); } catch {} }
+function pnSame(a, b) { return pnChain === 'sol' ? String(a) === String(b) : String(a).toLowerCase() === String(b).toLowerCase(); }
+function openPnl() {
+  showView('pnl');
+  history.replaceState(null, '', '#pnl');
+  if (!pnChain || isPending(pnChain)) pnChain = isPending(activeChain) ? 'rh' : activeChain;
+  pnInit();
+}
+function closePnl() {
+  showView('dash');
+  history.replaceState(null, '', '#' + activeChain);
+  if (pnPollTimer) { clearTimeout(pnPollTimer); pnPollTimer = null; }
+}
+async function pnInit() {
+  await pnLoadWallets();
+  renderPnToolbar();
+  loadPnl(false);
+}
+async function pnLoadWallets() {
+  try {
+    const r = await fetch(pnApi(pnChain) + '/wallets');
+    pnWalletsByChain[pnChain] = r.ok ? await r.json() : [];
+  } catch { pnWalletsByChain[pnChain] = []; }
+  const list = pnWalletsByChain[pnChain] || [];
+  if (!pnWallet || !list.some(w => pnSame(w.address, pnWallet))) pnWallet = (list.find(w => w.enabled !== false) || list[0] || {}).address || null;
+}
+function pnSetChain(ch) { if (ch === pnChain) return; pnChain = ch; pnWallet = null; pnData = null; pnSave(); $('pnTable').innerHTML = ''; $('pnStrip').style.display = 'none'; $('pnFund').style.display = 'none'; pnInit(); }
+function pnSetWallet(a) { if (pnSame(a, pnWallet)) return; pnWallet = a; pnData = null; pnSave(); renderPnToolbar(); loadPnl(false); }
+function renderPnToolbar() {
+  let h = '<span class="filter-label">链</span>';
+  for (const ch of Object.keys(CHAIN_NAMES)) { if (isPending(ch)) continue; h += '<button class="ftag ' + (pnChain === ch ? 'active' : '') + '" onclick="pnSetChain(\'' + ch + '\')">' + CHAIN_NAMES[ch] + '</button>'; }
+  const list = pnWalletsByChain[pnChain] || [];
+  if (list.length) {
+    const wm = {}; for (const w of list) wm[w.address] = w.name + (w.enabled === false ? ' (停用)' : '');
+    const gi = snGroups(wm);
+    const cur = list.find(w => pnSame(w.address, pnWallet));
+    const openG = cur ? (gi.gmap[cur.address] || null) : null;
+    h += '<span class="filter-label">钱包</span>';
+    for (const g of gi.gList) {
+      const open = openG === g, col = groupColor(g), mem = gi.byG[g];
+      h += '<button class="ftag fgrp' + (open ? ' open' : '') + '" style="--gc:' + col + '" data-f="' + escH(mem[0][0]) + '" onclick="pnSetWallet(this.dataset.f)" title="点开看组内钱包"><span class="fdot"></span>' + escH(g) + '<span class="fcount">' + mem.length + '</span><span class="farrow">' + (open ? '▾' : '▸') + '</span></button>';
+      if (open) {
+        h += '<span class="fsub" style="--gc:' + col + '">';
+        for (const [a, n] of mem) h += '<button class="ftag fwal' + (pnSame(a, pnWallet) ? ' active' : '') + '" data-f="' + escH(a) + '" onclick="pnSetWallet(this.dataset.f)" title="' + escH(n) + '">' + escH(groupRest(n) || n) + '</button>';
+        h += '</span>';
+      }
+    }
+    for (const [a, n] of gi.singles) h += '<button class="ftag' + (pnSame(a, pnWallet) ? ' active' : '') + '" data-f="' + escH(a) + '" onclick="pnSetWallet(this.dataset.f)">' + escH(n) + '</button>';
+  }
+  $('pnToolbar').innerHTML = h; $('pnToolbar').style.display = 'flex';
+}
+async function loadPnl(refresh) {
+  if (!pnWallet) { $('pnTable').innerHTML = '<div class="sn-empty">该链还没有钱包<br>先在总览页「管理钱包」里添加</div>'; $('pnStrip').style.display = 'none'; $('pnFund').style.display = 'none'; $('pnNote').textContent = ''; return; }
+  if (pnBusy) return;
+  pnBusy = true;
+  const b = $('pnRefreshBtn'); b.disabled = true; b.textContent = refresh ? '账本扫描中…' : '加载中…';
+  const chainAt = pnChain, walletAt = pnWallet;
+  try {
+    const r = await fetch(pnApi(pnChain) + '/pnl?wallet=' + encodeURIComponent(pnWallet) + (refresh ? '&refresh=true' : ''));
+    if (!r.ok) throw new Error('API 错误: ' + r.status);
+    const d = await r.json();
+    if (chainAt !== pnChain || walletAt !== pnWallet) return;
+    pnData = d; renderPnl();
+    // 刷新账本 = 服务端后台扫一轮 (几十秒到几分钟), 之后隔 25s 再拉几次把新结果带回来
+    if (refresh && d.ledger && !d.partial) {
+      let left = 8;
+      const tick = async () => { if (!pnlOpen || chainAt !== pnChain || walletAt !== pnWallet || left-- <= 0) return; try { const r2 = await fetch(pnApi(pnChain) + '/pnl?wallet=' + encodeURIComponent(pnWallet)); if (r2.ok) { const d2 = await r2.json(); if (chainAt === pnChain && walletAt === pnWallet) { pnData = d2; renderPnl(); if (!d2.scanning && d2.updatedAt > (d.updatedAt || 0)) return; } } } catch {} pnPollTimer = setTimeout(tick, 25000); };
+      if (pnPollTimer) clearTimeout(pnPollTimer);
+      pnPollTimer = setTimeout(tick, 25000);
+    }
+  } catch (e) { $('pnTable').innerHTML = '<div class="error-box"><p>⚠ ' + escH(e.message) + '</p></div>'; }
+  finally { pnBusy = false; b.disabled = false; b.textContent = '刷新账本'; }
+}
+function pnD(ts) { if (!ts) return '—'; const d = new Date(ts); return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
+function pnDays(a, b) { const ms = Math.max(0, (b || Date.now()) - a); const d = ms / 86400000; return d >= 1 ? Math.floor(d) + '天' + (Math.floor((ms % 86400000) / 3600000) > 0 ? Math.floor((ms % 86400000) / 3600000) + 'h' : '') : Math.floor(ms / 3600000) + 'h'; }
+function pnSigned(v, cls) { if (v == null || isNaN(v)) return '<span class="sn-zero">—</span>'; const c = cls || dCls(v); return '<span class="' + c + '">' + (v > 0 ? '+' : (v < 0 ? '−' : '')) + fU2(Math.abs(v)) + '</span>'; }
+function renderPnl() {
+  const d = pnData; if (!d) return;
+  const rows = d.positions || [];
+  const act = rows.filter(r => r.status === 'active').sort((x, y) => (y.valueUSD || 0) - (x.valueUSD || 0));
+  const cls = rows.filter(r => r.status !== 'active').sort((x, y) => (y.closeTs || 0) - (x.closeTs || 0));
+  const costed = r => r.costUSD > 0;
+  const sum = (arr, f) => arr.reduce((s, r) => s + (f(r) || 0), 0);
+  const actC = act.filter(costed), clsC = cls.filter(costed);
+  const costAct = sum(actC, r => r.costUSD), valAct = sum(act, r => r.valueUSD + r.pendingFeesUSD);
+  const npAct = sum(actC, r => r.netProfitUSD), npCls = sum(clsC, r => r.netProfitUSD);
+  const feesAll = sum(rows, r => r.pendingFeesUSD + r.collectedFeesUSD);
+  const ilAct = act.filter(r => r.ilUSD != null), ilSum = sum(ilAct, r => r.ilUSD);
+  const anyApprox = rows.some(r => r.costApprox || r.incomplete);
+  // 元信息
+  const w = d.wallet || {};
+  let meta = escH(w.name || '') + ' · ' + sA(String(w.address || ''));
+  if (d.ledger) meta += d.pending ? ' · 账本尚未扫描' : (d.partial ? ' · 高频钱包, 账本放弃' : ' · 账本 ' + (d.updatedAt ? tA(d.updatedAt) : '待计算') + (d.scanning ? ' · 扫描中' : '') + (d.catchingUp ? ' · 流水未扫完' : ''));
+  else meta += ' · 本链无钱包账本';
+  $('pnMeta').textContent = meta;
+  // 统计条
+  const cell = (label, val, cls2, sub) => '<div class="stat-cell"><div class="stat-label">' + label + '</div><div class="stat-val ' + (cls2 || '') + '">' + val + '</div>' + (sub ? '<div class="stat-sub">' + sub + '</div>' : '') + '</div>';
+  const pc = (v, base) => base > 0 && v != null ? ' (' + (v >= 0 ? '+' : '−') + Math.abs(v / base * 100).toFixed(1) + '%)' : '';
+  let sh = '';
+  sh += cell('活跃仓开仓成本', costAct > 0 ? fU(costAct) : '—', '', actC.length + '/' + act.length + ' 仓有成本' + (anyApprox ? ' · 含估算*' : ''));
+  sh += cell('活跃仓现值 (含待领费)', fU(valAct), 'green', act.length + ' 个活跃仓');
+  sh += cell('活跃仓净利润 (未实现)', actC.length ? pnSigned(npAct) : '—', '', actC.length ? '较成本' + pc(npAct, costAct) : '');
+  sh += cell('已关闭仓净利润 (已实现)', clsC.length ? pnSigned(npCls) : (d.ledger ? '—' : '不支持'), '', clsC.length ? clsC.length + ' 个已关闭仓' : (d.ledger ? '暂无已关闭仓' : '本链无历史仓位'));
+  sh += cell('手续费合计 (已领+待领)', fU2(feesAll), 'yellow', '待领 ' + fU2(sum(rows, r => r.pendingFeesUSD)));
+  sh += cell('无常损失 (活跃)', ilAct.length ? pnSigned(ilSum) : '—', '', ilAct.length ? '对比持币不动' : '需开仓数量数据');
+  $('pnStrip').innerHTML = sh; $('pnStrip').style.display = 'grid';
+  // 资金对照
+  const idle = d.idleUSD, lp = d.lpUSD || 0;
+  let fh = '';
+  if (idle != null) fh += '<span>钱包余额 <b>' + fU(idle) + '</b></span><span>LP 价值 <b>' + fU(lp) + '</b></span><span>总资产 <b>' + fU(idle + lp) + '</b></span>';
+  else fh += '<span>LP 价值 <b>' + fU(lp) + '</b></span>';
+  if (d.funding && !d.funding.partial) {
+    fh += '<span>净入金 <b>' + fU(d.funding.netUSD) + '</b>' + (d.funding.catchingUp ? ' <span class="sn-tag warn">续扫中</span>' : '') + '</span>';
+    if (idle != null) { const tot = idle + lp - d.funding.netUSD; fh += '<span>总体盈亏 (总资产−净入金) ' + pnSigned(tot) + pc(tot, d.funding.netUSD) + '</span>'; }
+  }
+  $('pnFund').innerHTML = fh; $('pnFund').style.display = fh ? 'flex' : 'none';
+  // 表格
+  if (!rows.length) {
+    $('pnTable').innerHTML = '<div class="sn-empty">' + (d.ledger && d.pending ? '账本还没扫到这个钱包<br>服务启动 2~3 分钟后自动开始, 也可点右上角「刷新账本」' : '这个钱包没有仓位记录') + '</div>';
+    $('pnNote').textContent = ''; return;
+  }
+  const head = '<table class="sn-table pn-table"><thead><tr><th>交易对</th><th>状态</th><th class="sn-hm">开仓</th><th class="sn-hm">关闭 / 持有</th><th>开仓成本</th><th>现值</th><th class="sn-hm">已提回</th><th>手续费</th><th class="sn-hm">无常损失</th><th>净利润</th></tr></thead><tbody>';
+  const rowH = r => {
+    const st = r.status === 'active'
+      ? '<span class="pn-st ' + (r.inRange ? 'act' : 'out') + '">' + (r.inRange === null ? '活跃' : (r.inRange ? '区间内' : '区间外')) + '</span>'
+      : '<span class="pn-st cls">已关闭' + (r.note === 'transferred' ? ' · 转出' : (r.note === 'empty' ? ' · 空仓' : '')) + '</span>';
+    const proto = r.platform ? r.platform.toUpperCase() + ' ' + r.protocol : r.protocol;
+    const cost = r.costUSD > 0 ? fU(r.costUSD) + (r.costApprox || r.incomplete ? '<span class="pn-approx" title="' + (r.incomplete ? '部分事件尚未定价' : (r.source === 'ledger' ? '部分按当时市值补齐' : '按开仓时池价估算')) + '">*</span>' : '') : '<span class="sn-zero">—</span>';
+    const costSub = r.costUSD > 0 && r.depositValueUSD > 0 && r.source === 'ledger' ? '<span class="pn-sub">开仓时价值 ' + fU(r.depositValueUSD) + '</span>' : '';
+    const fees = fU2((r.pendingFeesUSD || 0) + (r.collectedFeesUSD || 0)) + (r.collectedFeesUSD > 0 ? '<span class="pn-sub">已领 ' + fU2(r.collectedFeesUSD) + '</span>' : '') + (r.feesUnknown ? '<span class="pn-sub">不含已领</span>' : '');
+    const il = r.ilUSD != null ? pnSigned(r.ilUSD) + (r.hodlValueUSD > 0 ? '<span class="pn-sub">' + (r.ilUSD >= 0 ? '+' : '−') + Math.abs(r.ilUSD / r.hodlValueUSD * 100).toFixed(2) + '%</span>' : '') : '<span class="sn-zero">—</span>';
+    const np = r.netProfitUSD != null ? pnSigned(r.netProfitUSD) + '<span class="pn-sub">' + (r.netProfitPct >= 0 ? '+' : '−') + Math.abs(r.netProfitPct || 0).toFixed(2) + '%</span>' : '<span class="sn-zero">—</span>';
+    const closeCell = r.status === 'active' ? '持有 ' + pnDays(r.openTs) : pnD(r.closeTs) + (r.openTs && r.closeTs ? '<span class="pn-sub">持有 ' + pnDays(r.openTs, r.closeTs) + '</span>' : '');
+    return '<tr><td class="pn-pair">' + escH(r.pair || '') + '<span class="protocol-tag ' + String(r.protocol || 'v3').toLowerCase() + '">' + escH(proto) + '</span>' + (r.feeLabel ? '<span class="fee-tag">' + escH(r.feeLabel) + '</span>' : '') + '<span class="pn-id">#' + escH(String(r.tokenId || '').slice(0, 12)) + '</span></td>'
+      + '<td>' + st + '</td><td class="sn-hm">' + pnD(r.openTs) + '</td><td class="sn-hm">' + closeCell + '</td>'
+      + '<td>' + cost + costSub + '</td><td>' + (r.status === 'active' ? fU(r.valueUSD + r.pendingFeesUSD) : '<span class="sn-zero">—</span>') + '</td>'
+      + '<td class="sn-hm">' + (r.withdrawnUSD > 0 ? fU(r.withdrawnUSD) : '<span class="sn-zero">—</span>') + '</td><td>' + fees + '</td><td class="sn-hm">' + il + '</td><td>' + np + '</td></tr>';
+  };
+  let bh = '';
+  if (act.length) { bh += '<tr class="pn-sec"><td colspan="10">活跃仓位 · ' + act.length + '</td></tr>'; for (const r of act) bh += rowH(r); }
+  if (cls.length) { bh += '<tr class="pn-sec"><td colspan="10">已关闭仓位 · ' + cls.length + '</td></tr>'; for (const r of cls) bh += rowH(r); }
+  $('pnTable').innerHTML = head + bh + '</tbody></table>';
+  const notes = [];
+  if (d.ledger) notes.push('开仓成本 = 钱包为该仓实际付出的金额 (按 Transfer 流水回放: 换币建立持仓成本, 开仓 tx 的净流出按成本扣; 一笔换币+开仓的 zap, 流出的稳定币即全部成本, 含换币损耗)。带 * 的含估算成分 (原生 ETH 直转 / 转入的仓 / 桥入代币按当时市值)。');
+  else if (d.unsupported) notes.push('Solana 仓位暂无开仓成本与无常损失来源 (仓位账户不存入金历史), 只列现值与手续费。');
+  else notes.push('本链公共 RPC 不支持按钱包扫全链 Transfer, 开仓成本暂按开仓时点池价估算 (带 *), 已关闭仓位不可用。');
+  notes.push('无常损失 = 头寸现值 − 开仓存入的代币数量按现价持有不动的价值 (负数=做 LP 比拿着币亏)。净利润 = 现值 + 待领费 + 已领费 + 已提回本金 − 开仓成本; 已关闭仓 = 已提回 + 已领费 − 成本 (提回按当时市值)。');
+  if (d.funding) notes.push('总体盈亏 = 钱包余额 + LP 价值 − 净入金 (净入金来自初始资金回溯, 只算与外部/内部钱包的转账)。');
+  $('pnNote').innerHTML = notes.map(escH).join('<br>');
+}
+
 if (!isPending()) loadWallets();
 loadNotifyCfg();
 loadFdCfg();
@@ -2291,6 +2520,7 @@ loadUiCfg();
 loadData();
 if (location.hash === '#settings') openSettings();   // 设置页刷新保持
 else if (location.hash === '#snapshot') openSnap();   // 快照页刷新保持
+else if (location.hash === '#pnl') openPnl();         // 盈亏页刷新保持
 </script>
 </body>
 </html>

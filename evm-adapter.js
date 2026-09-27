@@ -7,6 +7,7 @@
 const path = require('path');
 const fs = require('fs');
 const { ethers } = require('ethers');
+const ledger = require('./pnl-ledger');   // 钱包盈亏账本 (rh/arc 纯日志重建: 真实成本/已提回/已领费/历史仓位)
 
 // --- 链配置(合约地址均已链上验证 2026-07-31) ---
 const EVM_CHAINS = {
@@ -96,6 +97,7 @@ const EVM_CHAINS = {
     coingeckoPlatform: null,              // coingecko 不收录 RH 链, 全靠池内价 + native 价
     entryFromLogs: true,                  // 建仓价值: 无子图, 从链上事件回溯 (详情面板显示差价)
     fundingFromLogs: true,                // 初始资金(净入金): 全链 Transfer 回溯 (仅 rh; rh RPC 无 trace, 原生 ETH 直转不可见)
+    ledgerFromLogs: true,                 // 钱包盈亏账本 (pnl-ledger.js): 全链 Transfer + 仓位事件重放真实成本/历史仓位
     noBatch: true,                        // rh RPC 对 JSON-RPC batch 悬死 (2026-09-06), 单请求正常
   },
   // --- Arc (Circle 稳定币 L1, chainId 5042): 2026-09-19 切活 (主网 09-16 公开) ---
@@ -145,6 +147,7 @@ const EVM_CHAINS = {
                                           //   闲置余额只认 ERC-20 那笔, 否则同一笔 USDC 会被算两遍
     coingeckoPlatform: null,              // coingecko 尚未收录 Arc
     entryFromLogs: true,                  // 建仓价值: 无子图, 同 rh 走链上事件回溯
+    ledgerFromLogs: true,                 // 钱包盈亏账本: 同 rh (小段+限速, 首扫按每轮预算分多轮)
   },
 };
 
@@ -905,7 +908,7 @@ async function getV3EntryData(chainId, tokenId, poolAddress, t0, t1, currentLiq)
   const cfg = EVM_CHAINS[chainId];
   const key = `v3-${tokenId}`;
   const cached = st.entryCache[key];
-  if (cached && cached.liq === currentLiq.toString()) return cached;
+  if (cached && cached.liq === currentLiq.toString() && cached.am) return cached;
   try {
     // 事件不会早于 mint 块, 从 mint 块起分段扫 (mint 块永久缓存在 mb, 重算不再倒扫)
     const mint = cached && cached.mb
@@ -927,7 +930,7 @@ async function getV3EntryData(chainId, tokenId, poolAddress, t0, t1, currentLiq)
     const spec = { kind: 'v3', poolAddress };
     const capped = evs.length > 24;
     const use = capped ? [evs.find(e => e.sign === 1)] : evs;
-    let u = 0, w = 0, n = 0, liq = 0n, ts = 0;
+    let u = 0, w = 0, n = 0, liq = 0n, ts = 0, n0 = 0, n1 = 0;
     for (const ev of use) {
       const hex = ev.lg.data.slice(2);
       const dl = BigInt('0x' + hex.slice(0, 64));
@@ -937,13 +940,15 @@ async function getV3EntryData(chainId, tokenId, poolAddress, t0, t1, currentLiq)
       const prices = await entryPricesAtBlock(chainId, spec, t0, t1, bn, memo);
       if (!prices) return null;
       const v = amt0 * prices.p0 + amt1 * prices.p1;
-      if (ev.sign > 0) { u += v; n++; liq += dl; if (!ts) ts = prices.ts; }
-      else { w += v; liq -= dl; }
+      if (ev.sign > 0) { u += v; n++; liq += dl; n0 += amt0; n1 += amt1; if (!ts) ts = prices.ts; }
+      else { w += v; liq -= dl; n0 -= amt0; n1 -= amt1; }
     }
+    // am = 净存入数量 (按 token 地址): 前端「无常损失」= 头寸现值 − 这些数量按现价持有不动的价值
+    const am = { [t0.address.toLowerCase()]: n0, [t1.address.toLowerCase()]: n1 };
     // capped 时无法对账, 冻结在当前 liquidity 上避免每轮重扫; 正常路径事件应与链上现值对平
     const data = capped
-      ? { u, w: 0, ts, n, liq: currentLiq.toString(), b: 0, mb: mint.block, mod: true }
-      : { u, w, ts, n, liq: liq.toString(), b: 0, mb: mint.block, mod: liq !== BigInt(currentLiq) };
+      ? { u, w: 0, ts, n, liq: currentLiq.toString(), b: 0, mb: mint.block, mod: true, am }
+      : { u, w, ts, n, liq: liq.toString(), b: 0, mb: mint.block, mod: liq !== BigInt(currentLiq), am };
     st.entryCache[key] = data;
     saveEntryCache(st);
     return data;
@@ -960,12 +965,15 @@ async function getV4EntryData(chainId, tokenId, poolId, tickLower, tickUpper, t0
   const cfg = EVM_CHAINS[chainId];
   const key = `v4-${tokenId}`;
   const cached = st.entryCache[key];
-  if (cached && cached.liq === currentLiq.toString()) return cached;
+  if (cached && cached.liq === currentLiq.toString() && cached.am) return cached;
   try {
-    let u = 0, w = 0, n = 0, liq = 0n, ts = 0, fromBlock;
-    if (cached && cached.b > 0) {
+    let u = 0, w = 0, n = 0, liq = 0n, ts = 0, fromBlock, n0 = 0, n1 = 0;
+    const a0k = t0.address.toLowerCase(), a1k = t1.address.toLowerCase();
+    if (cached && cached.b > 0 && cached.am) {
       ({ u, w, n, ts } = cached); liq = BigInt(cached.liq); fromBlock = cached.b + 1;
+      n0 = cached.am[a0k] || 0; n1 = cached.am[a1k] || 0;
     } else {
+      // 无缓存 / 旧缓存缺 am (净存入数量): 从 mint 块全量重放
       const mint = await findMintEvent(chainId, cfg.v4.pm, tokenId.toString());
       if (!mint) return null;
       ts = mint.ts; fromBlock = mint.block;
@@ -983,7 +991,7 @@ async function getV4EntryData(chainId, tokenId, poolId, tickLower, tickUpper, t0
       if (hex.slice(192, 256) !== saltHex) continue;
       evs.push({ bn: parseInt(lg.blockNumber, 16), delta: hexInt(hex.slice(128, 192)) });
     }
-    if (!cached && !evs.some(e => e.delta > 0n)) return null;
+    if (!(cached && cached.am) && !evs.some(e => e.delta > 0n)) return null;
     const memo = new Map();
     const spec = { kind: 'v4', poolId };
     // cap=事件超量只算首笔 (永久); 对账不平的 mod 每次重算, 不从缓存继承 (竞态是暂时的)
@@ -995,9 +1003,9 @@ async function getV4EntryData(chainId, tokenId, poolId, tickLower, tickUpper, t0
         const prices = await entryPricesAtBlock(chainId, spec, t0, t1, firstAdd.bn, memo);
         if (!prices) return null;
         const { amount0, amount1 } = getTokenAmounts(firstAdd.delta, prices.sqrt, tickLower, tickUpper, t0.decimals, t1.decimals);
-        u += amount0 * prices.p0 + amount1 * prices.p1; n++;
+        u += amount0 * prices.p0 + amount1 * prices.p1; n++; n0 += amount0; n1 += amount1;
       }
-      const data = { u, w: 0, ts, n, liq: currentLiq.toString(), b: latest, mod: true, cap: true };
+      const data = { u, w: 0, ts, n, liq: currentLiq.toString(), b: latest, mod: true, cap: true, am: { [a0k]: n0, [a1k]: n1 } };
       st.entryCache[key] = data; saveEntryCache(st);
       return data;
     }
@@ -1007,11 +1015,11 @@ async function getV4EntryData(chainId, tokenId, poolId, tickLower, tickUpper, t0
       const mag = ev.delta > 0n ? ev.delta : -ev.delta;
       const { amount0, amount1 } = getTokenAmounts(mag, prices.sqrt, tickLower, tickUpper, t0.decimals, t1.decimals);
       const v = amount0 * prices.p0 + amount1 * prices.p1;
-      if (ev.delta > 0n) { u += v; n++; liq += ev.delta; if (!ts) ts = prices.ts; }
-      else { w += v; liq += ev.delta; }
+      if (ev.delta > 0n) { u += v; n++; liq += ev.delta; n0 += amount0; n1 += amount1; if (!ts) ts = prices.ts; }
+      else { w += v; liq += ev.delta; n0 -= amount0; n1 -= amount1; }
     }
     // 事件累计与链上现值不平 (取数时点竞态/漏事件) → 标记但不强行冻结, 下轮增量再对
-    const data = { u, w, ts, n, liq: liq.toString(), b: latest, mod: cap || liq !== BigInt(currentLiq), cap };
+    const data = { u, w, ts, n, liq: liq.toString(), b: latest, mod: cap || liq !== BigInt(currentLiq), cap, am: { [a0k]: n0, [a1k]: n1 } };
     st.entryCache[key] = data;
     saveEntryCache(st);
     return data;
@@ -1039,7 +1047,7 @@ async function getV3EntrySubgraph(chainId, job) {
   const cfg = EVM_CHAINS[chainId];
   const key = `v3-${job.tokenId}`;
   const cached = st.entryCache[key];
-  if (cached && cached.liq === job.liq.toString()) return cached;
+  if (cached && cached.liq === job.liq.toString() && cached.am) return cached;
   const pool = job.poolAddress.toLowerCase();
   const tl = job.tickLower, tu = job.tickUpper;
   // 1) 拿 owner + 本档创建 mint 的 origin + 累计入金 token0 量 (对账用)
@@ -1052,18 +1060,21 @@ async function getV3EntrySubgraph(chainId, job) {
   if (!origin) return null;
   // 2) pool+ticks+origin 聚合全部 mint/burn 的 amountUSD
   const md = await graphQueryRetry(cfg.v3SubgraphId,
-    `{ mints(first:500, where:{pool:"${pool}", tickLower:${tl}, tickUpper:${tu}, origin:"${origin}"}){ amount0 amountUSD timestamp } }`);
+    `{ mints(first:500, where:{pool:"${pool}", tickLower:${tl}, tickUpper:${tu}, origin:"${origin}"}){ amount0 amount1 amountUSD timestamp } }`);
   if (!md) return null;
   const bd = await graphQueryRetry(cfg.v3SubgraphId,
-    `{ burns(first:500, where:{pool:"${pool}", tickLower:${tl}, tickUpper:${tu}, origin:"${origin}"}){ amountUSD } }`);
+    `{ burns(first:500, where:{pool:"${pool}", tickLower:${tl}, tickUpper:${tu}, origin:"${origin}"}){ amount0 amount1 amountUSD } }`);
   const mints = md.mints || [], burns = (bd && bd.burns) || [];
   if (mints.length === 0) return null;
-  let u = 0, sum0 = 0, ts = 0;
-  for (const m of mints) { u += Math.abs(+m.amountUSD); sum0 += +m.amount0; const t = +m.timestamp * 1000; if (!ts || t < ts) ts = t; }
+  let u = 0, sum0 = 0, sum1 = 0, ts = 0;
+  for (const m of mints) { u += Math.abs(+m.amountUSD); sum0 += +m.amount0; sum1 += +m.amount1; const t = +m.timestamp * 1000; if (!ts || t < ts) ts = t; }
   const w = burns.reduce((a, b) => a + Math.abs(+b.amountUSD), 0);
+  let n0 = sum0, n1 = sum1;
+  for (const b of burns) { n0 -= Math.abs(+b.amount0 || 0); n1 -= Math.abs(+b.amount1 || 0); }
   const dep0 = +p.depositedToken0;
   const mod = dep0 > 0 ? Math.abs(sum0 - dep0) / dep0 > 0.02 : false;   // 同钱包同池同档多 NFT 合并/漏事件 → 存疑
-  const data = { u, w, ts, n: mints.length, liq: job.liq.toString(), b: 0, mod };
+  const am = { [job.t0.address.toLowerCase()]: n0, [job.t1.address.toLowerCase()]: n1 };   // 净存入数量 (无常损失用)
+  const data = { u, w, ts, n: mints.length, liq: job.liq.toString(), b: 0, mod, am };
   st.entryCache[key] = data; saveEntryCache(st);
   return data;
 }
@@ -1075,7 +1086,7 @@ async function getV4EntrySubgraph(chainId, job) {
   const cfg = EVM_CHAINS[chainId];
   const key = `v4-${job.tokenId}`;
   const cached = st.entryCache[key];
-  if (cached && cached.liq === job.liq.toString()) return cached;
+  if (cached && cached.liq === job.liq.toString() && cached.am) return cached;
   const pd = await graphQueryRetry(cfg.v4SubgraphId,
     `{ position(id:"${job.tokenId}"){ owner origin createdAtTimestamp } }`);
   const p = pd && pd.position;
@@ -1085,17 +1096,20 @@ async function getV4EntrySubgraph(chainId, job) {
   // base V4 索引器对带 filter 的 modifyLiquidities 偶发 BadResponse (每次 ~15s 超时); 只试 2 次避免
   // 串行队列被卡死的 job 饿死后面能成功的 base V3; 失败走 15 分钟冷却下轮再补.
   const md = await graphQueryRetry(cfg.v4SubgraphId,
-    `{ modifyLiquidities(first:500, where:{pool:"${job.poolId}", tickLower:${job.tickLower}, tickUpper:${job.tickUpper}, origin:"${origin}"}){ amount amountUSD timestamp } }`, 2, 900);
+    `{ modifyLiquidities(first:500, where:{pool:"${job.poolId}", tickLower:${job.tickLower}, tickUpper:${job.tickUpper}, origin:"${origin}"}){ amount amount0 amount1 amountUSD timestamp } }`, 2, 900);
   if (!md) return null;
   const evs = md.modifyLiquidities || [];
   if (evs.length === 0) return null;
-  let u = 0, w = 0, n = 0, ts = 0;
+  let u = 0, w = 0, n = 0, ts = 0, n0 = 0, n1 = 0;
   for (const e of evs) {
     const a = Math.abs(+e.amountUSD);
-    if (+e.amount >= 0) { u += a; n++; const t = +e.timestamp * 1000; if (!ts || t < ts) ts = t; }
+    const s = +e.amount >= 0 ? 1 : -1;
+    n0 += s * Math.abs(+e.amount0 || 0); n1 += s * Math.abs(+e.amount1 || 0);
+    if (s > 0) { u += a; n++; const t = +e.timestamp * 1000; if (!ts || t < ts) ts = t; }
     else { w += a; }
   }
-  const data = { u, w, ts, n, liq: job.liq.toString(), b: 0, mod: false };
+  const am = { [job.t0.address.toLowerCase()]: n0, [job.t1.address.toLowerCase()]: n1 };
+  const data = { u, w, ts, n, liq: job.liq.toString(), b: 0, mod: false, am };
   st.entryCache[key] = data; saveEntryCache(st);
   return data;
 }
@@ -1110,7 +1124,7 @@ async function getV4EntryBaseLogs(chainId, job) {
   const cfg = EVM_CHAINS[chainId];
   const key = `v4-${job.tokenId}`;
   const cached = st.entryCache[key];
-  if (cached && cached.liq === job.liq.toString()) return cached;
+  if (cached && cached.liq === job.liq.toString() && cached.am) return cached;
   try {
     const ep = entryProvider(chainId);
     const poolId = job.poolId;
@@ -1118,26 +1132,30 @@ async function getV4EntryBaseLogs(chainId, job) {
     // 链上 currency 顺序: 按地址升序 (与 poolId=keccak(currency0<currency1) 一致)
     const [c0, c1] = job.t0.address.toLowerCase() < job.t1.address.toLowerCase() ? [job.t0, job.t1] : [job.t1, job.t0];
 
-    let u = 0, w = 0, n = 0, liq = 0n, ts = 0, fromBlock;
-    if (cached && cached.b > 0) {
+    let u = 0, w = 0, n = 0, liq = 0n, ts = 0, fromBlock, n0 = 0, n1 = 0;
+    const c0k = c0.address.toLowerCase(), c1k = c1.address.toLowerCase();
+    if (cached && cached.b > 0 && cached.am) {
       ({ u, w, n, ts } = cached); liq = BigInt(cached.liq); fromBlock = cached.b + 1;
+      n0 = cached.am[c0k] || 0; n1 = cached.am[c1k] || 0;
     } else {
       const mint = await mintBlockBase(chainId, job.createdAt, job.tokenId);
       if (!mint) return null;
       fromBlock = mint;
     }
     const latest = await ep.getBlockNumber();
-    // getLogs: base.org 限 10k 块/段, 用 9000 稳妥; 分段扫 mint->latest (近期机器人仓通常仅几万块)
+    // getLogs: base.org 2026-09-27 实测单段 > 2000 块即 413 Payload Too Large (此前 10k 可用), 改 2000 块/段;
+    // 分段扫 mint->latest (mintBlockBase 留 50k 余量 → 近期仓 ~25 段起步, 老仓几百段, 后台队列慢慢来)
+    const BASE_CHUNK = 2000;
     const logs = [];
-    for (let f = fromBlock; f <= latest; f += 9000) {
-      const to = Math.min(f + 8999, latest);
+    for (let f = fromBlock; f <= latest; f += BASE_CHUNK) {
+      const to = Math.min(f + BASE_CHUNK - 1, latest);
       const part = await withRetry(() => ep.send('eth_getLogs', [{
         address: cfg.v4.poolManager,
         topics: [V4_MODIFY_TOPIC, poolId, ethers.zeroPadValue(cfg.v4.pm, 32)],
         fromBlock: '0x' + f.toString(16), toBlock: '0x' + to.toString(16),
       }]), 4, 900);
       logs.push(...part);
-      if (f + 9000 <= latest) await sleep(80);
+      if (f + BASE_CHUNK <= latest) await sleep(60);
     }
     // data 布局: tickLower(32B) tickUpper(32B) liquidityDelta(32B,有符号) salt(32B)
     const evs = [];
@@ -1146,7 +1164,7 @@ async function getV4EntryBaseLogs(chainId, job) {
       if (hex.slice(192, 256) !== saltHex) continue;
       evs.push({ bn: parseInt(lg.blockNumber, 16), tl: hexI24(hex.slice(0, 64)), tu: hexI24(hex.slice(64, 128)), delta: hexInt(hex.slice(128, 192)) });
     }
-    if (!cached && !evs.some(e => e.delta > 0n)) return null;
+    if (!(cached && cached.am) && !evs.some(e => e.delta > 0n)) return null;
     evs.sort((a, b) => a.bn - b.bn);
 
     // 某块池价 + 两侧 USD 单价 (同块多事件只查一次)。取 sqrt 两条路:
@@ -1161,7 +1179,7 @@ async function getV4EntryBaseLogs(chainId, job) {
       } catch {}
       // Swap 兜底: 窗口逐级放大, data 第 3 槽 = sqrtPriceX96
       const latestN = latest;
-      for (const back of (cfg.logChunk ? [600, 4900] : [600, 8000, 60000, 400000])) {   // arc: 单段 ≤ 9999
+      for (const back of (cfg.logChunk ? [600, 4900] : [600, 990])) {   // arc: 单段 ≤ 9999; base.org: 单段 ≤ 2000 (±990)
         const from = Math.max(0, bn - back), to = Math.min(latestN, bn + back);
         let logs;
         try {
@@ -1197,9 +1215,9 @@ async function getV4EntryBaseLogs(chainId, job) {
         const pr = await priceAt(first.bn);
         if (!pr) return null;
         const { amount0, amount1 } = getTokenAmounts(first.delta, pr.sqrt, first.tl, first.tu, c0.decimals, c1.decimals);
-        u += amount0 * pr.p0 + amount1 * pr.p1; n++; if (!ts) ts = pr.ts;
+        u += amount0 * pr.p0 + amount1 * pr.p1; n++; n0 += amount0; n1 += amount1; if (!ts) ts = pr.ts;
       }
-      const data = { u, w: 0, ts, n, liq: job.liq.toString(), b: latest, mod: true, cap: true };
+      const data = { u, w: 0, ts, n, liq: job.liq.toString(), b: latest, mod: true, cap: true, am: { [c0k]: n0, [c1k]: n1 } };
       st.entryCache[key] = data; saveEntryCache(st);
       return data;
     }
@@ -1209,10 +1227,10 @@ async function getV4EntryBaseLogs(chainId, job) {
       const mag = ev.delta > 0n ? ev.delta : -ev.delta;
       const { amount0, amount1 } = getTokenAmounts(mag, pr.sqrt, ev.tl, ev.tu, c0.decimals, c1.decimals);
       const v = amount0 * pr.p0 + amount1 * pr.p1;
-      if (ev.delta > 0n) { u += v; n++; liq += ev.delta; if (!ts) ts = pr.ts; }
-      else { w += v; liq += ev.delta; }
+      if (ev.delta > 0n) { u += v; n++; liq += ev.delta; n0 += amount0; n1 += amount1; if (!ts) ts = pr.ts; }
+      else { w += v; liq += ev.delta; n0 -= amount0; n1 -= amount1; }
     }
-    const data = { u, w, ts, n, liq: liq.toString(), b: latest, mod: cap || liq !== BigInt(job.liq), cap };
+    const data = { u, w, ts, n, liq: liq.toString(), b: latest, mod: cap || liq !== BigInt(job.liq), cap, am: { [c0k]: n0, [c1k]: n1 } };
     st.entryCache[key] = data; saveEntryCache(st);
     return data;
   } catch (e) {
@@ -1258,14 +1276,16 @@ function entryPeek(chainId, kind, tokenId, currentLiq, job) {
   const st = entryState(chainId);
   const key = `${kind}-${tokenId}`;
   const cached = st.entryCache[key];
-  if (cached && cached.liq === currentLiq.toString()) return cached;
+  const hit = cached && cached.liq === currentLiq.toString();
+  if (hit && cached.am) return cached;
   st.entryJobs = st.entryJobs || new Map();
   st.entryCooldown = st.entryCooldown || new Map();
   if ((st.entryCooldown.get(key) || 0) < Date.now() && !st.entryJobs.has(key)) {
     st.entryJobs.set(key, job);
     setImmediate(() => runEntryQueue(chainId).catch(() => {}));
   }
-  return null;
+  // 旧缓存只缺 am (净存入数量, 2026-09-27 新增): 建仓价值照旧显示, 后台补算; 补算失败 (RPC 抽风) 也不断档
+  return hit ? cached : null;
 }
 async function runEntryQueue(chainId) {
   const st = entryState(chainId);
@@ -1355,14 +1375,14 @@ async function fetchWalletV3(chainId, wallet, npm, factory) {
     if (!createdAt) createdAt = await rpcMintTime(chainId, EVM_CHAINS[chainId].v3.npm, tidStr);
 
     // 建仓价值: 只读缓存, 缺失/过期交给后台队列补 (mint 块 mb 即使 liquidity 已变也可用)
-    let entryValueUSD = 0, entryWithdrawnUSD = 0, entryTs = 0, entryAdds = 0, entryModified = false, mintBlock = 0;
+    let entryValueUSD = 0, entryWithdrawnUSD = 0, entryTs = 0, entryAdds = 0, entryModified = false, mintBlock = 0, entryAm = null;
     if (EVM_CHAINS[chainId].entryFromLogs || EVM_CHAINS[chainId].entryFromSubgraph) {
       mintBlock = entryState(chainId).entryCache[`v3-${tokenId}`]?.mb || 0;
       const ed = entryPeek(chainId, 'v3', tokenId, pos.liquidity,
         { kind: 'v3', tokenId, poolAddress: pool.addr, tickLower, tickUpper, t0, t1, liq: pos.liquidity });
       if (ed) {
         entryValueUSD = ed.u; entryWithdrawnUSD = ed.w; entryTs = ed.ts;
-        entryAdds = ed.n; entryModified = ed.mod;
+        entryAdds = ed.n; entryModified = ed.mod; entryAm = ed.am || null;
       }
     }
 
@@ -1396,7 +1416,7 @@ async function fetchWalletV3(chainId, wallet, npm, factory) {
       walletName: wallet.name, walletAddress: wallet.address,
       protocol: 'V3', createdAt, lastCollectAt,
       collectedFees: posCollectedFees,
-      entryValueUSD, entryWithdrawnUSD, entryTs, entryAdds, entryModified,
+      entryValueUSD, entryWithdrawnUSD, entryTs, entryAdds, entryModified, entryAm,
     };
   });
   return built.filter(Boolean);
@@ -1477,13 +1497,13 @@ async function fetchWalletV4(chainId, wallet, v4pm, stateView) {
       if (!createdAt) createdAt = await rpcMintTime(chainId, cfg.v4.pm, tokenId.toString());
 
       // 建仓价值: 只读缓存, 缺失/过期交给后台队列补
-      let entryValueUSD = 0, entryWithdrawnUSD = 0, entryTs = 0, entryAdds = 0, entryModified = false;
+      let entryValueUSD = 0, entryWithdrawnUSD = 0, entryTs = 0, entryAdds = 0, entryModified = false, entryAm = null;
       if (cfg.entryFromLogs || cfg.entryFromSubgraph) {
         const ed = entryPeek(chainId, 'v4', tokenId, m.liquidity,
           { kind: 'v4', tokenId, poolId: m.poolId, tickLower: m.tickLower, tickUpper: m.tickUpper, t0, t1, liq: m.liquidity, createdAt });
         if (ed) {
           entryValueUSD = ed.u; entryWithdrawnUSD = ed.w; entryTs = ed.ts;
-          entryAdds = ed.n; entryModified = ed.mod;
+          entryAdds = ed.n; entryModified = ed.mod; entryAm = ed.am || null;
         }
       }
 
@@ -1502,7 +1522,7 @@ async function fetchWalletV4(chainId, wallet, v4pm, stateView) {
         poolAddress: m.poolId,
         walletName: wallet.name, walletAddress: wallet.address,
         protocol: 'V4', createdAt, lastCollectAt: 0,
-        entryValueUSD, entryWithdrawnUSD, entryTs, entryAdds, entryModified,
+        entryValueUSD, entryWithdrawnUSD, entryTs, entryAdds, entryModified, entryAm,
       });
     } catch (e) {
       console.error(`  [${chainId}] V4 err token ${tokenId}:`, e.message?.slice(0, 80));
@@ -2192,6 +2212,17 @@ async function fetchInner(chainId, forceRefresh) {
       pos.feesValueUSD = pos.feesOwed0 * p0 + pos.feesOwed1 * p1;
       pos.totalValueUSD = pos.positionValueUSD + pos.feesValueUSD;
 
+      // 盈亏字段 (pnl-ledger.applyPnl): 开仓成本 / 持币对照→无常损失 / 已领费 / 已提回 / 净利润
+      //   rh·arc 账本命中 → 真实成本 (钱包实际付出, 含换币损耗) + 账本里的已领费/已提回;
+      //   否则退回建仓回溯 (按开仓时点池价, 标 approx); V4 无子图已领费来源时标 feesUnknown
+      {
+        const kind = pos.protocol === 'V4' ? 'v4' : 'v3';
+        const lg = ledger.positionPnl(chainId, wr.address, kind, pos.tokenId);
+        const priceOf = a => usdPrices[a] || 0;
+        if (lg) ledger.applyPnl(pos, { cost: lg.cost, approx: lg.approx || lg.inc, source: 'ledger', am: lg.a, withdrawnUSD: lg.ret, collectedUSD: lg.fees }, priceOf);
+        else if (pos.entryValueUSD > 0) ledger.applyPnl(pos, { cost: pos.entryValueUSD, approx: true, source: 'entry', am: pos.entryAm || {}, withdrawnUSD: pos.entryWithdrawnUSD || 0, collectedUSD: pos.protocol === 'V4' ? 0 : undefined, feesUnknown: pos.protocol === 'V4' }, priceOf);
+      }
+
       // 累计日化 (创建至今)
       if (pos.createdAt > 0 && pos.positionValueUSD >= 10) {
         const totalMs = Date.now() - pos.createdAt;
@@ -2298,11 +2329,41 @@ async function fetchInner(chainId, forceRefresh) {
 }
 
 // --- 路由挂载 ---
+// 账本后台队列要的「当前活跃仓」快照 (按钱包小写地址): 只取 positions 缓存, 零 RPC
+function liveByWallet(chainId) {
+  const m = {};
+  for (const w of (chainState(chainId).cache.data?.wallets || [])) m[w.address.toLowerCase()] = (w.positions || []).filter(p => p.liquidityActive);
+  return m;
+}
+
 function mountEvmRoutes(app, adminGuard) {
+  ledger.init({ EVM_CHAINS, chainState, getTokenInfo, entryPricesAtBlock, getTokenAmounts, ethUsdAtTime, loadActiveWallets, withRetry, sleep, findMintEvent, mintBlockFromScan });
   for (const chainId of Object.keys(EVM_CHAINS)) {
     const base = `/api/${chainId}`;
     // 每链独立钱包文件 wallets-<chain>.json, 与 BSC/SOL 完全隔离
     app.get(`${base}/wallets`, (req, res) => res.json(loadWallets(chainId)));
+    // 钱包盈亏: 账本里的全部仓位 (活跃 + 已关闭) + 资金概况; ?refresh=true 顺便踢一轮后台账本扫描
+    app.get(`${base}/pnl`, (req, res) => {
+      const addr = String(req.query.wallet || '').trim().toLowerCase();
+      if (!/^0x[0-9a-f]{40}$/.test(addr)) return res.status(400).json({ error: '缺少或无效的 wallet' });
+      const st = chainState(chainId);
+      const data = st.cache.data;
+      const liveWallet = (data?.wallets || []).find(w => w.address.toLowerCase() === addr) || null;
+      const wcfg = loadWallets(chainId).find(w => w.address.toLowerCase() === addr) || null;
+      const rep = ledger.walletReport(chainId, addr, liveWallet);
+      if (req.query.refresh === 'true' && ledger.enabled(chainId)) setImmediate(() => ledger.runQueue(chainId, liveByWallet(chainId)).catch(() => {}));
+      let idleUSD = null;
+      for (const [a, wI] of Object.entries(data?.idle?.byWallet || {})) if (a.toLowerCase() === addr) idleUSD = wI.totalUSD || 0;
+      let funding = null;
+      if (EVM_CHAINS[chainId].fundingFromLogs) {
+        const f = loadFundingCache(chainId)[addr];
+        if (f && (f.updatedAt || f.stopped === 'budget')) funding = { inUSD: f.inUSD || 0, outUSD: f.outUSD || 0, netUSD: (f.inUSD || 0) - (f.outUSD || 0), partial: f.stopped === 'budget', catchingUp: f.stopped === 'rpc' };
+      }
+      res.json({
+        chain: chainId, wallet: { address: addr, name: wcfg?.name || liveWallet?.name || addr, enabled: wcfg ? wcfg.enabled !== false : true },
+        ...rep, idleUSD, lpUSD: liveWallet ? (liveWallet.totalUSD || 0) : 0, funding, dataTs: data?.timestamp || 0,
+      });
+    });
     app.post(`${base}/wallets`, adminGuard, (req, res) => {
       const { address, name } = req.body;
       if (!address || !name) return res.status(400).json({ error: '需要 address 和 name' });
@@ -2428,6 +2489,11 @@ function mountEvmRoutes(app, adminGuard) {
         .then(() => console.log(`[${chainId}][auto] scheduled refresh done`))
         .catch(e => console.error(`[${chainId}][auto] scheduled refresh failed:`, e.message)));
     }, CACHE_TTL);
+    // 钱包盈亏账本后台队列: 启动 150s 后首跑 (等预热拉取先把活跃仓放进缓存), 之后每 30min 增量一轮 (每轮预算 240s, 超了下轮续)
+    if (ledger.enabled(chainId)) {
+      setTimeout(() => ledger.runQueue(chainId, liveByWallet(chainId)).catch(e => console.error(`[${chainId}] pnl-ledger:`, e.message)), 150 * 1000);
+      setInterval(() => ledger.runQueue(chainId, liveByWallet(chainId)).catch(e => console.error(`[${chainId}] pnl-ledger:`, e.message)), ledger.ROUND_MS);
+    }
     // 初始资金后台队列: 启动 90s 后首跑 (错开预热), 之后随 5min 刷新周期增量续扫 (每轮每钱包 1 段×2 方向)
     if (EVM_CHAINS[chainId].fundingFromLogs) {
       setTimeout(() => runFundingQueue(chainId).catch(e => console.error(`[${chainId}] funding queue:`, e.message)), 90 * 1000);
@@ -2455,6 +2521,7 @@ function mountEvmRoutes(app, adminGuard) {
 //   3. EVM_CHAINS.arc.pending -> false; server.js 的 CHAINS 里 arc 改 enabled:true 并删掉 pending 字段
 //   4. 加 Arc 钱包地址 -> 重启服务 -> 验证首轮抓取
 // =============================================================
-module.exports = { mountEvmRoutes, EVM_CHAINS, kickRefresh,
+module.exports = { mountEvmRoutes, EVM_CHAINS, kickRefresh, liveByWallet,
+  _ledgerApi: { EVM_CHAINS, chainState, getTokenInfo, entryPricesAtBlock, getTokenAmounts, ethUsdAtTime, loadActiveWallets, withRetry, sleep, findMintEvent, mintBlockFromScan },
   _entryTest: { getV3EntryData, getV4EntryData, getV3EntrySubgraph, getV4EntrySubgraph, getTokenInfo } };
 module.exports._collectTest = { fillLastCollect };   // 领费时间的独立验证入口 (tools/collect-check.js)  // 建仓回溯的独立验证入口
