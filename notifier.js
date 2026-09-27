@@ -39,6 +39,11 @@ function loadState() {
 }
 
 function normAddr(chain, a) { return chain === 'sol' ? String(a) : String(a).toLowerCase(); }
+// 该链标了「自有」且启用的钱包地址 (wallets.<chain> 未设置时的默认监控范围)
+function ownAddrs(chain) {
+  const file = chain === 'bsc' ? 'wallets.json' : `wallets-${chain}.json`;
+  try { return JSON.parse(fs.readFileSync(path.join(__dirname, file), 'utf8')).filter(w => w.own === true && w.enabled !== false).map(w => w.address); } catch { return []; }
+}
 
 function fmtP(v) {
   if (!v || isNaN(v)) return '?';
@@ -113,7 +118,7 @@ async function _checkInner() {
   const flips = [];        // 发送成功后才落盘的翻转 [{rec, out}]
 
   for (const [chain, apiBase] of Object.entries(CHAIN_API)) {
-    const sel = (cfg.wallets && cfg.wallets[chain]) || [];
+    const sel = (cfg.wallets && Array.isArray(cfg.wallets[chain])) ? cfg.wallets[chain] : ownAddrs(chain);   // 未单独设置 = 自有钱包
     if (!sel.length) continue;
     const selSet = new Set(sel.map(a => normAddr(chain, a)));
 

@@ -1565,7 +1565,7 @@ async function _fetchPositionsInner(forceRefresh = false) {
   const fundCfg = loadFundCfg();
   const fundSel = fundCfg.wallets.bsc;
   const fundWallets = !fundCfg.enabled ? []
-    : (!Array.isArray(fundSel) ? activeWallets() : activeWallets().filter(w => fundSel.some(a => String(a).toLowerCase() === w.address.toLowerCase())));
+    : (!Array.isArray(fundSel) ? activeWallets().filter(w => w.own === true) : activeWallets().filter(w => fundSel.some(a => String(a).toLowerCase() === w.address.toLowerCase())));   // 未单独设置 = 只看自有钱包
   let idle = null;
   if (fundWallets.length) {
     idle = lastIdleBsc || cache.data?.idle || null;
@@ -1724,8 +1724,10 @@ app.patch('/api/wallets/:address', adminGuard, (req, res) => {
   const cur = req.params.address.toLowerCase();
   const idx = WALLETS.findIndex(w => w.address.toLowerCase() === cur);
   if (idx === -1) return res.status(404).json({ error: '地址不存在' });
-  const { name, address, enabled } = req.body || {};
+  const { name, address, enabled, own } = req.body || {};
   let newName, newAddr, newEnabled;
+  let newOwn;
+  if (own !== undefined) { if (typeof own !== 'boolean') return res.status(400).json({ error: 'own 须为布尔值' }); newOwn = own; }   // 自有(true)/观察(false): 资金查询·快照·盈亏·通知默认只看自有
   if (enabled !== undefined) {
     if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled 须为布尔值' });
     newEnabled = enabled;
@@ -1739,13 +1741,14 @@ app.patch('/api/wallets/:address', adminGuard, (req, res) => {
     if (!/^0x[0-9a-f]{40}$/.test(newAddr)) return res.status(400).json({ error: '无效的 BSC 地址' });
     if (newAddr !== cur && WALLETS.some((w, i) => i !== idx && w.address.toLowerCase() === newAddr)) return res.status(409).json({ error: '地址已存在' });
   }
-  if (newName === undefined && newAddr === undefined && newEnabled === undefined) return res.status(400).json({ error: '需要 name / address / enabled' });
+  if (newName === undefined && newAddr === undefined && newEnabled === undefined && newOwn === undefined) return res.status(400).json({ error: '需要 name / address / enabled / own' });
   const old = { ...WALLETS[idx] };
   const addrChanged = newAddr !== undefined && newAddr !== cur;
   const enabledChanged = newEnabled !== undefined && newEnabled !== isWalletOn(old);
   if (newName !== undefined) WALLETS[idx].name = newName;
   if (newAddr !== undefined) WALLETS[idx].address = newAddr;
   if (newEnabled !== undefined) { if (newEnabled) delete WALLETS[idx].enabled; else WALLETS[idx].enabled = false; }
+  if (newOwn !== undefined) { if (newOwn) WALLETS[idx].own = true; else delete WALLETS[idx].own; }
   saveWallets(WALLETS);
   if (addrChanged) {
     cache = { data: null, timestamp: 0 };
@@ -1898,8 +1901,8 @@ function pnlSelectedAddrs(chain, walletAddrs) {
   const pc = loadPnlCfg();
   if (!pc.enabled) return new Set();
   const norm = a => chain === 'sol' ? String(a) : String(a).toLowerCase();
-  const arr = Array.isArray(pc.wallets[chain]) ? pc.wallets[chain] : (Array.isArray(loadFundCfg().wallets[chain]) ? loadFundCfg().wallets[chain] : null);
-  return new Set((arr || walletAddrs).map(norm));
+  if (Array.isArray(pc.wallets[chain])) return new Set(pc.wallets[chain].map(norm));
+  return new Set(WALLETS.filter(w => w.own === true).map(w => norm(w.address)));   // 未单独设置 = 只看自有钱包
 }
 app.get('/api/pnl/config', (req, res) => res.json(loadPnlCfg()));
 app.post('/api/pnl/config', adminGuard, (req, res) => {

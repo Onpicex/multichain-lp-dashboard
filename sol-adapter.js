@@ -557,7 +557,7 @@ function fundWalletsSol() {
   } catch {}
   if (!cfg.enabled) return [];
   const sel = cfg.wallets.sol;
-  if (!Array.isArray(sel)) return activeWallets();
+  if (!Array.isArray(sel)) return activeWallets().filter(w => w.own === true);   // 未单独设置 = 只看自有钱包
   return activeWallets().filter(w => sel.includes(w.address));
 }
 
@@ -901,8 +901,10 @@ function mountSolRoutes(app, adminGuard) {
   app.patch('/api/sol/wallets/:address', adminGuard, (req, res) => {
     const idx = WALLETS.findIndex(w => w.address === req.params.address);
     if (idx === -1) return res.status(404).json({ error: '地址不存在' });
-    const { name, address, enabled } = req.body || {};
+    const { name, address, enabled, own } = req.body || {};
     let newName, newAddr, newEnabled;
+    let newOwn;
+    if (own !== undefined) { if (typeof own !== 'boolean') return res.status(400).json({ error: 'own 须为布尔值' }); newOwn = own; }   // 自有(true)/观察(false): 资金查询·快照·盈亏·通知默认只看自有
     if (enabled !== undefined) {
       if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled 须为布尔值' });
       newEnabled = enabled;
@@ -917,13 +919,14 @@ function mountSolRoutes(app, adminGuard) {
       try { new PublicKey(newAddr); } catch { return res.status(400).json({ error: '无效的 Solana 地址' }); }
       if (newAddr !== WALLETS[idx].address && WALLETS.some((w, i) => i !== idx && w.address === newAddr)) return res.status(409).json({ error: '地址已存在' });
     }
-    if (newName === undefined && newAddr === undefined && newEnabled === undefined) return res.status(400).json({ error: '需要 name / address / enabled' });
+    if (newName === undefined && newAddr === undefined && newEnabled === undefined && newOwn === undefined) return res.status(400).json({ error: '需要 name / address / enabled / own' });
     const old = { ...WALLETS[idx] };
     const addrChanged = newAddr !== undefined && newAddr !== old.address;
     const enabledChanged = newEnabled !== undefined && newEnabled !== isWalletOn(old);
     if (newName !== undefined) WALLETS[idx].name = newName;
     if (newAddr !== undefined) WALLETS[idx].address = newAddr;
     if (newEnabled !== undefined) { if (newEnabled) delete WALLETS[idx].enabled; else WALLETS[idx].enabled = false; }
+    if (newOwn !== undefined) { if (newOwn) WALLETS[idx].own = true; else delete WALLETS[idx].own; }
     saveWallets(WALLETS);
     if (addrChanged) {
       cache = { data: null, timestamp: 0 };
@@ -955,9 +958,8 @@ function loadPnlCfgSol() { return readCfg('pnl-config.json'); }
 function solPnlWallets() {
   const pc = loadPnlCfgSol(); if (!pc.enabled) return [];
   const on = WALLETS.filter(w => w.enabled !== false);
-  const arr = Array.isArray(pc.wallets.sol) ? pc.wallets.sol : (Array.isArray(readCfg('fund-config.json').wallets.sol) ? readCfg('fund-config.json').wallets.sol : null);
-  if (!arr) return on;
-  const s = new Set(arr.map(String)); return on.filter(w => s.has(w.address));
+  if (!Array.isArray(pc.wallets.sol)) return on.filter(w => w.own === true);   // 未单独设置 = 只看自有钱包
+  const s = new Set(pc.wallets.sol.map(String)); return on.filter(w => s.has(w.address));
 }
 solLedger.init({
   prices: () => lastPricesSol,

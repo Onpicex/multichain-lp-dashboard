@@ -1762,16 +1762,17 @@ function loadFundCfgEvm() {
     return { enabled: c.enabled !== false, wallets: (c.wallets && typeof c.wallets === 'object') ? c.wallets : {} };
   } catch { return { enabled: true, wallets: {} }; }
 }
-// 勾选子集; 未设置(非数组)=全部钱包
+// 勾选子集; 未设置(非数组)=只看标了「自有」的钱包 (2026-09-28 起; 之前是全部钱包)
+function ownWallets(WALLETS) { return WALLETS.filter(w => w.own === true); }
 function fundSelected(fundCfg, chainId, WALLETS) {
   if (!fundCfg.enabled) return [];
   const sel = fundCfg.wallets[chainId];
-  if (!Array.isArray(sel)) return WALLETS;
+  if (!Array.isArray(sel)) return ownWallets(WALLETS);
   const s = new Set(sel.map(a => String(a).toLowerCase()));
   return WALLETS.filter(w => s.has(w.address.toLowerCase()));
 }
 // --- 钱包盈亏账本配置 (pnl-config.json, 与 server.js 的 /api/pnl/config 同一文件): { enabled, wallets: {<chain>: [addrs]} }
-//   wallets.<chain> 未设置 = 沿用「钱包资金查询」(fund-config) 该链的勾选 (那边也未设置则全部钱包); [] = 全不参与; 数组 = 勾选子集
+//   wallets.<chain> 未设置 = 只看标了「自有」的钱包; [] = 全不参与; 数组 = 勾选子集 (例外覆盖)
 //   只有勾选的钱包才进账本队列 (别人的观察钱包动辄两千笔 tx, 用户不需要看它们的盈亏)
 function loadPnlCfgEvm() {
   try {
@@ -1784,9 +1785,7 @@ function pnlSelected(chainId, WALLETS) {
   if (!pc.enabled) return [];
   const pick = arr => { const s = new Set(arr.map(a => String(a).toLowerCase())); return WALLETS.filter(w => s.has(w.address.toLowerCase())); };
   if (Array.isArray(pc.wallets[chainId])) return pick(pc.wallets[chainId]);
-  const fsel = loadFundCfgEvm().wallets[chainId];
-  if (Array.isArray(fsel)) return pick(fsel);
-  return WALLETS;
+  return ownWallets(WALLETS);   // 未单独设置 = 只看自有钱包
 }
 // 兜底快照按当前勾选过滤 (配置变更后旧快照可能含未勾选钱包)
 function filterIdleByWallets(idle, walletsSel) {
@@ -2433,8 +2432,10 @@ function mountEvmRoutes(app, adminGuard) {
       const wallets = loadWallets(chainId);
       const idx = wallets.findIndex(w => w.address.toLowerCase() === cur);
       if (idx === -1) return res.status(404).json({ error: '地址不存在' });
-      const { name, address, enabled } = req.body || {};
+      const { name, address, enabled, own } = req.body || {};
       let newName, newAddr, newEnabled;
+      let newOwn;
+      if (own !== undefined) { if (typeof own !== 'boolean') return res.status(400).json({ error: 'own 须为布尔值' }); newOwn = own; }   // 自有(true)/观察(false): 资金查询·快照·盈亏·通知默认只看自有
       if (enabled !== undefined) {
         if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled 须为布尔值' });
         newEnabled = enabled;
@@ -2448,13 +2449,14 @@ function mountEvmRoutes(app, adminGuard) {
         if (!/^0x[0-9a-f]{40}$/.test(newAddr)) return res.status(400).json({ error: '无效的 EVM 地址' });
         if (newAddr !== cur && wallets.some((w, i) => i !== idx && w.address.toLowerCase() === newAddr)) return res.status(409).json({ error: '地址已存在' });
       }
-      if (newName === undefined && newAddr === undefined && newEnabled === undefined) return res.status(400).json({ error: '需要 name / address / enabled' });
+      if (newName === undefined && newAddr === undefined && newEnabled === undefined && newOwn === undefined) return res.status(400).json({ error: '需要 name / address / enabled / own' });
       const old = { ...wallets[idx] };
       const addrChanged = newAddr !== undefined && newAddr !== cur;
       const enabledChanged = newEnabled !== undefined && newEnabled !== isWalletOn(old);
       if (newName !== undefined) wallets[idx].name = newName;
       if (newAddr !== undefined) wallets[idx].address = newAddr;
       if (newEnabled !== undefined) { if (newEnabled) delete wallets[idx].enabled; else wallets[idx].enabled = false; }
+      if (newOwn !== undefined) { if (newOwn) wallets[idx].own = true; else delete wallets[idx].own; }
       saveWallets(chainId, wallets);
       const st = chainState(chainId);
       if (addrChanged) {

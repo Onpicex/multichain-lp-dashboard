@@ -70,6 +70,11 @@ function localParts(ts, tz) {
 function hmToMin(hm) { const [h, m] = hm.split(':').map(Number); return h * 60 + m; }
 
 function normAddr(chain, a) { return chain === 'sol' ? String(a) : String(a).toLowerCase(); }
+// 该链标了「自有」且启用的钱包 (wallets.<chain> 未设置时的默认快照范围)
+function ownAddrs(chain) {
+  const file = chain === 'bsc' ? 'wallets.json' : `wallets-${chain}.json`;
+  try { return JSON.parse(fs.readFileSync(path.join(__dirname, file), 'utf8')).filter(w => w.own === true && w.enabled !== false).map(w => w.address); } catch { return []; }
+}
 
 function fetchLocal(pathname, timeoutMs = 90 * 1000) {
   return new Promise((resolve, reject) => {
@@ -163,7 +168,7 @@ async function _takeSnapshot({ mode = 'manual', late = false } = {}) {
   for (const ch of CHAINS) {
     const d = result[ch];
     if (!d || d._err) { failed.push(ch); continue; }
-    const s = summarizeChain(ch, d, cfg.wallets[ch]);
+    const s = summarizeChain(ch, d, Array.isArray(cfg.wallets[ch]) ? cfg.wallets[ch] : ownAddrs(ch));
     if (!s) { failed.push(ch); continue; }
     const ageMin = Math.round((Date.now() - (s.dataTs || 0)) / 60000);
     if (ageMin * 60000 > FRESH_MS) { s.stale = ageMin; stale.push(ch); }

@@ -209,6 +209,12 @@
   .st-sub-page .nm-status { padding: 8px 2px 0; margin-bottom: 0; }
   .st-sub-page .st-sub { padding: 12px 2px 0; margin: 0; }
   .st-sub-page .sn-tw { margin-top: 6px; }
+  .st-eff { padding: 8px 2px 4px; }
+  .st-eff-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .st-eff-label { font-size: 11.5px; color: var(--text-dim); margin-right: 4px; white-space: nowrap; }
+  .st-eff-name { font-size: 11.5px; font-weight: 600; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; }
+  .st-eff-name.off { color: var(--text-muted); text-decoration: line-through; }
+  .st-eff .nm-test-btn { margin-left: 6px; }
   .st-table th:nth-child(2), .st-table td.st-addr, .st-table th:nth-child(3), .st-table td.st-state { text-align: left; }
   .st-table td.st-name { font-family: var(--font); font-weight: 600; color: var(--text); }
   .st-table td.st-addr { font-size: 11.5px; color: var(--text-dim); user-select: all; }
@@ -328,6 +334,9 @@
   }
   .wm-edit-btn:hover { color: var(--accent); background: var(--surface2, rgba(120,120,160,0.15)); }
   /* 钱包启停 (小眼睛): 停用=不抓取该钱包数据 */
+  .wm-own-btn { font-family: var(--font); font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 9px; border: 1px solid var(--border); background: transparent; color: var(--text-muted); cursor: pointer; margin-right: 6px; flex-shrink: 0; transition: all 0.12s; }
+  .wm-own-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .wm-own-btn.on { color: var(--green); border-color: rgba(34,197,94,0.45); background: var(--green-dim); }
   .wm-eye-btn {
     background: transparent; border: none; color: var(--text-dim);
     cursor: pointer; padding: 2px 6px; border-radius: 4px; display: inline-flex; align-items: center;
@@ -926,7 +935,7 @@
         </div>
         <label class="switch" title="启用/关闭本功能"><input type="checkbox" id="fdEnabled" onchange="saveFdCfg()"><span class="switch-track"></span></label>
       </div>
-      <div class="st-sub">参与查询的钱包 <span class="st-sub-note">未勾选的不查余额、不计入总价值</span></div>
+      <div class="st-sub">生效的钱包 <span class="st-sub-note">默认 = 管理钱包里标「自有」的；观察钱包不查余额、不计入总价值</span></div>
       <div class="sn-tw" id="fdList"></div>
       <div class="wm-error" id="fdError"></div>
     </section>
@@ -934,11 +943,11 @@
       <div class="st-head">
         <div class="st-head-main">
           <div class="st-title">钱包盈亏</div>
-          <div class="st-desc">左侧「钱包盈亏」页只列勾选的钱包，账本（真实开仓成本与历史仓位）也只给勾选的钱包扫 · 未单独勾选的链沿用「钱包资金查询」的勾选</div>
+          <div class="st-desc">左侧「钱包盈亏」页只列自有钱包，账本（真实开仓成本与历史仓位）也只给自有钱包扫；自有 / 观察在总览页「管理钱包」里标</div>
         </div>
         <label class="switch" title="启用/关闭钱包盈亏账本"><input type="checkbox" id="pnEnabled" onchange="savePnCfg()"><span class="switch-track"></span></label>
       </div>
-      <div class="st-sub">参与盈亏统计的钱包 <span class="st-sub-note" id="pnSubNote">未勾选的不扫账本、不在盈亏页显示</span> <button class="nm-test-btn" id="pnFollowBtn" onclick="pnFollowFund()" style="display:none">恢复沿用资金查询勾选</button></div>
+      <div class="st-sub">生效的钱包 <span class="st-sub-note" id="pnSubNote">默认 = 管理钱包里标「自有」的；观察钱包不扫账本、不在盈亏页显示</span> <button class="nm-test-btn" id="pnFollowBtn" onclick="pnFollowFund()" style="display:none">改为跟随自有</button></div>
       <div class="sn-tw" id="pnList"></div>
       <div class="wm-error" id="pnError"></div>
     </section>
@@ -946,7 +955,7 @@
       <div class="st-head">
         <div class="st-head-main">
           <div class="st-title">资金快照 <span class="st-badge" id="spCount">0 天</span></div>
-          <div class="st-desc">每天到点自动记录一次「钱包余额 + LP 价值」，在左侧「资金快照」页查看逐日增减 · 钱包余额部分沿用「钱包资金查询」的勾选，未勾选的钱包只记 LP</div>
+          <div class="st-desc">每天到点自动记录一次「钱包余额 + LP 价值」，在左侧「资金快照」页查看逐日增减 · 只记自有钱包</div>
         </div>
         <label class="switch" title="启用/关闭每日自动快照"><input type="checkbox" id="spEnabled" onchange="saveSpCfg()"><span class="switch-track"></span></label>
       </div>
@@ -956,7 +965,7 @@
         <button class="nm-test-btn" id="spNowBtn" onclick="snapNow()">立即快照</button>
       </div>
       <div class="nm-status" id="spStatus"></div>
-      <div class="st-sub">参与快照的钱包 <span class="st-sub-note">未勾选的钱包不计入快照</span></div>
+      <div class="st-sub">生效的钱包 <span class="st-sub-note">默认 = 管理钱包里标「自有」的；观察钱包不计入快照</span></div>
       <div class="sn-tw" id="spList"></div>
       <div class="wm-error" id="spError"></div>
     </section>
@@ -976,7 +985,7 @@
         <button class="nm-test-btn" id="nmTestBtn" onclick="testNotify()">发送测试</button>
       </div>
       <div class="nm-status" id="nmStatus"></div>
-      <div class="st-sub">监控的钱包 <span class="st-sub-note">仅勾选的钱包触发通知</span></div>
+      <div class="st-sub">生效的钱包 <span class="st-sub-note">默认 = 管理钱包里标「自有」的；只有这些钱包的仓位出区间才通知</span></div>
       <div class="sn-tw" id="nmList"></div>
       <div class="wm-error" id="nmError"></div>
     </section>
@@ -1199,7 +1208,8 @@ function renderWalletList() {
         <span class="wm-item-name">${escH(w.name)}</span>${on ? '' : '<span class="wm-off-tag">已停用</span>'}
         <span class="wm-item-addr">${escH(w.address)}</span>
       </div>
-      <div style="display:flex;flex-shrink:0;">
+      <div style="display:flex;flex-shrink:0;align-items:center;">
+        <button class="wm-own-btn${w.own ? ' on' : ''}" onclick="toggleWalletOwn('${w.address}', ${w.own ? 'false' : 'true'})" title="${w.own ? '自有钱包 · 资金查询/快照/盈亏/通知默认都看它 · 点击改为观察' : '观察钱包 (别人的) · 只看仓位, 不进资金/快照/盈亏/通知 · 点击改为自有'}">${w.own ? '自有' : '观察'}</button>
         <button class="wm-eye-btn${on ? '' : ' off'}" onclick="toggleWalletEnabled('${w.address}', ${on ? 'false' : 'true'})" title="${on ? '已启用 · 点击停用（不再抓取此钱包的仓位与余额）' : '已停用 · 点击启用（恢复抓取）'}">${on ? EYE_ON : EYE_OFF}</button>
         <button class="wm-edit-btn" onclick="editWallet('${w.address}')" title="编辑">✏️</button>
         <button class="wm-del-btn" onclick="delWallet('${w.address}')" title="删除">✖</button>
@@ -1291,6 +1301,17 @@ async function addWallet() {
 const EYE_ON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
 const EYE_OFF = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
 function wOn(w) { return w.enabled !== false; }
+async function toggleWalletOwn(addr, own) {
+  const errEl = $('wmError'); errEl.style.display = 'none';
+  try {
+    const r = await fetch(apiBase() + '/wallets/' + encodeURIComponent(addr), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ own: !!own }) });
+    const d = await r.json();
+    if (!r.ok) { errEl.textContent = d.error || '操作失败'; errEl.style.display = 'block'; return; }
+    walletList = d.wallets;
+    renderWalletList();
+    if (typeof renderStTabs === 'function') renderStTabs();
+  } catch (e) { errEl.textContent = e.message; errEl.style.display = 'block'; }
+}
 async function toggleWalletEnabled(addr, enable) {
   const errEl = $('wmError');
   errEl.style.display = 'none';
@@ -1384,13 +1405,23 @@ function protoTag(p) {
   return `<span class="protocol-tag ${proto.toLowerCase()}">${proto}</span>`;
 }
 
-// 设置页钱包列表 (四处共用): 与钱包盈亏页同款表格, 地址整列完整显示 (不再省略号截断), 参与开关用小拨杆
-function stRows(isChecked, fn) {
+// 设置页各功能的「生效钱包」(四处共用): 默认 = 管理钱包里标了「自有」的; 本链有单独设置 (例外) 时列出并给「改为跟随自有」
+//   explicitArr: 本链单独设置的地址数组 (无则 null); followFn: 点「改为跟随自有」时调用的函数名
+function stEffective(explicitArr, followFn) {
   if (!walletList.length) return wmHint();
-  return '<table class="sn-table st-table"><thead><tr><th>钱包</th><th>地址</th><th>状态</th><th>参与</th></tr></thead><tbody>'
-    + walletList.map(w => `<tr class="${wOn(w) ? '' : 'off'}"><td class="st-name">${escH(w.name)}</td><td class="st-addr">${escH(w.address)}</td><td class="st-state">${wOn(w) ? '<span class="pn-st act">启用</span>' : '<span class="pn-st cls">已停用</span>'}</td><td class="st-sw"><label class="switch sm"><input type="checkbox" ${isChecked(w) ? 'checked' : ''} onchange="${fn}('${escH(w.address)}', this.checked)"><span class="switch-track"></span></label></td></tr>`).join('')
-    + '</tbody></table>';
+  const own = walletList.filter(w => w.own === true && wOn(w));
+  const eff = Array.isArray(explicitArr) ? walletList.filter(w => explicitArr.some(a => nmNorm(a) === nmNorm(w.address))) : own;
+  const names = eff.map(w => '<span class="st-eff-name' + (wOn(w) ? '' : ' off') + '">' + escH(w.name) + '</span>').join('') || '<span class="st-sub-note">无</span>';
+  let h = '<div class="st-eff">';
+  if (Array.isArray(explicitArr)) h += '<div class="st-eff-row"><span class="st-eff-label">本链单独设置 · ' + eff.length + ' 个</span>' + names + '<button class="nm-test-btn" onclick="' + followFn + '()">改为跟随自有</button></div>';
+  else h += '<div class="st-eff-row"><span class="st-eff-label">自有钱包 · ' + eff.length + ' 个</span>' + names + '</div>';
+  if (!own.length && !Array.isArray(explicitArr)) h += '<div class="st-sub-note" style="margin-top:6px">本链还没有标「自有」的钱包 — 到总览页「💼 管理钱包」里把你自己的钱包点成「自有」</div>';
+  h += '</div>';
+  return h;
 }
+function fdFollowOwn() { if (fdCfg && fdCfg.wallets) { delete fdCfg.wallets[activeChain]; saveFdCfg(); } }
+function spFollowOwn() { if (spCfg && spCfg.wallets) { delete spCfg.wallets[activeChain]; saveSpCfg(); } }
+function nmFollowOwn() { if (notifyCfg && notifyCfg.wallets) { delete notifyCfg.wallets[activeChain]; saveNotifyCfg(); } }
 // 开仓成本按币拆分的悬浮文本: costBy = { token地址: { q: 存入数量(毛), cost: 分摊成本 } }; tokens = [{address, symbol}]
 function costTip(costBy, tokens) {
   if (!costBy) return '';
@@ -1800,15 +1831,16 @@ const ST_PAGES = [
 let stKey = null;
 function stState(key) {   // 标签上的状态摘要 (当前链)
   const n = walletList.length;
-  const cnt = arr => Array.isArray(arr) ? arr.length : n;
+  const ownN = walletList.filter(w => w.own === true && wOn(w)).length;
+  const cnt = arr => Array.isArray(arr) ? arr.length : ownN;
   switch (key) {
     case 'wallets': return { on: wmShown(), text: wmShown() ? `${n} · 面板显示` : `${n} · 面板隐藏` };
-    case 'fund': return fdCfg ? { on: fdCfg.enabled !== false, text: fdCfg.enabled === false ? '关' : `${cnt((fdCfg.wallets || {})[activeChain])}/${n}` } : null;
+    case 'fund': return fdCfg ? { on: fdCfg.enabled !== false, text: fdCfg.enabled === false ? '关' : `${cnt((fdCfg.wallets || {})[activeChain])}/${n}${Array.isArray((fdCfg.wallets || {})[activeChain]) ? '' : ' · 自有'}` } : null;
     case 'pnl': {
       if (!pnCfg) return null;
       const sel = pnCfgSel(activeChain);
-      const c = sel ? walletList.filter(w => sel.has(nmNorm(w.address))).length : n;
-      return { on: pnCfg.enabled !== false, text: pnCfg.enabled === false ? '关' : `${c}/${n}${Array.isArray((pnCfg.wallets || {})[activeChain]) ? '' : ' · 沿用'}` };
+      const c = sel ? walletList.filter(w => sel.has(nmNorm(w.address))).length : ownN;
+      return { on: pnCfg.enabled !== false, text: pnCfg.enabled === false ? '关' : `${c}/${n}${sel ? '' : ' · 自有'}` };
     }
     case 'snapshot': return spCfg ? { on: spCfg.enabled !== false, text: spCfg.enabled === false ? '关' : `${spCfg.time || '00:05'} · ${cnt((spCfg.wallets || {})[activeChain])}/${n}` } : null;
     case 'notify': return notifyCfg ? { on: !!notifyCfg.enabled, text: notifyCfg.enabled ? `${nmSelArr().length}/${n} · ${notifyCfg.intervalMin || 5}分` : '关' } : null;
@@ -1952,7 +1984,7 @@ function renderFd() {
   if (!fdCfg) return;
   $('fdEnabled').checked = fdCfg.enabled !== false;
   const sel = fdSelSet();
-  $('fdList').innerHTML = stRows(w => (sel === null || sel.has(nmNorm(w.address))), 'fdToggleWallet');
+  $('fdList').innerHTML = stEffective(Array.isArray((fdCfg.wallets || {})[activeChain]) ? fdCfg.wallets[activeChain] : null, 'fdFollowOwn');
 }
 function fdToggleWallet(addr, on) {
   // 未设置(全选)状态下首次改动: 先物化为全量列表再增删
@@ -1992,10 +2024,10 @@ async function loadNotifyCfg() {
   } catch (e) { console.error('通知配置加载失败:', e); }
 }
 function nmNorm(a) { return activeChain === 'sol' ? String(a) : String(a).toLowerCase(); }
-function nmSelArr() {
+function nmSelArr() {   // 生效的通知钱包: 本链单独设置 → 该数组; 否则自有钱包
   if (!notifyCfg.wallets || typeof notifyCfg.wallets !== 'object') notifyCfg.wallets = {};
-  if (!Array.isArray(notifyCfg.wallets[activeChain])) notifyCfg.wallets[activeChain] = [];
-  return notifyCfg.wallets[activeChain];
+  if (Array.isArray(notifyCfg.wallets[activeChain])) return notifyCfg.wallets[activeChain];
+  return walletList.filter(w => w.own === true && wOn(w)).map(w => w.address);
 }
 function renderNotify() {
   if (!notifyCfg) return;
@@ -2005,7 +2037,7 @@ function renderNotify() {
   $('nmRecover').checked = notifyCfg.notifyRecover !== false;
   $('nmInterval').value = String(notifyCfg.intervalMin || 5);
   const sel = new Set(nmSelArr().map(nmNorm));
-  $('nmList').innerHTML = stRows(w => sel.has(nmNorm(w.address)), 'nmToggleWallet');
+  $('nmList').innerHTML = stEffective(Array.isArray((notifyCfg.wallets || {})[activeChain]) ? notifyCfg.wallets[activeChain] : null, 'nmFollowOwn');
   const ch = notifyCfg.channelReady
     ? '<span style="color:var(--green)">哨兵 Telegram ●</span>'
     : '<span style="color:var(--red)">哨兵 Telegram ● 服务器未配置</span>';
@@ -2385,7 +2417,7 @@ function renderSp() {
   const nx = !spCfg.enabled ? '自动快照已停用' : (spCfg.todayDone ? '今日已完成，下次 明天 ' + spCfg.time : '下次 今天 ' + spCfg.time + (spCfg.running ? '（进行中…）' : ''));
   $('spStatus').innerHTML = escH(lr) + ' · ' + escH(nx) + (spCfg.lastError ? ' · <span style="color:var(--red)">上次失败: ' + escH(spCfg.lastError) + '</span>' : '');
   const sel = spSelSet();
-  $('spList').innerHTML = stRows(w => (sel === null || sel.has(nmNorm(w.address))), 'spToggleWallet');
+  $('spList').innerHTML = stEffective(Array.isArray((spCfg.wallets || {})[activeChain]) ? spCfg.wallets[activeChain] : null, 'spFollowOwn');
 }
 function spToggleWallet(addr, on) {
   if (!Array.isArray(spCfg.wallets[activeChain])) spCfg.wallets[activeChain] = walletList.map(w => nmNorm(w.address));
@@ -2425,12 +2457,10 @@ async function loadPnCfg() {
   } catch (e) { console.error('钱包盈亏配置加载失败:', e); }
 }
 // 解析后的勾选集合 (指定链): null = 全部钱包
-function pnCfgSel(chain) {
+function pnCfgSel(chain) {   // 解析后的勾选集合: 本链单独设置 → 该数组; 否则 null (= 由调用方按「自有」过滤)
   const norm = a => chain === 'sol' ? String(a) : String(a).toLowerCase();
   const arr = pnCfg && pnCfg.wallets ? pnCfg.wallets[chain] : null;
   if (Array.isArray(arr)) return new Set(arr.map(norm));
-  const f = fdCfg && fdCfg.wallets ? fdCfg.wallets[chain] : null;
-  if (Array.isArray(f)) return new Set(f.map(norm));
   return null;
 }
 function renderPnCfg() {
@@ -2438,9 +2468,9 @@ function renderPnCfg() {
   $('pnEnabled').checked = pnCfg.enabled !== false;
   const explicit = Array.isArray((pnCfg.wallets || {})[activeChain]);
   const sel = pnCfgSel(activeChain);
-  $('pnSubNote').textContent = explicit ? '本链单独设置 · 未勾选的不扫账本、不在盈亏页显示' : '当前沿用「钱包资金查询」的勾选 · 改动任一项后转为本链单独设置';
-  $('pnFollowBtn').style.display = explicit ? '' : 'none';
-  $('pnList').innerHTML = stRows(w => (sel === null || sel.has(nmNorm(w.address))), 'pnCfgToggleWallet');
+  $('pnSubNote').textContent = explicit ? '本链单独设置' : '跟随管理钱包里的「自有」标记';
+  $('pnFollowBtn').style.display = 'none';
+  $('pnList').innerHTML = stEffective(Array.isArray((pnCfg.wallets || {})[activeChain]) ? pnCfg.wallets[activeChain] : null, 'pnFollowFund');
 }
 function pnCfgToggleWallet(addr, on) {
   if (!pnCfg.wallets || typeof pnCfg.wallets !== 'object') pnCfg.wallets = {};
@@ -2506,7 +2536,7 @@ async function pnLoadWallets() {
     const all = r.ok ? await r.json() : [];
     // 只列设置页「钱包盈亏」勾选的钱包 (未单独勾选的链沿用「钱包资金查询」的勾选)
     const sel = pnCfgSel(pnChain);
-    pnWalletsByChain[pnChain] = all.filter(w => sel === null || sel.has(pnChain === 'sol' ? String(w.address) : String(w.address).toLowerCase()));
+    pnWalletsByChain[pnChain] = all.filter(w => sel === null ? w.own === true : sel.has(pnChain === 'sol' ? String(w.address) : String(w.address).toLowerCase()));
   } catch { pnWalletsByChain[pnChain] = []; }
   const list = pnWalletsByChain[pnChain] || [];
   if (!pnWallet || !list.some(w => pnSame(w.address, pnWallet))) pnWallet = (list.find(w => w.enabled !== false) || list[0] || {}).address || null;
