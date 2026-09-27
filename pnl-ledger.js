@@ -991,8 +991,10 @@ function applyPnl(pos, src, priceOf) {
   pos.costBasisUSD = src.cost;
   pos.costApprox = !!src.approx;
   pos.costSource = src.source;
+  // Solana mint 是大小写敏感的 base58, 先按原样查价, 再退回小写 (EVM 地址)
+  const px = tok => priceOf(tok) || priceOf(low(tok)) || 0;
   let hodl = 0, any = false;
-  for (const [tok, q] of Object.entries(src.am || {})) { const p = priceOf(low(tok)) || 0; if (q && p) { hodl += q * p; any = true; } }
+  for (const [tok, q] of Object.entries(src.am || {})) { const p = px(tok); if (q && p) { hodl += q * p; any = true; } }
   if (any) {
     pos.hodlValueUSD = hodl;
     pos.ilUSD = (pos.positionValueUSD || 0) - hodl;
@@ -1001,7 +1003,7 @@ function applyPnl(pos, src, priceOf) {
   let collected = src.collectedUSD;
   if (collected == null) {
     const cf = pos.collectedFees || {};
-    collected = (cf.token0 || 0) * (priceOf(low(pos.token0.address)) || 0) + (cf.token1 || 0) * (priceOf(low(pos.token1.address)) || 0);
+    collected = (cf.token0 || 0) * px(pos.token0.address) + (cf.token1 || 0) * px(pos.token1.address);
   }
   pos.collectedFeesUSD = collected;
   pos.withdrawnUSD = src.withdrawnUSD || 0;
