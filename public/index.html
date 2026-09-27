@@ -37,7 +37,7 @@
     width: 200px; flex-shrink: 0;
     background: var(--surface); border-right: 1px solid var(--border);
     display: flex; flex-direction: column;
-    position: sticky; top: 0; height: 100vh;
+    position: sticky; top: 0; height: 100vh; overflow-y: auto;
   }
   .sidebar-logo {
     display: flex; align-items: center; gap: 10px;
@@ -123,6 +123,7 @@
     .nav-item .chain-name { display: none; }
     .nav-item .chain-ico { width: 26px; height: 26px; font-size: 12px; }
     .nav-soon { display: none; }
+    .st-subnav { display: none; }   /* 手机端: 只留 ⚙, 从设置目录页进子页 */
   }
 
   /* ── Header ── */
@@ -247,7 +248,45 @@
   .st-grid .nm-hint { grid-column: 1 / -1; }
   .st-card select { background: var(--bg); }
   .st-card .nm-test-btn { margin-left: auto; }
+  /* 设置子页面 (侧栏「设置」下每个功能一页): 目录 + 子页 */
+  .st-subnav { display: flex; flex-direction: column; margin: 0 8px 4px 26px; border-left: 1px solid var(--border); padding-left: 4px; }
+  .nav-item.sub { padding: 7px 10px; margin: 1px 0; width: auto; font-size: 12px; font-weight: 500; gap: 8px; }
+  .nav-item.sub .st-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border-light); flex-shrink: 0; }
+  .nav-item.sub.active .st-dot { background: var(--accent); }
+  .nav-item.sub .chain-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .st-crumb { cursor: pointer; color: var(--text-muted); }
+  .st-crumb:hover { color: var(--accent); }
+  .st-index { display: flex; flex-direction: column; gap: 10px; }
+  .st-idx {
+    display: flex; align-items: center; gap: 14px; padding: 15px 18px; width: 100%;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    cursor: pointer; text-align: left; color: var(--text); font-family: var(--font);
+    transition: border-color 0.12s, background 0.12s;
+  }
+  .st-idx:hover { border-color: var(--accent); background: var(--surface-hover); }
+  .st-idx-main { flex: 1; min-width: 0; }
+  .st-idx-title { font-size: 14px; font-weight: 700; }
+  .st-idx-desc { font-size: 11.5px; color: var(--text-muted); margin-top: 3px; line-height: 1.5; }
+  .st-idx-state { font-family: var(--mono); font-size: 11px; color: var(--text-dim); white-space: nowrap; text-align: right; }
+  .st-idx-state.on { color: var(--green); }
+  .st-idx-state.off { color: var(--text-muted); }
+  .st-idx-arrow { color: var(--text-muted); font-size: 18px; line-height: 1; }
+  .st-sub-page .st-card-head { padding: 18px 20px; }
+  .st-sub-page .st-card-title { font-size: 16px; }
+  .st-sub-page .st-card-desc { font-size: 12.5px; margin-top: 5px; }
+  .st-sub-page .st-card-body { padding: 18px 20px 20px; }
+  .st-sub-page .st-sub { font-size: 12.5px; }
+  .st-sub-page .st-grid { grid-template-columns: 1fr; gap: 6px; }
+  .st-sub-page .st-grid .wm-item { padding: 11px 14px; font-size: 13px; }
+  .st-sub-page .st-grid .wm-item input[type="checkbox"] { width: 16px; height: 16px; }
+  .st-sub-page .switch { width: 48px; height: 27px; }
+  .st-sub-page .switch-track::after { width: 21px; height: 21px; }
+  .st-sub-page .switch input:checked + .switch-track::after { transform: translateX(21px); }
   @media (max-width: 480px) {
+    .st-idx { padding: 12px 14px; gap: 10px; }
+    .st-idx-state { font-size: 10px; max-width: 34%; white-space: normal; }
+    .st-sub-page .st-card-head { padding: 14px; }
+    .st-sub-page .st-card-body { padding: 14px; }
     .st-page { padding: 12px 0 30px; gap: 12px; }
     .st-card-head { padding: 13px 14px; gap: 10px; }
     .st-card-body { padding: 12px 14px 14px; }
@@ -812,6 +851,13 @@
       <button class="nav-item" id="stNavBtn" onclick="openSettings()">
         <span class="chain-ico set">⚙</span> <span class="chain-name">设置</span>
       </button>
+      <div class="st-subnav" id="stSubNav">
+        <button class="nav-item sub" data-st="wallets" onclick="openSettings('wallets')"><span class="st-dot"></span><span class="chain-name">管理钱包</span></button>
+        <button class="nav-item sub" data-st="fund" onclick="openSettings('fund')"><span class="st-dot"></span><span class="chain-name">钱包资金查询</span></button>
+        <button class="nav-item sub" data-st="pnl" onclick="openSettings('pnl')"><span class="st-dot"></span><span class="chain-name">钱包盈亏</span></button>
+        <button class="nav-item sub" data-st="snapshot" onclick="openSettings('snapshot')"><span class="st-dot"></span><span class="chain-name">资金快照</span></button>
+        <button class="nav-item sub" data-st="notify" onclick="openSettings('notify')"><span class="st-dot"></span><span class="chain-name">出区间通知</span></button>
+      </div>
     </nav>
     <div class="sidebar-footer">UNISWAP V3+V4<br>v2.0 · rebuilt</div>
   </aside>
@@ -899,14 +945,18 @@
 <div id="settingsView" style="display:none;">
   <div class="header">
     <div class="header-left">
-      <span class="header-title">设置</span>
+      <span class="header-title" id="stTitle">设置</span>
     </div>
     <div class="header-right">
       <span class="chain-tag" id="stChainTag">BSC</span>
+      <button class="sn-btn2" id="stBackBtn" onclick="openSettings()" style="display:none">返回设置</button>
       <button class="refresh-btn" onclick="closeSettings()">返回总览</button>
     </div>
   </div>
   <div class="st-page">
+    <!-- 设置目录: 每个功能一个子页面 (侧栏「设置」下的子项 / 手机端从这里进) -->
+    <div class="st-index" id="stIndex"></div>
+    <section class="st-sub-page" data-st="wallets" style="display:none">
     <div class="st-card">
       <div class="st-card-head">
         <div class="st-card-ico wm">💼</div>
@@ -921,6 +971,8 @@
         <div class="wm-error" id="wmStError"></div>
       </div>
     </div>
+    </section>
+    <section class="st-sub-page" data-st="fund" style="display:none">
     <div class="st-card">
       <div class="st-card-head">
         <div class="st-card-ico fund">💰</div>
@@ -936,6 +988,8 @@
         <div class="wm-error" id="fdError"></div>
       </div>
     </div>
+    </section>
+    <section class="st-sub-page" data-st="pnl" style="display:none">
     <div class="st-card">
       <div class="st-card-head">
         <div class="st-card-ico pnl">盈</div>
@@ -951,6 +1005,8 @@
         <div class="wm-error" id="pnError"></div>
       </div>
     </div>
+    </section>
+    <section class="st-sub-page" data-st="snapshot" style="display:none">
     <div class="st-card">
       <div class="st-card-head">
         <div class="st-card-ico snap">📷</div>
@@ -972,6 +1028,8 @@
         <div class="wm-error" id="spError"></div>
       </div>
     </div>
+    </section>
+    <section class="st-sub-page" data-st="notify" style="display:none">
     <div class="st-card">
       <div class="st-card-head">
         <div class="st-card-ico bell">🔔</div>
@@ -995,6 +1053,7 @@
         <div class="wm-error" id="nmError"></div>
       </div>
     </div>
+    </section>
   </div>
 </div><!-- /#settingsView -->
 
@@ -1802,16 +1861,66 @@ function showView(name) {
   $('snapView').style.display = snapOpen ? 'block' : 'none';
   $('pnlView').style.display = pnlOpen ? 'block' : 'none';
   $('stNavBtn').classList.toggle('active', settingsOpen);
+  if (!settingsOpen) document.querySelectorAll('#stSubNav .nav-item').forEach(b => b.classList.remove('active'));
   $('snNavBtn').classList.toggle('active', snapOpen);
   $('pnNavBtn').classList.toggle('active', pnlOpen);
   document.querySelectorAll('#chainNav .nav-item').forEach(b => b.classList.toggle('active', name === 'dash' && b.dataset.chain === activeChain));
   if (name !== 'dash') { try { localStorage.setItem('lpChain', activeChain); } catch {} }   // hash 被占用, 刷新后靠它恢复链
 }
-function openSettings() {
+// 设置 = 目录页 (#settings) + 每个功能一个子页面 (#settings/<key>); 侧栏「设置」下列出子项, 手机端只留 ⚙ 从目录进
+const ST_PAGES = [
+  { key: 'wallets', ico: 'wm', icon: '💼', title: '管理钱包', desc: '总览页「管理钱包」面板的显示 / 隐藏；添加、编辑、停用钱包在总览页面板里操作' },
+  { key: 'fund', ico: 'fund', icon: '💰', title: '钱包资金查询', desc: '统计条显示钱包余额与初始资金；按链勾选参与查询的钱包' },
+  { key: 'pnl', ico: 'pnl', icon: '盈', title: '钱包盈亏', desc: '「钱包盈亏」页与账本只看勾选的钱包；未单独勾选的链沿用资金查询的勾选' },
+  { key: 'snapshot', ico: 'snap', icon: '📷', title: '资金快照', desc: '每天到点记录一次「钱包余额 + LP 价值」；快照时间与参与的钱包' },
+  { key: 'notify', ico: 'bell', icon: '🔔', title: '出区间通知', desc: '勾选钱包的活跃仓位出区间时，经哨兵 Telegram 推送' },
+];
+let stKey = null;
+function stState(key) {   // 目录页右侧的状态摘要 (当前链)
+  const n = walletList.length;
+  const cnt = arr => Array.isArray(arr) ? arr.length : n;
+  switch (key) {
+    case 'wallets': return { on: wmShown(), text: `${n} 个钱包 · 面板${wmShown() ? '显示' : '隐藏'}` };
+    case 'fund': return fdCfg ? { on: fdCfg.enabled !== false, text: fdCfg.enabled === false ? '已关闭' : `${cnt((fdCfg.wallets || {})[activeChain])}/${n} 个钱包` } : null;
+    case 'pnl': {
+      if (!pnCfg) return null;
+      const sel = pnCfgSel(activeChain);
+      const c = sel ? walletList.filter(w => sel.has(nmNorm(w.address))).length : n;
+      return { on: pnCfg.enabled !== false, text: pnCfg.enabled === false ? '已关闭' : `${c}/${n} 个钱包${Array.isArray((pnCfg.wallets || {})[activeChain]) ? '' : ' · 沿用资金查询'}` };
+    }
+    case 'snapshot': return spCfg ? { on: spCfg.enabled !== false, text: spCfg.enabled === false ? '已关闭' : `每日 ${spCfg.time || '00:05'} · ${cnt((spCfg.wallets || {})[activeChain])}/${n} 个钱包` } : null;
+    case 'notify': return notifyCfg ? { on: !!notifyCfg.enabled, text: notifyCfg.enabled ? `${nmSelArr().length}/${n} 个钱包 · 每 ${notifyCfg.intervalMin || 5} 分钟` : '已关闭' } : null;
+  }
+  return null;
+}
+function renderStIndex() {
+  const el = $('stIndex'); if (!el) return;
+  el.innerHTML = ST_PAGES.map(p => {
+    const st = stState(p.key);
+    return `<button class="st-idx" onclick="openSettings('${p.key}')">
+      <div class="st-card-ico ${p.ico}">${p.icon}</div>
+      <div class="st-idx-main"><div class="st-idx-title">${p.title}</div><div class="st-idx-desc">${p.desc}</div></div>
+      <span class="st-idx-state ${st ? (st.on ? 'on' : 'off') : ''}">${st ? escH(st.text) : '…'}</span><span class="st-idx-arrow">›</span></button>`;
+  }).join('');
+}
+function openSettings(key) {
   showView('settings');
+  stKey = ST_PAGES.some(p => p.key === key) ? key : null;
   $('stChainTag').textContent = CHAIN_NAMES[activeChain] || activeChain;
-  history.replaceState(null, '', '#settings');
+  document.querySelectorAll('#settingsView .st-sub-page').forEach(sec => { sec.style.display = sec.dataset.st === stKey ? '' : 'none'; });
+  $('stIndex').style.display = stKey ? 'none' : '';
+  $('stBackBtn').style.display = stKey ? '' : 'none';
+  const pg = ST_PAGES.find(p => p.key === stKey);
+  $('stTitle').innerHTML = pg ? `<span class="st-crumb" onclick="openSettings()">设置</span> › ${pg.title}` : '设置';
+  document.querySelectorAll('#stSubNav .nav-item').forEach(b => b.classList.toggle('active', b.dataset.st === stKey));
+  history.replaceState(null, '', stKey ? '#settings/' + stKey : '#settings');
+  renderStIndex();
   loadNotifyCfg(); loadFdCfg(); loadSpCfg(); loadUiCfg(); loadPnCfg();   // 进入时刷新状态
+}
+// 各配置渲染完顺带刷新目录页的状态摘要 (函数声明是全局绑定, 包一层即可, 不改各自的实现)
+for (const fn of ['renderFd', 'renderSp', 'renderNotify', 'renderPnCfg', 'applyUiCfg']) {
+  const orig = window[fn];
+  if (typeof orig === 'function') window[fn] = function (...a) { const r = orig.apply(this, a); renderStIndex(); return r; };
 }
 function closeSettings() {
   showView('dash');
@@ -2604,7 +2713,7 @@ loadFdCfg();
 loadUiCfg();
 loadPnCfg();
 loadData();
-if (location.hash === '#settings') openSettings();   // 设置页刷新保持
+if (location.hash.startsWith('#settings')) openSettings(location.hash.split('/')[1]);   // 设置页 / 子页刷新保持
 else if (location.hash === '#snapshot') openSnap();   // 快照页刷新保持
 else if (location.hash === '#pnl') openPnl();         // 盈亏页刷新保持
 </script>
