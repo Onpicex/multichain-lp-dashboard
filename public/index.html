@@ -739,9 +739,13 @@
   .pn-fund b { font-family: var(--mono); color: var(--text); font-weight: 600; }
   .pn-wrow { display: inline-flex; align-items: center; gap: 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; font-size: 11.5px; }
   .pn-wrow .nm-test-btn { padding: 2px 8px; font-size: 11px; }
-  .pn-table td.pn-pair { font-family: var(--font); font-weight: 600; color: var(--text); }
+  .pn-table th, .pn-table td { padding-left: 8px; padding-right: 8px; }
+  .pn-table td.pn-pair { font-family: var(--font); font-weight: 600; color: var(--text); white-space: normal; min-width: 150px; }
   .pn-table td.pn-pair .fee-tag { margin-left: 4px; }
   .pn-table .pn-id { font-family: var(--mono); font-size: 10px; color: var(--text-muted); margin-left: 6px; font-weight: 400; }
+  .pn-table .pn-meta { display: block; font-family: var(--mono); font-size: 10px; color: var(--text-muted); font-weight: 400; margin-top: 3px; white-space: nowrap; }
+  .pn-st-m { display: none; }
+  @media (max-width: 1280px) { .pn-table .pn-lo { display: none; } }
   .pn-st { font-family: var(--font); font-size: 10.5px; border-radius: 4px; padding: 1px 6px; border: 1px solid var(--border); color: var(--text-muted); white-space: nowrap; }
   .pn-st.act { color: var(--green); border-color: rgba(34,197,94,0.4); }
   .pn-st.out { color: var(--yellow); border-color: rgba(245,158,11,0.4); }
@@ -763,6 +767,10 @@
     .sn-chart-wrap { height: 190px; }
     .sn-table th, .sn-table td { padding: 8px 6px; font-size: 11.5px; }
     .sn-hm { display: none; }
+    .pn-table .pn-hm2 { display: none; }
+    .pn-st-m { display: inline-block; margin-left: 6px; }
+    .pn-table td.pn-pair { min-width: 0; }
+    .pn-table .pn-meta { white-space: normal; }
   }
 </style>
 </head>
@@ -2648,23 +2656,29 @@ function renderPnl() {
   if (!wallets.length) { $('pnTable').innerHTML = '<div class="sn-empty">' + (pnScope === 'own' ? '该范围没有标「自有」的钱包<br>到总览页「💼 管理钱包」里把你自己的钱包点成「自有」' : '没有观察钱包') + '</div>'; $('pnNote').textContent = ''; return; }
   if (!rows.length) { $('pnTable').innerHTML = '<div class="sn-empty">这些钱包没有仓位记录' + (pnScope === 'obs' && !ledgerOn ? '<br>观察钱包默认只看活跃仓; 要历史仓位和真实成本, 在上方给它「开账本」' : '') + '</div>'; $('pnNote').textContent = ''; return; }
   const showChain = pnChain === 'all', showWallet = wallets.length > 1;
-  const head = '<table class="sn-table pn-table"><thead><tr><th>交易对</th>' + (showChain ? '<th>链</th>' : '') + '<th>状态</th><th class="sn-hm">开仓</th><th class="sn-hm">关闭 / 持有</th><th>开仓成本</th><th>现值</th><th class="sn-hm">已提回</th><th>手续费</th><th class="sn-hm">无常损失</th><th>净利润</th></tr></thead><tbody>';
-  const ncol = 10 + (showChain ? 1 : 0);
+  // 列宽预算: 1360 宽屏内容区 1120px 要放下全部列 (此前 11 列 1299px, 无常损失/净利润被挤出视口, Mac 隐藏横向滚动条看不出来);
+  //   链名/钱包名/#id 并进交易对第二行; ≤1280 藏 开仓、已提回 (pn-lo); ≤768 再藏 状态、现值、手续费 (pn-hm2, 状态改显示在交易对下) 与 sn-hm 列
+  const head = '<table class="sn-table pn-table"><thead><tr><th>交易对</th><th class="pn-hm2">状态</th><th class="sn-hm pn-lo">开仓</th><th class="sn-hm">关闭 / 持有</th><th>开仓成本</th><th class="pn-hm2">现值</th><th class="sn-hm pn-lo">已提回</th><th class="pn-hm2">手续费</th><th class="sn-hm">无常损失</th><th>净利润</th></tr></thead><tbody>';
+  const ncol = 10;
   const rowH = r => {
-    const pairCell = '<td class="pn-pair">' + escH(r.pair || '') + '<span class="protocol-tag ' + (r.dex === 'pancake' ? 'pcs' : String(r.protocol || 'v3').toLowerCase()) + '">' + escH(r.dex === 'pancake' ? 'CAKE V3' : (r.platform ? r.platform.toUpperCase() + ' ' + r.protocol : r.protocol)) + '</span>' + (r.feeLabel ? '<span class="fee-tag">' + escH(r.feeLabel) + '</span>' : '') + '<span class="pn-id">#' + escH(String(r.tokenId || '').slice(0, 12)) + '</span>' + (showWallet ? '<span class="pn-id">' + escH(r.wallet) + '</span>' : '') + '</td>' + (showChain ? '<td>' + escH(CHAIN_NAMES[r.chain] || r.chain) + '</td>' : '');
-    if (r._absurd) return '<tr>' + pairCell + '<td colspan="' + (ncol - 1 - (showChain ? 1 : 0)) + '"><span class="pn-st out" title="该仓某笔事件的历史池价离谱 (死池/薄池), 账本下轮重算会修正">数据异常 · 等待重算</span></td></tr>';
     const st = r.status === 'active'
       ? '<span class="pn-st ' + (r.inRange ? 'act' : 'out') + '">' + (r.inRange === null ? '活跃' : (r.inRange ? '区间内' : '区间外')) + '</span>'
-      : '<span class="pn-st cls">已关闭' + (r.note === 'transferred' ? ' · 转出' : (r.note === 'empty' ? ' · 空仓' : (r.note === 'unseen' ? ' · 提回未捕获' : ''))) + '</span>';
+      : '<span class="pn-st cls">' + (r.note === 'transferred' ? '转出' : (r.note === 'empty' ? '空仓' : (r.note === 'unseen' ? '提回未捕获' : '已关闭'))) + '</span>';
+    const meta = ['#' + escH(String(r.tokenId || '').slice(0, 12))];
+    if (showChain) meta.push(escH(CHAIN_NAMES[r.chain] || r.chain));
+    if (showWallet) meta.push(escH(r.wallet));
+    const pairCell = '<td class="pn-pair">' + escH(r.pair || '') + '<span class="protocol-tag ' + (r.dex === 'pancake' ? 'pcs' : String(r.protocol || 'v3').toLowerCase()) + '">' + escH(r.dex === 'pancake' ? 'CAKE V3' : (r.platform ? r.platform.toUpperCase() + ' ' + r.protocol : r.protocol)) + '</span>' + (r.feeLabel ? '<span class="fee-tag">' + escH(r.feeLabel) + '</span>' : '')
+      + '<span class="pn-meta">' + meta.join(' · ') + (r._absurd ? '' : '<span class="pn-st-m">' + st + '</span>') + '</span></td>';
+    if (r._absurd) return '<tr>' + pairCell + '<td colspan="' + (ncol - 1) + '"><span class="pn-st out" title="该仓某笔事件的历史池价离谱 (死池/薄池), 账本下轮重算会修正">数据异常 · 等待重算</span></td></tr>';
     const ctip = costTip(r.costBy, r.tokens);
     const cost = r.costUSD > 0 ? '<span' + (ctip ? ' class="has-tip" data-tip="' + escH(ctip) + '"' : '') + '>' + fU(r.costUSD) + '</span>' + (r.costApprox || r.incomplete ? '<span class="pn-approx" title="' + (r.incomplete ? '部分事件尚未定价' : (r.source === 'ledger' ? '部分按当时市值补齐' : '按开仓时池价估算')) + '">*</span>' : '') : '<span class="sn-zero">—</span>';
     const fees = fU2((r.pendingFeesUSD || 0) + (r.collectedFeesUSD || 0)) + (r.collectedFeesUSD > 0 ? '<span class="pn-sub">已领 ' + fU2(r.collectedFeesUSD) + '</span>' : '') + (r.feesUnknown ? '<span class="pn-sub">不含已领</span>' : '');
     const il = r.ilUSD != null ? pnSigned(r.ilUSD) + (r.hodlValueUSD > 0 ? '<span class="pn-sub">' + (r.ilUSD >= 0 ? '+' : '−') + Math.abs(r.ilUSD / r.hodlValueUSD * 100).toFixed(2) + '%</span>' : '') : '<span class="sn-zero">—</span>';
     const np = r.netProfitUSD != null ? pnSigned(r.netProfitUSD) + '<span class="pn-sub">' + (r.netProfitPct >= 0 ? '+' : '−') + Math.abs(r.netProfitPct || 0).toFixed(2) + '%</span>' : '<span class="sn-zero">—</span>';
     const closeCell = r.status === 'active' ? '持有 ' + pnDays(r.openTs) : pnD(r.closeTs) + (r.openTs && r.closeTs ? '<span class="pn-sub">持有 ' + pnDays(r.openTs, r.closeTs) + '</span>' : '');
-    return '<tr>' + pairCell + '<td>' + st + '</td><td class="sn-hm">' + pnD(r.openTs) + '</td><td class="sn-hm">' + closeCell + '</td>'
-      + '<td>' + cost + '</td><td>' + (r.status === 'active' ? fU(r.valueUSD + r.pendingFeesUSD) : '<span class="sn-zero">—</span>') + '</td>'
-      + '<td class="sn-hm">' + (r.withdrawnUSD > 0 ? fU(r.withdrawnUSD) : '<span class="sn-zero">—</span>') + '</td><td>' + fees + '</td><td class="sn-hm">' + il + '</td><td>' + np + '</td></tr>';
+    return '<tr>' + pairCell + '<td class="pn-hm2">' + st + '</td><td class="sn-hm pn-lo">' + pnD(r.openTs) + '</td><td class="sn-hm">' + closeCell + '</td>'
+      + '<td>' + cost + '</td><td class="pn-hm2">' + (r.status === 'active' ? fU(r.valueUSD + r.pendingFeesUSD) : '<span class="sn-zero">—</span>') + '</td>'
+      + '<td class="sn-hm pn-lo">' + (r.withdrawnUSD > 0 ? fU(r.withdrawnUSD) : '<span class="sn-zero">—</span>') + '</td><td class="pn-hm2">' + fees + '</td><td class="sn-hm">' + il + '</td><td>' + np + '</td></tr>';
   };
   let bh = '';
   if (act.length) { bh += '<tr class="pn-sec"><td colspan="' + ncol + '">活跃仓位 · ' + act.length + '</td></tr>'; for (const r of act) bh += rowH(r); }
