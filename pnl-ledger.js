@@ -574,11 +574,14 @@ async function scanV4Events(chainId, deadline) {
 // =============================================================
 // 3. 定价 (历史池价 + 稳定币 + WETH), 全部持久化 memo
 // =============================================================
+const MIN_SQRT = 4295128739n, MAX_SQRT = 1461446703485210103287273052203988822378723970342n;
+function sqrtSane(sq) { try { const v = BigInt(sq); return v > MIN_SQRT * 4n && v < MAX_SQRT / 4n; } catch { return false; } }
+let pxDirty = 0;
 async function pxAt(chainId, spec, block) {
   const st = ledgerState(chainId);
   const key = `${spec}:${block}`;
   const c = st.d.px[key];
-  if (c && c.p0 != null) return c;
+  if (c && c.p0 != null) { if (sqrtSane(c.sq)) return c; delete st.d.px[key]; }   // 旧缓存里的边界值作废重取
   if (c && c.f && Date.now() - c.f < PX_RETRY_MS) return null;
   const meta = st.d.pools[spec];
   if (!meta) return null;
@@ -609,9 +612,10 @@ async function pxAt(chainId, spec, block) {
     const specObj = meta.kind === 'v4' ? { kind: 'v4', poolId: spec } : { kind: 'v3', poolAddress: spec };
     r = await E.entryPricesAtBlock(chainId, specObj, meta.t0, meta.t1, block, new Map()).catch(() => null);
   }
-  if (!r) { st.d.px[key] = { f: Date.now() }; return null; }
+  if (!r || !sqrtSane(r.sqrt) || !(r.p0 > 0) || !(r.p1 > 0)) { st.d.px[key] = { f: Date.now() }; return null; }   // 空池/边界价当没取到
   st.d.px[key] = { p0: r.p0, p1: r.p1, sq: r.sqrt.toString(), ts: r.ts };
   if (!st.d.bts[block]) st.d.bts[block] = r.ts;
+  if (++pxDirty % 25 === 0) save(chainId);   // 历史价是最贵的部分 (arc 每次 2s), 重放中途重启不白算
   return st.d.px[key];
 }
 
@@ -620,15 +624,16 @@ function buildRefPools(chainId) {
   const st = ledgerState(chainId);
   const cfg = cfgOf(chainId);
   const wn = low(cfg.wrappedNative);
-  const ref = {};   // token -> { spec, side, score }
+  const ref = {};   // token -> [{ spec, side, score }...] 按 score 降序 (稳定币对 > 原生币对); 取价时逐个试, 空池/死池跳过
   for (const [spec, m] of Object.entries(st.d.pools)) {
     for (const [side, tok, other] of [[0, m.t0.address, m.t1.address], [1, m.t1.address, m.t0.address]]) {
       if (cfg.stables[tok] || tok === wn) continue;
       const score = cfg.stables[other] ? 2 : other === wn ? 1 : 0;
       if (!score) continue;
-      if (!ref[tok] || ref[tok].score < score) ref[tok] = { spec, side, score };
+      (ref[tok] = ref[tok] || []).push({ spec, side, score });
     }
   }
+  for (const arr of Object.values(ref)) arr.sort((a, b) => b.score - a.score);
   return ref;
 }
 async function priceAt(chainId, token, block, ref) {
@@ -639,10 +644,10 @@ async function priceAt(chainId, token, block, ref) {
     const p = ts ? await E.coinUsdAtTime(cfg.nativePriceId || 'ethereum', ts) : 0;   // ETH / BNB 小时价
     if (p > 0) return { p, approx: false };
   }
-  const r = ref[token];
-  if (r) {
+  for (const r of (ref[token] || []).slice(0, 4)) {
     const px = await pxAt(chainId, r.spec, block);
-    if (px) return { p: r.side === 0 ? px.p0 : px.p1, approx: false };
+    const p = px ? (r.side === 0 ? px.p0 : px.p1) : 0;
+    if (p > 0) return { p, approx: false };
   }
   const cur = (stateOf(chainId).lastUsdPrices || {})[token] || 0;
   return { p: cur, approx: true };
@@ -767,7 +772,10 @@ async function computeWallet(chainId, addr, livePositions) {
       }
       if (ts > c.lastTs) c.lastTs = ts;
     }
-    // B. 钱包流水 (人类单位 + 市值)
+    // B. 钱包流水 (人类单位 + 市值); 本 tx 涉及的仓位两侧 token 直接用该仓池子当块价 (比参考池更贴)
+    const ownPx = {};
+    for (const x of [...deps, ...wds, ...cols]) { ownPx[x.v.meta.t0.address] = x.v.px.p0; ownPx[x.v.meta.t1.address] = x.v.px.p1; }
+    const priceHere = async tok => (ownPx[tok] > 0 && !cfg.stables[tok]) ? { p: ownPx[tok], approx: false } : await priceAt(chainId, tok, tx.b, ref);
     const outs = [], ins = [];
     for (const [tok, raw] of tx.flows) {
       const q = Math.abs(await hum(tok, raw));
@@ -775,8 +783,8 @@ async function computeWallet(chainId, addr, livePositions) {
       (raw < 0n ? outs : ins).push({ tok, q });
     }
     let outMkt = 0, inMkt = 0, anyApprox = false;
-    for (const o of outs) { const p = await priceAt(chainId, o.tok, tx.b, ref); o.mkt = o.q * p.p; outMkt += o.mkt; }
-    for (const i of ins) { const p = await priceAt(chainId, i.tok, tx.b, ref); i.mkt = i.q * p.p; i.ax = p.approx; inMkt += i.mkt; }
+    for (const o of outs) { const p = await priceHere(o.tok); o.mkt = o.q * p.p; outMkt += o.mkt; }
+    for (const i of ins) { const p = await priceHere(i.tok); i.mkt = i.q * p.p; i.ax = p.approx; inMkt += i.mkt; }
     // C. 归因
     if (deps.length) {
       let outCost = 0;
