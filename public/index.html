@@ -190,7 +190,7 @@
   .idle-note { font-size: 10.5px; color: var(--text-muted); padding: 8px 10px 0; }
   .idle-empty { font-size: 12px; color: var(--text-muted); padding: 14px 10px; }
   /* 设置页 (侧栏一级目录, 与仪表盘视图互斥) — 卡片式分组 */
-  .st-page { max-width: 860px; padding: 20px 0 40px; display: flex; flex-direction: column; gap: 0; }
+  .st-page { max-width: 960px; padding: 20px 0 40px; display: flex; flex-direction: column; gap: 0; }
   .st-card {
     background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
     overflow: hidden;
@@ -248,7 +248,7 @@
   .st-card select { background: var(--bg); }
   .st-card .nm-test-btn { margin-left: auto; }
   /* 设置标签页: 顶部一排标签, 每个功能一块, 只显示当前标签 */
-  .st-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .st-tabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--border); }
   .st-tabs::-webkit-scrollbar { display: none; }
   .st-tab {
     display: flex; align-items: center; gap: 7px; padding: 11px 16px; margin-bottom: -1px;
@@ -275,6 +275,8 @@
   .st-sub-page .switch-track::after { width: 21px; height: 21px; }
   .st-sub-page .switch input:checked + .switch-track::after { transform: translateX(21px); }
   @media (max-width: 480px) {
+    .st-tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+    .st-tabs::-webkit-scrollbar { display: none; }
     .st-tab { padding: 10px 12px; font-size: 12px; gap: 5px; }
     .st-tab .st-tab-state { display: none; }
     .st-sub-page .st-card-head { padding: 14px; }
@@ -1863,16 +1865,16 @@ function stState(key) {   // 标签上的状态摘要 (当前链)
   const n = walletList.length;
   const cnt = arr => Array.isArray(arr) ? arr.length : n;
   switch (key) {
-    case 'wallets': return { on: wmShown(), text: `${n} 个钱包 · 面板${wmShown() ? '显示' : '隐藏'}` };
-    case 'fund': return fdCfg ? { on: fdCfg.enabled !== false, text: fdCfg.enabled === false ? '已关闭' : `${cnt((fdCfg.wallets || {})[activeChain])}/${n} 个钱包` } : null;
+    case 'wallets': return { on: wmShown(), text: wmShown() ? `${n} · 面板显示` : `${n} · 面板隐藏` };
+    case 'fund': return fdCfg ? { on: fdCfg.enabled !== false, text: fdCfg.enabled === false ? '关' : `${cnt((fdCfg.wallets || {})[activeChain])}/${n}` } : null;
     case 'pnl': {
       if (!pnCfg) return null;
       const sel = pnCfgSel(activeChain);
       const c = sel ? walletList.filter(w => sel.has(nmNorm(w.address))).length : n;
-      return { on: pnCfg.enabled !== false, text: pnCfg.enabled === false ? '已关闭' : `${c}/${n} 个钱包${Array.isArray((pnCfg.wallets || {})[activeChain]) ? '' : ' · 沿用资金查询'}` };
+      return { on: pnCfg.enabled !== false, text: pnCfg.enabled === false ? '关' : `${c}/${n}${Array.isArray((pnCfg.wallets || {})[activeChain]) ? '' : ' · 沿用'}` };
     }
-    case 'snapshot': return spCfg ? { on: spCfg.enabled !== false, text: spCfg.enabled === false ? '已关闭' : `每日 ${spCfg.time || '00:05'} · ${cnt((spCfg.wallets || {})[activeChain])}/${n} 个钱包` } : null;
-    case 'notify': return notifyCfg ? { on: !!notifyCfg.enabled, text: notifyCfg.enabled ? `${nmSelArr().length}/${n} 个钱包 · 每 ${notifyCfg.intervalMin || 5} 分钟` : '已关闭' } : null;
+    case 'snapshot': return spCfg ? { on: spCfg.enabled !== false, text: spCfg.enabled === false ? '关' : `${spCfg.time || '00:05'} · ${cnt((spCfg.wallets || {})[activeChain])}/${n}` } : null;
+    case 'notify': return notifyCfg ? { on: !!notifyCfg.enabled, text: notifyCfg.enabled ? `${nmSelArr().length}/${n} · ${notifyCfg.intervalMin || 5}分` : '关' } : null;
   }
   return null;
 }
