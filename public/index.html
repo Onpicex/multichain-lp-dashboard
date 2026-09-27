@@ -44,6 +44,7 @@
     padding: 18px 16px; border-bottom: 1px solid var(--border);
   }
   .sidebar-logo .logo { width: 30px; height: 30px; }
+  .sb-scroll { display: contents; }   /* 桌面: 透明容器; 手机: 变成横滑的链胶囊行 */
   .sidebar-title { font-size: 13px; font-weight: 700; letter-spacing: 0.05em; }
   .sidebar-section {
     font-size: 10px; font-weight: 600; color: var(--text-muted);
@@ -109,20 +110,36 @@
   /* Sidebar responsive: 顶部横条模式 */
   @media (max-width: 768px) {
     .layout { flex-direction: column; }
+    /* 2026-09-28 重排 (用户: 功能变多后顶部只剩字母圆点, 分不清链和功能; BSC/Base 都是 B, 快照/盈亏/设置还被挤到屏幕外):
+       第一行 = 标志 + 右侧 快照/盈亏/设置 (带文字); 第二行 = 链胶囊 (图标+链名) 横滑, 右缘渐隐提示还有 */
     .sidebar {
       width: 100%; height: auto; position: static;
-      flex-direction: row; align-items: center;
-      border-right: none; border-bottom: 1px solid var(--border);
-      overflow-x: auto; -webkit-overflow-scrolling: touch;
+      flex-direction: row; flex-wrap: wrap; align-items: center;
+      border-right: none; border-bottom: 1px solid var(--border); overflow: visible;
     }
-    .sidebar-logo { padding: 10px 12px; border-bottom: none; flex-shrink: 0; }
+    .sidebar-logo { padding: 8px 10px; border-bottom: none; flex-shrink: 0; order: 0; }
     .sidebar-section, .sidebar-footer { display: none; }
-    /* 手机端: 链导航横排 + 只留图标 */
-    #chainNav, #toolNav, #snapNav, #pnlNav, #settingsNav { display: flex; align-items: center; }
-    .nav-item { width: auto; flex-shrink: 0; padding: 6px 8px; margin: 8px 4px; gap: 0; }
-    .nav-item .chain-name { display: none; }
-    .nav-item .chain-ico { width: 26px; height: 26px; font-size: 12px; }
+    #snapNav, #pnlNav, #settingsNav { display: flex; align-items: center; order: 1; }
+    #snapNav { margin-left: auto; }
+    .sb-scroll {
+      display: flex; align-items: center; gap: 6px; order: 2; flex: 1 1 100%;
+      overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; padding: 0 28px 8px 14px;
+      -webkit-mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 28px), transparent);
+    }
+    .sb-scroll::-webkit-scrollbar { display: none; }
+    #chainNav, #toolNav { display: flex; align-items: center; gap: 6px; }
+    #toolNav { border-left: 1px solid var(--border); padding-left: 8px; margin-left: 2px; }
+    .nav-item { width: auto; flex-shrink: 0; padding: 5px 11px 5px 6px; margin: 0; gap: 6px; font-size: 12px; min-height: 34px; border: 1px solid var(--border); border-radius: 999px; }
+    #snapNav .nav-item, #pnlNav .nav-item, #settingsNav .nav-item { margin: 6px 4px 6px 0; padding: 4px 9px 4px 5px; min-height: 32px; border-color: transparent; }
+    #settingsNav .nav-item { margin-right: 8px; }
+    .nav-item.active { border-color: var(--accent); background: var(--accent-dim); color: var(--accent); }
+    .nav-item .chain-name { display: inline; white-space: nowrap; }
+    .nav-item .chain-ico { width: 22px; height: 22px; font-size: 11px; }
     .nav-soon { display: none; }
+  }
+  @media (max-width: 480px) {
+    .sidebar-title { display: none; }   /* 第一行只留标志, 给三个功能按钮腾位 */
+    #snapNav .nav-item, #pnlNav .nav-item, #settingsNav .nav-item { font-size: 11.5px; }
   }
 
   /* ── Header ── */
@@ -353,6 +370,7 @@
   .ftag.fgrp { display: inline-flex; align-items: center; gap: 6px; border-color: var(--gc); color: var(--gc); }
   .ftag.fgrp .fdot { width: 7px; height: 7px; border-radius: 50%; background: var(--gc); flex-shrink: 0; }
   .ftag.fgrp .fcount { font-family: var(--mono); font-size: 10px; opacity: 0.8; }
+  #stTabs .ftag .fcount { margin-left: 7px; font-family: var(--mono); font-size: 10px; opacity: 0.75; }
   .ftag.fgrp .farrow { font-size: 10px; opacity: 0.7; margin-left: -2px; }
   .ftag.fgrp.open { background: color-mix(in srgb, var(--gc) 10%, transparent); }
   .ftag.fgrp.active { background: color-mix(in srgb, var(--gc) 18%, transparent); font-weight: 600; }
@@ -518,8 +536,9 @@
     font-family: var(--mono); font-size: 11px; font-weight: 500; color: var(--text); line-height: 1.65; white-space: pre-line; text-align: left;
     min-width: 230px; max-width: 360px; box-shadow: 0 6px 18px rgba(0,0,0,0.45);
   }
-  .has-tip:hover::after { display: block; }
+  .has-tip:hover::after, .has-tip.open::after { display: block; }
   td .has-tip::after { left: auto; right: 0; }
+  @media (max-width: 480px) { .has-tip::after { left: auto; right: 0; min-width: 200px; max-width: min(320px, calc(100vw - 40px)); } }
   .range-bar-labels { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--text-muted); margin-bottom: 6px; }
   .range-bar-track { height: 5px; background: var(--border-light); border-radius: 3px; position: relative; }
   .range-bar-fill { position: absolute; height: 100%; border-radius: 3px; background: linear-gradient(90deg, #6366f1, #22c55e); }
@@ -582,7 +601,7 @@
     .stats-strip { grid-template-columns: repeat(2, 1fr); }
     .stat-cell, .stat-cell.big { grid-column: auto; border-bottom: 1px solid var(--border); }
     .stat-cell:nth-child(2n) { border-right: none; }
-    .stat-cell:last-child { grid-column: 1 / -1; border-bottom: none; border-right: none; }
+    .stats-strip .stat-cell:last-child { grid-column: 1 / -1; border-bottom: none; border-right: none; }
     .stat-val, .stat-cell.big .stat-val { font-size: 20px; }
     .pos-table th, .pos-row td { padding: 10px 8px; }
     .pair-cell { font-size: 13px; }
@@ -608,16 +627,36 @@
     .stats-strip { grid-template-columns: repeat(2, 1fr); }
     .stat-cell, .stat-cell.big { grid-column: auto; padding: 10px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
     .stat-cell:nth-child(2n) { border-right: none; }
-    .stat-cell:last-child { grid-column: 1 / -1; border-bottom: none; border-right: none; }
+    .stats-strip .stat-cell:last-child { grid-column: 1 / -1; border-bottom: none; border-right: none; }
     .stat-val, .stat-cell.big .stat-val { font-size: 18px; }
-    .stat-label { font-size: 10px; }
+    .stat-label { font-size: 11px; }
     .idle-table td, .idle-table th { padding: 7px 6px; font-size: 11.5px; }
     .idle-table .idle-ws { display: none; }  /* 手机: 钱包分布列放不下, 点单钱包筛选看 */
 
     /* Filter: 小按钮可滚动 */
     .filter-row { overflow-x: auto; flex-wrap: nowrap; padding: 8px 0; gap: 6px; -webkit-overflow-scrolling: touch; }
     .filter-label { white-space: nowrap; flex-shrink: 0; }
-    .ftag { font-size: 11px; padding: 4px 10px; white-space: nowrap; flex-shrink: 0; }
+    .ftag { font-size: 12px; padding: 7px 12px; min-height: 34px; white-space: nowrap; flex-shrink: 0; }
+    .filter-row { padding-right: 24px; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent); }
+    .refresh-btn { font-size: 12px; padding: 8px 14px; min-height: 34px; }
+    .fund-toggle { padding: 6px 12px; min-height: 32px; }
+    .pn-wrow { padding: 6px 10px; }
+    .pn-wrow .nm-test-btn { padding: 6px 12px; font-size: 12px; min-height: 32px; }
+    /* 钱包管理: 地址换到名字下面整行显示 (此前被截成 "0x7aa5c847…"), 四个小按钮放大到 34px 点得准 */
+    .wm-item { flex-wrap: wrap; padding: 8px 10px; row-gap: 4px; }
+    .wm-item-left { flex: 1 1 100%; flex-wrap: wrap; gap: 2px 8px; }
+    .wm-item-addr { flex: 1 1 100%; font-size: 10.5px; white-space: normal; word-break: break-all; overflow: visible; }
+    .wm-own-btn { font-size: 11px; padding: 6px 12px; min-height: 32px; }
+    .wm-eye-btn, .wm-edit-btn, .wm-del-btn { min-width: 34px; min-height: 34px; padding: 6px 8px; display: inline-flex; align-items: center; justify-content: center; }
+    .wm-eye-btn svg { width: 16px; height: 16px; }
+    .nm-opt { white-space: normal; align-items: flex-start; }   /* 设置页勾选项文字长, 换行别撑出视口 */
+    #stTabs .fcount { display: none; }   /* 手机: 功能胶囊不带状态摘要, 只留名字 */
+    .switch:not(.sm) { width: 48px; height: 28px; }
+    .switch:not(.sm) .switch-track::after { width: 22px; height: 22px; }
+    .switch:not(.sm) input:checked + .switch-track::after { transform: translateX(20px); }
+    .nm-opt input[type="checkbox"] { width: 18px; height: 18px; margin-top: 1px; flex-shrink: 0; }
+    .nm-opt select { min-height: 34px; font-size: 13px; }
+    .nm-test-btn { min-height: 34px; padding: 6px 14px; font-size: 12px; }
 
     /* Table → Card 模式 */
     .pos-table, .pos-table thead, .pos-table tbody, .pos-table td, .pos-table th {
@@ -742,6 +781,7 @@
   .pn-table th, .pn-table td { padding-left: 8px; padding-right: 8px; }
   .pn-table td.pn-pair { font-family: var(--font); font-weight: 600; color: var(--text); white-space: normal; min-width: 150px; }
   .pn-table td.pn-pair .fee-tag { margin-left: 4px; }
+  .pn-table td.pn-pair .protocol-tag, .pn-table td.pn-pair .fee-tag { white-space: nowrap; display: inline-block; }
   .pn-table .pn-id { font-family: var(--mono); font-size: 10px; color: var(--text-muted); margin-left: 6px; font-weight: 400; }
   .pn-table .pn-meta { display: block; font-family: var(--mono); font-size: 10px; color: var(--text-muted); font-weight: 400; margin-top: 3px; white-space: nowrap; }
   .pn-st-m { display: none; }
@@ -757,6 +797,8 @@
     .pn-strip { grid-template-columns: repeat(2, 1fr); }
     .pn-strip .stat-cell { border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); }
     .pn-strip .stat-cell:nth-child(2n) { border-right: none; }
+    .pn-strip .stat-cell:nth-last-child(-n+2) { border-bottom: none; }   /* 末行两格都不要底线 */
+    .pn-strip .stat-sub, .sn-strip .stat-sub { white-space: normal; overflow: visible; text-overflow: clip; }   /* 手机: 副行允许换行, 别截成 "…" */
   }
   .sp-time { font-family: var(--mono); font-size: 12px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; color-scheme: dark; }
   @media (max-width: 768px) {
@@ -764,6 +806,7 @@
     .sn-strip .stat-cell { border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); }
     .sn-strip .stat-cell:nth-child(2n) { border-right: none; }
     .sn-strip .stat-cell:last-child { grid-column: 1 / -1; border-right: none; border-bottom: none; }
+    .pn-strip .stat-cell:last-child { grid-column: auto; }   /* #pnStrip 同时带 stats-strip/sn-strip 类, 上面两条「末格整行」都会打到它: 6 格要老实排三行两列 (必须放在 sn-strip 规则之后) */
     .sn-chart-wrap { height: 190px; }
     .sn-table th, .sn-table td { padding: 8px 6px; font-size: 11.5px; }
     .sn-hm { display: none; }
@@ -782,6 +825,7 @@
       <div class="logo">V</div>
       <span class="sidebar-title">LP 仪表盘</span>
     </div>
+    <div class="sb-scroll">
     <div class="sidebar-section">链</div>
     <nav id="chainNav">
       <button class="nav-item active" data-chain="bsc">
@@ -812,6 +856,7 @@
         <span class="chain-ico doc">文</span> <span class="chain-name">RH 合约文档 ↗</span>
       </a>
     </nav>
+    </div>
     <div class="sidebar-section">资金快照</div>
     <nav id="snapNav">
       <button class="nav-item" id="snNavBtn" onclick="openSnap()">
@@ -1427,6 +1472,20 @@ function stEffective(explicitArr, followFn) {
 async function pnToggleLedgerFromSettings(addr) {
   try { const r = await fetch(apiBase() + '/wallets/' + encodeURIComponent(addr), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ledger: false }) }); if (r.ok) { walletList = (await r.json()).wallets; renderWalletList(); } } catch {}
 }
+// 触屏没有 hover: 点一下 .has-tip 展开提示, 再点或点别处收起
+document.addEventListener('click', e => {
+  const t = e.target.closest('.has-tip');
+  document.querySelectorAll('.has-tip.open').forEach(x => { if (x !== t) x.classList.remove('open'); });
+  if (t) t.classList.toggle('open');
+});
+// 手机顶栏第二行 (链胶囊) 横滑: 把当前链滚到中间, 别让 Robinhood/Base/Arc 默认藏在屏幕外; 只动横向, 不碰页面纵向滚动
+function sbScrollToActive() {
+  const sc = document.querySelector('.sb-scroll'); if (!sc || window.innerWidth > 768) return;
+  const b = document.querySelector('#chainNav .nav-item.active') || document.querySelector(`#chainNav .nav-item[data-chain="${activeChain}"]`); if (!b) return;
+  const target = b.getBoundingClientRect().left - sc.getBoundingClientRect().left + sc.scrollLeft - (sc.clientWidth - b.offsetWidth) / 2;
+  sc.scrollTo({ left: Math.max(0, target), behavior: 'smooth' });
+}
+window.addEventListener('load', sbScrollToActive);
 function fdFollowOwn() { if (fdCfg && fdCfg.wallets) { delete fdCfg.wallets[activeChain]; saveFdCfg(); } }
 function spFollowOwn() { if (spCfg && spCfg.wallets) { delete spCfg.wallets[activeChain]; saveSpCfg(); } }
 function nmFollowOwn() { if (notifyCfg && notifyCfg.wallets) { delete notifyCfg.wallets[activeChain]; saveNotifyCfg(); } }
@@ -1468,7 +1527,7 @@ function mkDet(p) {
       ? (p.costApprox ? '钱包实付 · 部分按当时市值补齐' : '钱包实付 · 含换币损耗/滑点')
       : '暂按开仓时池价估算 (本链无钱包账本)';
     const tip = costTip(p.costByToken, [p.token0, p.token1]);
-    pnlCells += `<div><div class="d-label">开仓成本</div><div class="d-val${tip ? ' has-tip' : ''}"${tip ? ' data-tip="' + escH(tip) + '"' : ''}>${fU(p.costBasisUSD)}${p.costApprox ? '<span class="pn-approx" title="含估算成分">*</span>' : ''}</div><div class="d-sub">${costSub}${tip ? ' · 悬浮看两币拆分' : ''}</div></div>`;
+    pnlCells += `<div><div class="d-label">开仓成本</div><div class="d-val${tip ? ' has-tip' : ''}"${tip ? ' data-tip="' + escH(tip) + '"' : ''}>${fU(p.costBasisUSD)}${p.costApprox ? '<span class="pn-approx" title="含估算成分">*</span>' : ''}</div><div class="d-sub">${costSub}${tip ? ' · 悬浮/点一下看两币拆分' : ''}</div></div>`;
     if (p.hodlValueUSD != null) {
       const il = p.ilUSD || 0, pc = p.hodlValueUSD > 0 ? il / p.hodlValueUSD * 100 : 0;
       pnlCells += `<div><div class="d-label">无常损失</div><div class="d-val ${il >= 0 ? 'gain' : 'loss'}">${sg(il)}${fU2(Math.abs(il))} (${sg(il)}${Math.abs(pc).toFixed(2)}%)</div><div class="d-sub">对比持币不动 ${fU(p.hodlValueUSD)}</div></div>`;
@@ -1839,6 +1898,7 @@ function showView(name) {
   $('snNavBtn').classList.toggle('active', snapOpen);
   $('pnNavBtn').classList.toggle('active', pnlOpen);
   document.querySelectorAll('#chainNav .nav-item').forEach(b => b.classList.toggle('active', name === 'dash' && b.dataset.chain === activeChain));
+  sbScrollToActive();
   if (name !== 'dash') { try { localStorage.setItem('lpChain', activeChain); } catch {} }   // hash 被占用, 刷新后靠它恢复链
 }
 // 设置 = 标签页: 每个功能一个标签 (#settings/<key>), 只显示当前标签那块; 上次选的标签记在 localStorage
@@ -2372,7 +2432,10 @@ function snDrawChart(ser) {
   const pts = ser.map((x, i) => ({ x: X(x.ts), y: Y(x.v), v: x.v, ts: x.ts, e: x.e, d: i > 0 ? x.v - ser[i - 1].v : null, pv: i > 0 ? ser[i - 1].v : null }));
   snChartPts = pts;
   let g = '<g class="grid">', ax = '<g class="axis">';
-  for (let i = 0; i <= 4; i++) { const v = vmin + (vmax - vmin) * i / 4, y = Y(v); g += '<line x1="' + M.l + '" x2="' + (W - M.r) + '" y1="' + y.toFixed(1) + '" y2="' + y.toFixed(1) + '"/>'; ax += '<text x="' + (M.l - 8) + '" y="' + (y + 3.5).toFixed(1) + '" text-anchor="end">' + fK(v) + '</text>'; }
+  // 刻度精度: 相邻刻度按 fK 会撞成同一个字 (如全是 $6.47k) 时改用整数美元 / 两位小数 k
+  const step = (vmax - vmin) / 4;
+  const fAx = v => { const a = Math.abs(v), sg = v < 0 ? '−' : ''; if (a >= 1e4) return step < 100 ? sg + '$' + (a / 1e3).toFixed(2) + 'k' : fK(v); if (a >= 1e3) return step < 10 ? sg + '$' + Math.round(a).toLocaleString() : fK(v); return step < 1 ? sg + '$' + a.toFixed(1) : fK(v); };
+  for (let i = 0; i <= 4; i++) { const v = vmin + (vmax - vmin) * i / 4, y = Y(v); g += '<line x1="' + M.l + '" x2="' + (W - M.r) + '" y1="' + y.toFixed(1) + '" y2="' + y.toFixed(1) + '"/>'; ax += '<text x="' + (M.l - 8) + '" y="' + (y + 3.5).toFixed(1) + '" text-anchor="end">' + fAx(v) + '</text>'; }
   g += '</g>';
   const withDate = xspan > 86400000 * 1.5;
   const nx = Math.max(2, Math.min(Math.floor((W - M.l - M.r) / 80), 6, ser.length)); const seen = new Set();
@@ -2388,7 +2451,7 @@ function snDrawChart(ser) {
   const areaD = lineD + ' L' + pts[pts.length - 1].x.toFixed(1) + ' ' + Y(vmin).toFixed(1) + ' L' + pts[0].x.toFixed(1) + ' ' + Y(vmin).toFixed(1) + ' Z';
   let dots = ''; if (pts.length <= 60) for (const p of pts) dots += '<circle class="dot" cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="3"/>';
   const last = pts[pts.length - 1];
-  const lab = '<text class="lastlab" x="' + Math.min(last.x, W - M.r - 4).toFixed(1) + '" y="' + (last.y - 9).toFixed(1) + '" text-anchor="end">' + fK(last.v) + '</text>';
+  const lab = '<text class="lastlab" x="' + Math.min(last.x, W - M.r - 4).toFixed(1) + '" y="' + (last.y - 9).toFixed(1) + '" text-anchor="end">' + fAx(last.v) + '</text>';
   svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
   svg.innerHTML = g + '<path class="area" d="' + areaD + '"/><path class="line" d="' + lineD + '"/>' + dots + lab + ax
     + '<g id="snHover" style="display:none"><line class="xhair" y1="' + M.t + '" y2="' + (H - M.b) + '"/><circle class="hdot" r="5"/></g>'
