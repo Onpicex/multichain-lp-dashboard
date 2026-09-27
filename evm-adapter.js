@@ -1763,6 +1763,24 @@ function fundSelected(fundCfg, chainId, WALLETS) {
   const s = new Set(sel.map(a => String(a).toLowerCase()));
   return WALLETS.filter(w => s.has(w.address.toLowerCase()));
 }
+// --- 钱包盈亏账本配置 (pnl-config.json, 与 server.js 的 /api/pnl/config 同一文件): { enabled, wallets: {<chain>: [addrs]} }
+//   wallets.<chain> 未设置 = 沿用「钱包资金查询」(fund-config) 该链的勾选 (那边也未设置则全部钱包); [] = 全不参与; 数组 = 勾选子集
+//   只有勾选的钱包才进账本队列 (别人的观察钱包动辄两千笔 tx, 用户不需要看它们的盈亏)
+function loadPnlCfgEvm() {
+  try {
+    const c = JSON.parse(fs.readFileSync(path.join(__dirname, 'pnl-config.json'), 'utf8'));
+    return { enabled: c.enabled !== false, wallets: (c.wallets && typeof c.wallets === 'object') ? c.wallets : {} };
+  } catch { return { enabled: true, wallets: {} }; }
+}
+function pnlSelected(chainId, WALLETS) {
+  const pc = loadPnlCfgEvm();
+  if (!pc.enabled) return [];
+  const pick = arr => { const s = new Set(arr.map(a => String(a).toLowerCase())); return WALLETS.filter(w => s.has(w.address.toLowerCase())); };
+  if (Array.isArray(pc.wallets[chainId])) return pick(pc.wallets[chainId]);
+  const fsel = loadFundCfgEvm().wallets[chainId];
+  if (Array.isArray(fsel)) return pick(fsel);
+  return WALLETS;
+}
 // 兜底快照按当前勾选过滤 (配置变更后旧快照可能含未勾选钱包)
 function filterIdleByWallets(idle, walletsSel) {
   if (!idle || !idle.byWallet) return idle;
@@ -2336,8 +2354,15 @@ function liveByWallet(chainId) {
   return m;
 }
 
+// 设置页改了盈亏勾选后立刻踢一轮账本 (新勾选的钱包不用等 30min 周期)
+function kickLedger(chainId) {
+  if (!ledger.enabled(chainId)) return;
+  setImmediate(() => ledger.runQueue(chainId, liveByWallet(chainId)).catch(e => console.error(`[${chainId}] pnl-ledger kick:`, e.message)));
+}
+
 function mountEvmRoutes(app, adminGuard) {
-  ledger.init({ EVM_CHAINS, chainState, getTokenInfo, entryPricesAtBlock, getTokenAmounts, ethUsdAtTime, loadActiveWallets, withRetry, sleep, findMintEvent, mintBlockFromScan });
+  ledger.init({ EVM_CHAINS, chainState, getTokenInfo, entryPricesAtBlock, getTokenAmounts, ethUsdAtTime, loadActiveWallets, withRetry, sleep, findMintEvent, mintBlockFromScan,
+    ledgerWallets: chainId => pnlSelected(chainId, loadActiveWallets(chainId)), ledgerEnabled: () => loadPnlCfgEvm().enabled });
   for (const chainId of Object.keys(EVM_CHAINS)) {
     const base = `/api/${chainId}`;
     // 每链独立钱包文件 wallets-<chain>.json, 与 BSC/SOL 完全隔离
@@ -2362,6 +2387,7 @@ function mountEvmRoutes(app, adminGuard) {
       res.json({
         chain: chainId, wallet: { address: addr, name: wcfg?.name || liveWallet?.name || addr, enabled: wcfg ? wcfg.enabled !== false : true },
         ...rep, idleUSD, lpUSD: liveWallet ? (liveWallet.totalUSD || 0) : 0, funding, dataTs: data?.timestamp || 0,
+        selected: pnlSelected(chainId, loadWallets(chainId)).some(w => w.address.toLowerCase() === addr), ledgerEnabled: loadPnlCfgEvm().enabled,
       });
     });
     app.post(`${base}/wallets`, adminGuard, (req, res) => {
@@ -2521,7 +2547,7 @@ function mountEvmRoutes(app, adminGuard) {
 //   3. EVM_CHAINS.arc.pending -> false; server.js 的 CHAINS 里 arc 改 enabled:true 并删掉 pending 字段
 //   4. 加 Arc 钱包地址 -> 重启服务 -> 验证首轮抓取
 // =============================================================
-module.exports = { mountEvmRoutes, EVM_CHAINS, kickRefresh, liveByWallet,
+module.exports = { mountEvmRoutes, EVM_CHAINS, kickRefresh, liveByWallet, kickLedger,
   _ledgerApi: { EVM_CHAINS, chainState, getTokenInfo, entryPricesAtBlock, getTokenAmounts, ethUsdAtTime, loadActiveWallets, withRetry, sleep, findMintEvent, mintBlockFromScan },
   _entryTest: { getV3EntryData, getV4EntryData, getV3EntrySubgraph, getV4EntrySubgraph, getTokenInfo } };
 module.exports._collectTest = { fillLastCollect };   // 领费时间的独立验证入口 (tools/collect-check.js)  // 建仓回溯的独立验证入口

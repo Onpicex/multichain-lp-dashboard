@@ -670,12 +670,14 @@ async function computeWallet(chainId, addr, livePositions) {
 // =============================================================
 async function runQueue(chainId, livePositionsByWallet, opts = {}) {
   if (!enabled(chainId)) return;
+  if (E.ledgerEnabled && !E.ledgerEnabled()) return;   // 设置页总开关关了: 不扫 (已有数据保留)
   const st = ledgerState(chainId);
   if (st.busy) return;
   st.busy = true;
   const deadline = Date.now() + (opts.budgetMs || (st.lastRun ? ROUND_BUDGET_MS : FIRST_BUDGET_MS));
   try {
-    const wallets = E.loadActiveWallets(chainId);
+    // 只扫设置页勾选的钱包 (默认沿用「钱包资金查询」的勾选); 别人的观察钱包不扫
+    const wallets = E.ledgerWallets ? E.ledgerWallets(chainId) : E.loadActiveWallets(chainId);
     const t0 = Date.now();
     const ready = new Set();   // 本轮流水+仓位事件都扫到链头的钱包 (半截数据不重放, 避免把没扫完的减仓/领费算成亏损)
     for (const w of wallets) {

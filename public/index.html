@@ -207,6 +207,7 @@
   .st-card-ico.bell { background: var(--yellow-dim); }
   .st-card-ico.snap { background: rgba(14,165,233,0.14); }
   .st-card-ico.wm { background: var(--green-dim); }
+  .st-card-ico.pnl { background: rgba(34,197,94,0.14); font-weight: 700; }
   .st-card-titles { min-width: 0; flex: 1; }
   .st-card-title { font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
   .st-card-desc { font-size: 11.5px; color: var(--text-muted); margin-top: 3px; line-height: 1.5; }
@@ -937,6 +938,21 @@
     </div>
     <div class="st-card">
       <div class="st-card-head">
+        <div class="st-card-ico pnl">盈</div>
+        <div class="st-card-titles">
+          <div class="st-card-title">钱包盈亏</div>
+          <div class="st-card-desc">左侧「钱包盈亏」页只列勾选的钱包，账本（Robinhood / Arc 的真实开仓成本与历史仓位）也只给勾选的钱包扫 · 未单独勾选的链沿用上方「钱包资金查询」的勾选</div>
+        </div>
+        <label class="switch" title="启用/关闭钱包盈亏账本"><input type="checkbox" id="pnEnabled" onchange="savePnCfg()"><span class="switch-track"></span></label>
+      </div>
+      <div class="st-card-body">
+        <div class="st-sub">参与盈亏统计的钱包 <span class="st-sub-note" id="pnSubNote">未勾选的不扫账本、不在盈亏页显示</span> <button class="nm-test-btn" id="pnFollowBtn" onclick="pnFollowFund()" style="display:none">恢复沿用资金查询勾选</button></div>
+        <div class="st-grid" id="pnList"></div>
+        <div class="wm-error" id="pnError"></div>
+      </div>
+    </div>
+    <div class="st-card">
+      <div class="st-card-head">
         <div class="st-card-ico snap">📷</div>
         <div class="st-card-titles">
           <div class="st-card-title">资金快照 <span class="st-badge" id="spCount">0 天</span></div>
@@ -1207,6 +1223,7 @@ function renderWalletList() {
   }).join('');
   if (notifyCfg) renderNotify();
   if (fdCfg) renderFd();
+  if (pnCfg) renderPnCfg();
   applyUiCfg();
 }
 
@@ -1794,7 +1811,7 @@ function openSettings() {
   showView('settings');
   $('stChainTag').textContent = CHAIN_NAMES[activeChain] || activeChain;
   history.replaceState(null, '', '#settings');
-  loadNotifyCfg(); loadFdCfg(); loadSpCfg(); loadUiCfg();   // 进入时刷新状态
+  loadNotifyCfg(); loadFdCfg(); loadSpCfg(); loadUiCfg(); loadPnCfg();   // 进入时刷新状态
 }
 function closeSettings() {
   showView('dash');
@@ -1850,7 +1867,7 @@ async function saveUiCfg() {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
     uiCfg = await r.json();
     applyUiCfg();
-    if (fdCfg) renderFd(); if (notifyCfg) renderNotify(); if (spCfg) renderSp();   // 空态提示文案随开关变
+    if (fdCfg) renderFd(); if (notifyCfg) renderNotify(); if (spCfg) renderSp(); if (pnCfg) renderPnCfg();   // 空态提示文案随开关变
     $('wmStError').style.display = 'none';
   } catch (e) {
     const el = $('wmStError');
@@ -2354,6 +2371,68 @@ async function saveSpCfg() {
   }
 }
 
+// --- 设置页: 钱包盈亏配置 (/api/pnl/config): wallets.<chain> 未设置=沿用「钱包资金查询」的勾选; []=全不参与 ---
+let pnCfg = null;
+async function loadPnCfg() {
+  try {
+    const r = await fetch('/api/pnl/config');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    pnCfg = await r.json();
+    renderPnCfg();
+  } catch (e) { console.error('钱包盈亏配置加载失败:', e); }
+}
+// 解析后的勾选集合 (指定链): null = 全部钱包
+function pnCfgSel(chain) {
+  const norm = a => chain === 'sol' ? String(a) : String(a).toLowerCase();
+  const arr = pnCfg && pnCfg.wallets ? pnCfg.wallets[chain] : null;
+  if (Array.isArray(arr)) return new Set(arr.map(norm));
+  const f = fdCfg && fdCfg.wallets ? fdCfg.wallets[chain] : null;
+  if (Array.isArray(f)) return new Set(f.map(norm));
+  return null;
+}
+function renderPnCfg() {
+  if (!pnCfg || !$('pnEnabled')) return;
+  $('pnEnabled').checked = pnCfg.enabled !== false;
+  const explicit = Array.isArray((pnCfg.wallets || {})[activeChain]);
+  const sel = pnCfgSel(activeChain);
+  $('pnSubNote').textContent = explicit ? '本链单独设置 · 未勾选的不扫账本、不在盈亏页显示' : '当前沿用「钱包资金查询」的勾选 · 改动任一项后转为本链单独设置';
+  $('pnFollowBtn').style.display = explicit ? '' : 'none';
+  $('pnList').innerHTML = walletList.map(w => `<label class="wm-item nm-check${wOn(w) ? '' : ' off'}">
+      <input type="checkbox" ${(sel === null || sel.has(nmNorm(w.address))) ? 'checked' : ''} onchange="pnCfgToggleWallet('${escH(w.address)}', this.checked)">
+      <span class="wm-item-name">${escH(w.name)}</span>${wOn(w) ? '' : '<span class="wm-off-tag">已停用</span>'}
+      <span class="wm-item-addr">${escH(w.address)}</span>
+    </label>`).join('') || wmHint();
+}
+function pnCfgToggleWallet(addr, on) {
+  if (!pnCfg.wallets || typeof pnCfg.wallets !== 'object') pnCfg.wallets = {};
+  // 沿用态下首次改动: 先把当前解析出的勾选物化为本链列表再增删
+  if (!Array.isArray(pnCfg.wallets[activeChain])) {
+    const sel = pnCfgSel(activeChain);
+    pnCfg.wallets[activeChain] = walletList.filter(w => sel === null || sel.has(nmNorm(w.address))).map(w => nmNorm(w.address));
+  }
+  const arr = pnCfg.wallets[activeChain], n = nmNorm(addr);
+  const i = arr.findIndex(a => nmNorm(a) === n);
+  if (on && i < 0) arr.push(n);
+  if (!on && i >= 0) arr.splice(i, 1);
+  savePnCfg();
+}
+function pnFollowFund() { if (!pnCfg || !pnCfg.wallets) return; delete pnCfg.wallets[activeChain]; savePnCfg(); }
+async function savePnCfg() {
+  if (!pnCfg) return;
+  const body = { enabled: $('pnEnabled').checked, wallets: pnCfg.wallets || {}, _chain: activeChain };
+  try {
+    const r = await fetch('/api/pnl/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
+    pnCfg = await r.json();
+    renderPnCfg();
+    $('pnError').style.display = 'none';
+  } catch (e) {
+    const el = $('pnError');
+    el.textContent = '保存失败: ' + e.message;
+    el.style.display = 'block';
+  }
+}
+
 // =============================================================
 // 钱包盈亏页: /api/<chain>/pnl?wallet= —— 账本里全部仓位 (活跃 + 已关闭) + 资金对照
 //   rh/arc: 服务端 pnl-ledger 按钱包 Transfer 流水 + 仓位事件重放, 成本=钱包实付; 其他链只有活跃仓 (成本按开仓时价)
@@ -2382,8 +2461,13 @@ async function pnInit() {
 }
 async function pnLoadWallets() {
   try {
+    if (!pnCfg) await loadPnCfg();
+    if (!fdCfg) await loadFdCfg();
     const r = await fetch(pnApi(pnChain) + '/wallets');
-    pnWalletsByChain[pnChain] = r.ok ? await r.json() : [];
+    const all = r.ok ? await r.json() : [];
+    // 只列设置页「钱包盈亏」勾选的钱包 (未单独勾选的链沿用「钱包资金查询」的勾选)
+    const sel = pnCfgSel(pnChain);
+    pnWalletsByChain[pnChain] = all.filter(w => sel === null || sel.has(pnChain === 'sol' ? String(w.address) : String(w.address).toLowerCase()));
   } catch { pnWalletsByChain[pnChain] = []; }
   const list = pnWalletsByChain[pnChain] || [];
   if (!pnWallet || !list.some(w => pnSame(w.address, pnWallet))) pnWallet = (list.find(w => w.enabled !== false) || list[0] || {}).address || null;
@@ -2414,7 +2498,7 @@ function renderPnToolbar() {
   $('pnToolbar').innerHTML = h; $('pnToolbar').style.display = 'flex';
 }
 async function loadPnl(refresh) {
-  if (!pnWallet) { $('pnTable').innerHTML = '<div class="sn-empty">该链还没有钱包<br>先在总览页「管理钱包」里添加</div>'; $('pnStrip').style.display = 'none'; $('pnFund').style.display = 'none'; $('pnNote').textContent = ''; return; }
+  if (!pnWallet) { $('pnTable').innerHTML = '<div class="sn-empty">该链没有勾选参与盈亏统计的钱包<br>到左侧「⚙ 设置 → 钱包盈亏」里勾选（未单独勾选的链沿用「钱包资金查询」的勾选）</div>'; $('pnStrip').style.display = 'none'; $('pnFund').style.display = 'none'; $('pnMeta').textContent = ''; $('pnNote').textContent = ''; return; }
   if (pnBusy) return;
   pnBusy = true;
   const b = $('pnRefreshBtn'); b.disabled = true; b.textContent = refresh ? '账本扫描中…' : '加载中…';
@@ -2454,7 +2538,8 @@ function renderPnl() {
   // 元信息
   const w = d.wallet || {};
   let meta = escH(w.name || '') + ' · ' + sA(String(w.address || ''));
-  if (d.ledger) meta += d.pending ? ' · 账本尚未扫描' : (d.partial ? ' · 高频钱包, 账本放弃' : ' · 账本 ' + (d.updatedAt ? tA(d.updatedAt) : '待计算') + (d.scanning ? ' · 扫描中' : '') + (d.catchingUp ? ' · 流水未扫完' : ''));
+  if (d.ledgerEnabled === false) meta += ' · 账本已在设置中关闭 (只显示现有数据)';
+  else if (d.ledger) meta += d.pending ? ' · 账本尚未扫描' : (d.partial ? ' · 高频钱包, 账本放弃' : ' · 账本 ' + (d.updatedAt ? tA(d.updatedAt) : '待计算') + (d.scanning ? ' · 扫描中' : '') + (d.catchingUp ? ' · 流水未扫完' : ''));
   else meta += ' · 本链无钱包账本';
   $('pnMeta').textContent = meta;
   // 统计条
@@ -2517,6 +2602,7 @@ if (!isPending()) loadWallets();
 loadNotifyCfg();
 loadFdCfg();
 loadUiCfg();
+loadPnCfg();
 loadData();
 if (location.hash === '#settings') openSettings();   // 设置页刷新保持
 else if (location.hash === '#snapshot') openSnap();   // 快照页刷新保持

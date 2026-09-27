@@ -1766,7 +1766,8 @@ app.get('/api/pnl', (req, res) => {
   const rep = pnlLedger.walletReport('bsc', addr, liveWallet);
   let idleUSD = null;
   for (const [a, wI] of Object.entries(data?.idle?.byWallet || {})) if (a.toLowerCase() === addr) idleUSD = wI.totalUSD || 0;
-  res.json({ chain: 'bsc', wallet: { address: addr, name: wcfg?.name || liveWallet?.name || addr, enabled: wcfg ? wcfg.enabled !== false : true }, ...rep, idleUSD, lpUSD: liveWallet ? (liveWallet.totalUSD || 0) : 0, funding: null, dataTs: data?.timestamp || 0 });
+  res.json({ chain: 'bsc', wallet: { address: addr, name: wcfg?.name || liveWallet?.name || addr, enabled: wcfg ? wcfg.enabled !== false : true }, ...rep, idleUSD, lpUSD: liveWallet ? (liveWallet.totalUSD || 0) : 0, funding: null, dataTs: data?.timestamp || 0,
+    selected: pnlSelectedAddrs('bsc', WALLETS.map(w => w.address)).has(addr), ledgerEnabled: loadPnlCfg().enabled });
 });
 
 app.get('/api/positions', async (req, res) => {
@@ -1781,7 +1782,7 @@ app.get('/api/positions', async (req, res) => {
 });
 
 // --- Solana (Meteora DLMM + Raydium CLMM + Orca Whirlpool) ---
-let solKickRefresh = null, evmKickRefresh = null;
+let solKickRefresh = null, evmKickRefresh = null, evmKickLedger = null;
 try {
   const solMod = require('./sol-adapter');
   solMod.mountSolRoutes(app, adminGuard);
@@ -1796,6 +1797,7 @@ try {
   const evmMod = require('./evm-adapter');
   evmMod.mountEvmRoutes(app, adminGuard);
   evmKickRefresh = evmMod.kickRefresh || null;
+  evmKickLedger = evmMod.kickLedger || null;
 } catch (e) {
   console.error('EVM adapter failed to mount:', e.message);
 }
@@ -1851,6 +1853,43 @@ app.post('/api/fund/config', adminGuard, (req, res) => {
   } catch {}
   console.log(`[fund] config saved: enabled=${next.enabled}, chains=${Object.keys(next.wallets).join(',') || '(all default)'}`);
   res.json(loadFundCfg());
+});
+
+// --- 钱包盈亏账本配置 (/api/pnl/config): 总开关 + 按链勾选钱包 ---
+// wallets.<chain> 未设置 = 沿用「钱包资金查询」该链的勾选; [] = 全不参与; 数组 = 勾选子集 (evm-adapter.pnlSelected 同语义)
+const PNL_CFG_FILE = path.join(__dirname, 'pnl-config.json');
+function loadPnlCfg() {
+  try {
+    const c = JSON.parse(fs.readFileSync(PNL_CFG_FILE, 'utf8'));
+    return { enabled: c.enabled !== false, wallets: (c.wallets && typeof c.wallets === 'object') ? c.wallets : {} };
+  } catch { return { enabled: true, wallets: {} }; }
+}
+function pnlSelectedAddrs(chain, walletAddrs) {
+  const pc = loadPnlCfg();
+  if (!pc.enabled) return new Set();
+  const norm = a => chain === 'sol' ? String(a) : String(a).toLowerCase();
+  const arr = Array.isArray(pc.wallets[chain]) ? pc.wallets[chain] : (Array.isArray(loadFundCfg().wallets[chain]) ? loadFundCfg().wallets[chain] : null);
+  return new Set((arr || walletAddrs).map(norm));
+}
+app.get('/api/pnl/config', (req, res) => res.json(loadPnlCfg()));
+app.post('/api/pnl/config', adminGuard, (req, res) => {
+  const body = req.body || {};
+  const cur = loadPnlCfg();
+  const next = { enabled: body.enabled !== false, wallets: {} };
+  const VALID_CHAINS = ['bsc', 'sol', 'eth', 'rh', 'base', 'arc'];
+  const src = (body.wallets && typeof body.wallets === 'object') ? body.wallets : cur.wallets;
+  for (const [ch, arr] of Object.entries(src)) {
+    if (!VALID_CHAINS.includes(ch)) continue;
+    if (Array.isArray(arr)) next.wallets[ch] = arr.slice(0, 60).map(a => String(a).slice(0, 64));
+  }
+  try {
+    const tmp = PNL_CFG_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2)); fs.renameSync(tmp, PNL_CFG_FILE);
+  } catch (e) { return res.status(500).json({ error: '写入失败: ' + e.message }); }
+  const ch = String(body._chain || '');
+  try { if (next.enabled && evmKickLedger && ['rh', 'arc'].includes(ch)) evmKickLedger(ch); } catch {}
+  console.log(`[pnl] config saved: enabled=${next.enabled}, chains=${Object.keys(next.wallets).join(',') || '(沿用资金查询)'}`);
+  res.json(loadPnlCfg());
 });
 
 // --- 界面配置 (/api/ui/config): 总览页「管理钱包」面板显隐开关 (纯前端偏好, 服务端持久化以便多端一致) ---

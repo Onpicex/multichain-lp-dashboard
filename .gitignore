@@ -39,3 +39,4 @@ pcs-hist-cache-*.json
 *.orig-bak
 # 2026-09-27 补: 钱包盈亏账本 (rh/arc Transfer 流水 + 仓位事件, 含钱包地址)
 pnl-ledger-*.json
+pnl-config.json
