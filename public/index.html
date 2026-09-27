@@ -191,32 +191,30 @@
   .idle-empty { font-size: 12px; color: var(--text-muted); padding: 14px 10px; }
   /* 设置页 (侧栏一级目录, 与仪表盘视图互斥) — 卡片式分组 */
   .st-page { max-width: 960px; padding: 20px 0 40px; display: flex; flex-direction: column; gap: 0; }
-  .st-card {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-    overflow: hidden;
-  }
-  .st-card-head {
-    display: flex; align-items: center; gap: 14px;
-    padding: 16px 18px; border-bottom: 1px solid var(--border);
-  }
-  .st-card-ico {
-    width: 38px; height: 38px; border-radius: 10px; flex-shrink: 0;
-    display: flex; align-items: center; justify-content: center; font-size: 18px;
-  }
-  .st-card-ico.fund { background: var(--accent-dim); }
-  .st-card-ico.bell { background: var(--yellow-dim); }
-  .st-card-ico.snap { background: rgba(14,165,233,0.14); }
-  .st-card-ico.wm { background: var(--green-dim); }
-  .st-card-ico.pnl { background: rgba(34,197,94,0.14); font-weight: 700; }
-  .st-card-titles { min-width: 0; flex: 1; }
-  .st-card-title { font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
-  .st-card-desc { font-size: 11.5px; color: var(--text-muted); margin-top: 3px; line-height: 1.5; }
   .st-badge {
     font-family: var(--mono); font-size: 10px; font-weight: 600;
     color: var(--accent); background: var(--accent-dim);
     padding: 1px 7px; border-radius: 9px;
   }
-  .st-card-body { padding: 14px 18px 16px; }
+  /* 设置页: 与钱包盈亏页同风格 (胶囊切换 + 表格 + 底部说明) */
+  .st-head { display: flex; align-items: center; gap: 14px; padding: 14px 2px 12px; border-bottom: 1px solid var(--border); }
+  .st-head-main { flex: 1; min-width: 0; }
+  .st-title { font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  .st-desc { font-size: 11.5px; color: var(--text-muted); margin-top: 3px; line-height: 1.5; }
+  .st-sub-page .st-opts { padding: 12px 2px 0; margin-bottom: 2px; }
+  .st-sub-page .nm-status { padding: 8px 2px 0; margin-bottom: 0; }
+  .st-sub-page .st-sub { padding: 12px 2px 0; margin: 0; }
+  .st-sub-page .sn-tw { margin-top: 6px; }
+  .st-table th:nth-child(2), .st-table td.st-addr, .st-table th:nth-child(3), .st-table td.st-state { text-align: left; }
+  .st-table td.st-name { font-family: var(--font); font-weight: 600; color: var(--text); }
+  .st-table td.st-addr { font-size: 11.5px; color: var(--text-dim); user-select: all; }
+  .st-table td.st-sw { width: 60px; }
+  .st-table tr.off td { opacity: 0.55; }
+  .st-table tr.off td.st-name { text-decoration: line-through; text-decoration-color: var(--border-light); }
+  .st-sub-page .nm-hint { padding: 30px 12px; text-align: center; color: var(--text-muted); font-size: 12.5px; }
+  .switch.sm { width: 36px; height: 20px; }
+  .switch.sm .switch-track::after { width: 14px; height: 14px; }
+  .switch.sm input:checked + .switch-track::after { transform: translateX(16px); }
   .st-sub { font-size: 12px; font-weight: 600; color: var(--text-dim); margin: 10px 0 8px; }
   .st-sub:first-child { margin-top: 0; }
   .st-sub-note { font-size: 10.5px; font-weight: 400; color: var(--text-muted); margin-left: 6px; }
@@ -236,56 +234,9 @@
   .switch input:checked + .switch-track { background: var(--accent); }
   .switch input:checked + .switch-track::after { transform: translateX(18px); }
   /* 钱包胶囊网格 (勾选高亮) */
-  .st-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px; }
-  .st-grid .wm-item {
-    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
-    padding: 9px 12px; transition: border-color 0.12s, background 0.12s;
-    justify-content: flex-start; overflow: hidden;
-  }
-  .st-grid .wm-item:hover { border-color: var(--border-light); }
-  .st-grid .wm-item:has(input:checked) { border-color: var(--accent); background: var(--accent-dim); }
-  .st-grid .nm-hint { grid-column: 1 / -1; }
-  .st-card select { background: var(--bg); }
-  .st-card .nm-test-btn { margin-left: auto; }
   /* 设置标签页: 顶部一排标签, 每个功能一块, 只显示当前标签 */
-  .st-tabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--border); }
-  .st-tabs::-webkit-scrollbar { display: none; }
-  .st-tab {
-    display: flex; align-items: center; gap: 7px; padding: 11px 16px; margin-bottom: -1px;
-    font-family: var(--font); font-size: 13px; font-weight: 600; color: var(--text-dim);
-    background: transparent; border: none; border-bottom: 2px solid transparent; cursor: pointer; white-space: nowrap;
-    transition: color 0.12s, border-color 0.12s;
-  }
-  .st-tab:hover { color: var(--text); }
-  .st-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
-  .st-tab .st-tab-ico { font-size: 14px; line-height: 1; }
-  .st-tab .st-tab-state { font-family: var(--mono); font-size: 10px; font-weight: 500; color: var(--text-muted); background: var(--bg); border: 1px solid var(--border); border-radius: 9px; padding: 1px 6px; }
-  .st-tab.active .st-tab-state { color: var(--accent); border-color: var(--accent-dim); background: var(--accent-dim); }
-  .st-tab .st-tab-state.on { color: var(--green); }
-  .st-sub-page .st-card { border-top-left-radius: 0; border-top-right-radius: 0; border-top: none; }
-  .st-sub-page .st-card-head { padding: 18px 20px; }
-  .st-sub-page .st-card-title { font-size: 16px; }
-  .st-sub-page .st-card-desc { font-size: 12.5px; margin-top: 5px; }
-  .st-sub-page .st-card-body { padding: 18px 20px 20px; }
-  .st-sub-page .st-sub { font-size: 12.5px; }
-  .st-sub-page .st-grid { grid-template-columns: 1fr; gap: 6px; }
-  .st-sub-page .st-grid .wm-item { padding: 11px 14px; font-size: 13px; }
-  .st-sub-page .st-grid .wm-item input[type="checkbox"] { width: 16px; height: 16px; }
-  .st-sub-page .switch { width: 48px; height: 27px; }
-  .st-sub-page .switch-track::after { width: 21px; height: 21px; }
-  .st-sub-page .switch input:checked + .switch-track::after { transform: translateX(21px); }
   @media (max-width: 480px) {
-    .st-tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
-    .st-tabs::-webkit-scrollbar { display: none; }
-    .st-tab { padding: 10px 12px; font-size: 12px; gap: 5px; }
-    .st-tab .st-tab-state { display: none; }
-    .st-sub-page .st-card-head { padding: 14px; }
-    .st-sub-page .st-card-body { padding: 14px; }
     .st-page { padding: 12px 0 30px; gap: 12px; }
-    .st-card-head { padding: 13px 14px; gap: 10px; }
-    .st-card-body { padding: 12px 14px 14px; }
-    .st-card-ico { width: 32px; height: 32px; font-size: 15px; border-radius: 8px; }
-    .st-grid { grid-template-columns: 1fr; }
   }
   /* 初始资金 (净入金) 摘要 + 转账明细 */
   .fund-bar {
@@ -949,106 +900,81 @@
       <button class="refresh-btn" onclick="closeSettings()">返回总览</button>
     </div>
   </div>
-  <div class="st-page">
-    <!-- 标签页: 每个功能一个标签, 只显示当前标签的那块 -->
-    <div class="st-tabs" id="stTabs"></div>
+  <div class="sn-page">
+    <!-- 功能切换: 与钱包盈亏页同款胶囊筛选; 只显示当前功能那块 -->
+    <div class="sn-toolbar" id="stTabs"></div>
     <section class="st-sub-page" data-st="wallets" style="display:none">
-    <div class="st-card">
-      <div class="st-card-head">
-        <div class="st-card-ico wm">💼</div>
-        <div class="st-card-titles">
-          <div class="st-card-title">管理钱包 <span class="st-badge" id="wmStCount">0</span></div>
-          <div class="st-card-desc">在总览页显示「💼 管理钱包」面板（添加 / 编辑 / 删除钱包）· 关闭后面板隐藏，防止误删误改，需要增删钱包时再打开</div>
+      <div class="st-head">
+        <div class="st-head-main">
+          <div class="st-title">管理钱包 <span class="st-badge" id="wmStCount">0</span></div>
+          <div class="st-desc">在总览页显示「💼 管理钱包」面板（添加 / 编辑 / 删除钱包）· 关闭后面板隐藏，防止误删误改，需要增删钱包时再打开</div>
         </div>
         <label class="switch" title="显示/隐藏总览页的管理钱包面板"><input type="checkbox" id="wmEnabled" onchange="saveUiCfg()"><span class="switch-track"></span></label>
       </div>
-      <div class="st-card-body">
-        <div class="nm-status" id="wmStStatus" style="margin-bottom:0"></div>
-        <div class="wm-error" id="wmStError"></div>
-      </div>
-    </div>
+      <div class="nm-status" id="wmStStatus"></div>
+      <div class="wm-error" id="wmStError"></div>
     </section>
     <section class="st-sub-page" data-st="fund" style="display:none">
-    <div class="st-card">
-      <div class="st-card-head">
-        <div class="st-card-ico fund">💰</div>
-        <div class="st-card-titles">
-          <div class="st-card-title">钱包资金查询</div>
-          <div class="st-card-desc">统计条显示钱包余额与初始资金 · 随 LP 数据每 5 分钟刷新，点「刷新」同步更新</div>
+      <div class="st-head">
+        <div class="st-head-main">
+          <div class="st-title">钱包资金查询</div>
+          <div class="st-desc">统计条显示钱包余额与初始资金 · 随 LP 数据每 5 分钟刷新，点「刷新」同步更新</div>
         </div>
         <label class="switch" title="启用/关闭本功能"><input type="checkbox" id="fdEnabled" onchange="saveFdCfg()"><span class="switch-track"></span></label>
       </div>
-      <div class="st-card-body">
-        <div class="st-sub">参与查询的钱包 <span class="st-sub-note">未勾选的不查余额、不计入总价值</span></div>
-        <div class="st-grid" id="fdList"></div>
-        <div class="wm-error" id="fdError"></div>
-      </div>
-    </div>
+      <div class="st-sub">参与查询的钱包 <span class="st-sub-note">未勾选的不查余额、不计入总价值</span></div>
+      <div class="sn-tw" id="fdList"></div>
+      <div class="wm-error" id="fdError"></div>
     </section>
     <section class="st-sub-page" data-st="pnl" style="display:none">
-    <div class="st-card">
-      <div class="st-card-head">
-        <div class="st-card-ico pnl">盈</div>
-        <div class="st-card-titles">
-          <div class="st-card-title">钱包盈亏</div>
-          <div class="st-card-desc">左侧「钱包盈亏」页只列勾选的钱包，账本（Robinhood / Arc 的真实开仓成本与历史仓位）也只给勾选的钱包扫 · 未单独勾选的链沿用上方「钱包资金查询」的勾选</div>
+      <div class="st-head">
+        <div class="st-head-main">
+          <div class="st-title">钱包盈亏</div>
+          <div class="st-desc">左侧「钱包盈亏」页只列勾选的钱包，账本（真实开仓成本与历史仓位）也只给勾选的钱包扫 · 未单独勾选的链沿用「钱包资金查询」的勾选</div>
         </div>
         <label class="switch" title="启用/关闭钱包盈亏账本"><input type="checkbox" id="pnEnabled" onchange="savePnCfg()"><span class="switch-track"></span></label>
       </div>
-      <div class="st-card-body">
-        <div class="st-sub">参与盈亏统计的钱包 <span class="st-sub-note" id="pnSubNote">未勾选的不扫账本、不在盈亏页显示</span> <button class="nm-test-btn" id="pnFollowBtn" onclick="pnFollowFund()" style="display:none">恢复沿用资金查询勾选</button></div>
-        <div class="st-grid" id="pnList"></div>
-        <div class="wm-error" id="pnError"></div>
-      </div>
-    </div>
+      <div class="st-sub">参与盈亏统计的钱包 <span class="st-sub-note" id="pnSubNote">未勾选的不扫账本、不在盈亏页显示</span> <button class="nm-test-btn" id="pnFollowBtn" onclick="pnFollowFund()" style="display:none">恢复沿用资金查询勾选</button></div>
+      <div class="sn-tw" id="pnList"></div>
+      <div class="wm-error" id="pnError"></div>
     </section>
     <section class="st-sub-page" data-st="snapshot" style="display:none">
-    <div class="st-card">
-      <div class="st-card-head">
-        <div class="st-card-ico snap">📷</div>
-        <div class="st-card-titles">
-          <div class="st-card-title">资金快照 <span class="st-badge" id="spCount">0 天</span></div>
-          <div class="st-card-desc">每天到点自动记录一次「钱包余额 + LP 价值」，在左侧「资金快照」页查看逐日增减 · 钱包余额部分沿用上方「钱包资金查询」的勾选，未勾选的钱包只记 LP</div>
+      <div class="st-head">
+        <div class="st-head-main">
+          <div class="st-title">资金快照 <span class="st-badge" id="spCount">0 天</span></div>
+          <div class="st-desc">每天到点自动记录一次「钱包余额 + LP 价值」，在左侧「资金快照」页查看逐日增减 · 钱包余额部分沿用「钱包资金查询」的勾选，未勾选的钱包只记 LP</div>
         </div>
         <label class="switch" title="启用/关闭每日自动快照"><input type="checkbox" id="spEnabled" onchange="saveSpCfg()"><span class="switch-track"></span></label>
       </div>
-      <div class="st-card-body">
-        <div class="st-opts">
-          <label class="nm-opt">每日快照时间 <input type="time" class="sp-time" id="spTime" value="00:05" onchange="saveSpCfg()"></label>
-          <span class="nm-opt" id="spTz" style="cursor:default"></span>
-          <button class="nm-test-btn" id="spNowBtn" onclick="snapNow()">立即快照</button>
-        </div>
-        <div class="nm-status" id="spStatus"></div>
-        <div class="st-sub">参与快照的钱包 <span class="st-sub-note">未勾选的钱包不计入快照</span></div>
-        <div class="st-grid" id="spList"></div>
-        <div class="wm-error" id="spError"></div>
+      <div class="st-opts">
+        <label class="nm-opt">每日快照时间 <input type="time" class="sp-time" id="spTime" value="00:05" onchange="saveSpCfg()"></label>
+        <span class="nm-opt" id="spTz" style="cursor:default"></span>
+        <button class="nm-test-btn" id="spNowBtn" onclick="snapNow()">立即快照</button>
       </div>
-    </div>
+      <div class="nm-status" id="spStatus"></div>
+      <div class="st-sub">参与快照的钱包 <span class="st-sub-note">未勾选的钱包不计入快照</span></div>
+      <div class="sn-tw" id="spList"></div>
+      <div class="wm-error" id="spError"></div>
     </section>
     <section class="st-sub-page" data-st="notify" style="display:none">
-    <div class="st-card">
-      <div class="st-card-head">
-        <div class="st-card-ico bell">🔔</div>
-        <div class="st-card-titles">
-          <div class="st-card-title">出区间通知 <span class="st-badge" id="nmCount">0</span></div>
-          <div class="st-card-desc">已勾选钱包的活跃仓位出区间时，经哨兵 Telegram 推送</div>
+      <div class="st-head">
+        <div class="st-head-main">
+          <div class="st-title">出区间通知 <span class="st-badge" id="nmCount">0</span></div>
+          <div class="st-desc">已勾选钱包的活跃仓位出区间时，经哨兵 Telegram 推送</div>
         </div>
         <label class="switch" title="启用/关闭本功能"><input type="checkbox" id="nmEnabled" onchange="saveNotifyCfg()"><span class="switch-track"></span></label>
       </div>
-      <div class="st-card-body">
-        <div class="st-opts">
-          <label class="nm-opt"><input type="checkbox" id="nmRecover" onchange="saveNotifyCfg()"> 回区间也通知</label>
-          <label class="nm-opt">检查间隔 <select id="nmInterval" onchange="saveNotifyCfg()">
-            <option value="5">5 分钟</option><option value="10">10 分钟</option><option value="30">30 分钟</option>
-          </select></label>
-          <button class="nm-test-btn" id="nmTestBtn" onclick="testNotify()">发送测试</button>
-        </div>
-        <div class="nm-status" id="nmStatus"></div>
-        <div class="st-sub">监控的钱包 <span class="st-sub-note">仅勾选的钱包触发通知</span></div>
-        <div class="st-grid" id="nmList"></div>
-        <div class="wm-error" id="nmError"></div>
+      <div class="st-opts">
+        <label class="nm-opt"><input type="checkbox" id="nmRecover" onchange="saveNotifyCfg()"> 回区间也通知</label>
+        <label class="nm-opt">检查间隔 <select id="nmInterval" onchange="saveNotifyCfg()">
+          <option value="5">5 分钟</option><option value="10">10 分钟</option><option value="30">30 分钟</option>
+        </select></label>
+        <button class="nm-test-btn" id="nmTestBtn" onclick="testNotify()">发送测试</button>
       </div>
-    </div>
+      <div class="nm-status" id="nmStatus"></div>
+      <div class="st-sub">监控的钱包 <span class="st-sub-note">仅勾选的钱包触发通知</span></div>
+      <div class="sn-tw" id="nmList"></div>
+      <div class="wm-error" id="nmError"></div>
     </section>
   </div>
 </div><!-- /#settingsView -->
@@ -1454,6 +1380,13 @@ function protoTag(p) {
   return `<span class="protocol-tag ${proto.toLowerCase()}">${proto}</span>`;
 }
 
+// 设置页钱包列表 (四处共用): 与钱包盈亏页同款表格, 地址整列完整显示 (不再省略号截断), 参与开关用小拨杆
+function stRows(isChecked, fn) {
+  if (!walletList.length) return wmHint();
+  return '<table class="sn-table st-table"><thead><tr><th>钱包</th><th>地址</th><th>状态</th><th>参与</th></tr></thead><tbody>'
+    + walletList.map(w => `<tr class="${wOn(w) ? '' : 'off'}"><td class="st-name">${escH(w.name)}</td><td class="st-addr">${escH(w.address)}</td><td class="st-state">${wOn(w) ? '<span class="pn-st act">启用</span>' : '<span class="pn-st cls">已停用</span>'}</td><td class="st-sw"><label class="switch sm"><input type="checkbox" ${isChecked(w) ? 'checked' : ''} onchange="${fn}('${escH(w.address)}', this.checked)"><span class="switch-track"></span></label></td></tr>`).join('')
+    + '</tbody></table>';
+}
 // 开仓成本按币拆分的悬浮文本: costBy = { token地址: { q: 存入数量(毛), cost: 分摊成本 } }; tokens = [{address, symbol}]
 function costTip(costBy, tokens) {
   if (!costBy) return '';
@@ -1880,16 +1813,17 @@ function stState(key) {   // 标签上的状态摘要 (当前链)
 }
 function renderStTabs() {
   const el = $('stTabs'); if (!el) return;
-  el.innerHTML = ST_PAGES.map(p => {
+  el.innerHTML = '<span class="filter-label">功能</span>' + ST_PAGES.map(p => {
     const st = stState(p.key);
-    return `<button class="st-tab${p.key === stKey ? ' active' : ''}" data-st="${p.key}" onclick="stSelectTab('${p.key}')" title="${escH(p.desc)}"><span class="st-tab-ico">${p.icon}</span>${p.title}${st ? `<span class="st-tab-state${st.on ? ' on' : ''}">${escH(st.text)}</span>` : ''}</button>`;
+    return `<button class="ftag${p.key === stKey ? ' active' : ''}" data-st="${p.key}" onclick="stSelectTab('${p.key}')" title="${escH(p.desc)}">${p.title}${st ? `<span class="fcount">${escH(st.text)}</span>` : ''}</button>`;
   }).join('');
+  el.style.display = 'flex';
 }
 function stSelectTab(key) {
   stKey = ST_PAGES.some(p => p.key === key) ? key : ST_PAGES[0].key;
   try { localStorage.setItem('stTab', stKey); } catch {}
   document.querySelectorAll('#settingsView .st-sub-page').forEach(sec => { sec.style.display = sec.dataset.st === stKey ? '' : 'none'; });
-  document.querySelectorAll('#stTabs .st-tab').forEach(b => b.classList.toggle('active', b.dataset.st === stKey));
+  document.querySelectorAll('#stTabs .ftag').forEach(b => b.classList.toggle('active', b.dataset.st === stKey));
   if (settingsOpen) history.replaceState(null, '', '#settings/' + stKey);
 }
 function openSettings(key) {
@@ -1990,11 +1924,7 @@ function renderFd() {
   if (!fdCfg) return;
   $('fdEnabled').checked = fdCfg.enabled !== false;
   const sel = fdSelSet();
-  $('fdList').innerHTML = walletList.map(w => `<label class="wm-item nm-check${wOn(w) ? '' : ' off'}">
-      <input type="checkbox" ${(sel === null || sel.has(nmNorm(w.address))) ? 'checked' : ''} onchange="fdToggleWallet('${escH(w.address)}', this.checked)">
-      <span class="wm-item-name">${escH(w.name)}</span>${wOn(w) ? '' : '<span class="wm-off-tag">已停用</span>'}
-      <span class="wm-item-addr">${escH(w.address)}</span>
-    </label>`).join('') || wmHint();
+  $('fdList').innerHTML = stRows(w => (sel === null || sel.has(nmNorm(w.address))), 'fdToggleWallet');
 }
 function fdToggleWallet(addr, on) {
   // 未设置(全选)状态下首次改动: 先物化为全量列表再增删
@@ -2047,11 +1977,7 @@ function renderNotify() {
   $('nmRecover').checked = notifyCfg.notifyRecover !== false;
   $('nmInterval').value = String(notifyCfg.intervalMin || 5);
   const sel = new Set(nmSelArr().map(nmNorm));
-  $('nmList').innerHTML = walletList.map(w => `<label class="wm-item nm-check${wOn(w) ? '' : ' off'}">
-      <input type="checkbox" ${sel.has(nmNorm(w.address)) ? 'checked' : ''} onchange="nmToggleWallet('${escH(w.address)}', this.checked)">
-      <span class="wm-item-name">${escH(w.name)}</span>${wOn(w) ? '' : '<span class="wm-off-tag">已停用</span>'}
-      <span class="wm-item-addr">${escH(w.address)}</span>
-    </label>`).join('') || wmHint();
+  $('nmList').innerHTML = stRows(w => sel.has(nmNorm(w.address)), 'nmToggleWallet');
   const ch = notifyCfg.channelReady
     ? '<span style="color:var(--green)">哨兵 Telegram ●</span>'
     : '<span style="color:var(--red)">哨兵 Telegram ● 服务器未配置</span>';
@@ -2431,11 +2357,7 @@ function renderSp() {
   const nx = !spCfg.enabled ? '自动快照已停用' : (spCfg.todayDone ? '今日已完成，下次 明天 ' + spCfg.time : '下次 今天 ' + spCfg.time + (spCfg.running ? '（进行中…）' : ''));
   $('spStatus').innerHTML = escH(lr) + ' · ' + escH(nx) + (spCfg.lastError ? ' · <span style="color:var(--red)">上次失败: ' + escH(spCfg.lastError) + '</span>' : '');
   const sel = spSelSet();
-  $('spList').innerHTML = walletList.map(w => `<label class="wm-item nm-check${wOn(w) ? '' : ' off'}">
-      <input type="checkbox" ${(sel === null || sel.has(nmNorm(w.address))) ? 'checked' : ''} onchange="spToggleWallet('${escH(w.address)}', this.checked)">
-      <span class="wm-item-name">${escH(w.name)}</span>${wOn(w) ? '' : '<span class="wm-off-tag">已停用</span>'}
-      <span class="wm-item-addr">${escH(w.address)}</span>
-    </label>`).join('') || wmHint();
+  $('spList').innerHTML = stRows(w => (sel === null || sel.has(nmNorm(w.address))), 'spToggleWallet');
 }
 function spToggleWallet(addr, on) {
   if (!Array.isArray(spCfg.wallets[activeChain])) spCfg.wallets[activeChain] = walletList.map(w => nmNorm(w.address));
@@ -2490,11 +2412,7 @@ function renderPnCfg() {
   const sel = pnCfgSel(activeChain);
   $('pnSubNote').textContent = explicit ? '本链单独设置 · 未勾选的不扫账本、不在盈亏页显示' : '当前沿用「钱包资金查询」的勾选 · 改动任一项后转为本链单独设置';
   $('pnFollowBtn').style.display = explicit ? '' : 'none';
-  $('pnList').innerHTML = walletList.map(w => `<label class="wm-item nm-check${wOn(w) ? '' : ' off'}">
-      <input type="checkbox" ${(sel === null || sel.has(nmNorm(w.address))) ? 'checked' : ''} onchange="pnCfgToggleWallet('${escH(w.address)}', this.checked)">
-      <span class="wm-item-name">${escH(w.name)}</span>${wOn(w) ? '' : '<span class="wm-off-tag">已停用</span>'}
-      <span class="wm-item-addr">${escH(w.address)}</span>
-    </label>`).join('') || wmHint();
+  $('pnList').innerHTML = stRows(w => (sel === null || sel.has(nmNorm(w.address))), 'pnCfgToggleWallet');
 }
 function pnCfgToggleWallet(addr, on) {
   if (!pnCfg.wallets || typeof pnCfg.wallets !== 'object') pnCfg.wallets = {};
