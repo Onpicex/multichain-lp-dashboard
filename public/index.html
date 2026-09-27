@@ -123,7 +123,6 @@
     .nav-item .chain-name { display: none; }
     .nav-item .chain-ico { width: 26px; height: 26px; font-size: 12px; }
     .nav-soon { display: none; }
-    #settingsNav .st-subnav { display: none; }   /* 手机端: 只留 ⚙, 从设置目录页进子页 (带 id 提高优先级, 压过后文的桌面 display:flex) */
   }
 
   /* ── Header ── */
@@ -191,7 +190,7 @@
   .idle-note { font-size: 10.5px; color: var(--text-muted); padding: 8px 10px 0; }
   .idle-empty { font-size: 12px; color: var(--text-muted); padding: 14px 10px; }
   /* 设置页 (侧栏一级目录, 与仪表盘视图互斥) — 卡片式分组 */
-  .st-page { max-width: 860px; padding: 20px 0 40px; display: flex; flex-direction: column; gap: 16px; }
+  .st-page { max-width: 860px; padding: 20px 0 40px; display: flex; flex-direction: column; gap: 0; }
   .st-card {
     background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
     overflow: hidden;
@@ -248,29 +247,22 @@
   .st-grid .nm-hint { grid-column: 1 / -1; }
   .st-card select { background: var(--bg); }
   .st-card .nm-test-btn { margin-left: auto; }
-  /* 设置子页面 (侧栏「设置」下每个功能一页): 目录 + 子页 */
-  .st-subnav { display: flex; flex-direction: column; margin: 0 8px 4px 26px; border-left: 1px solid var(--border); padding-left: 4px; }
-  .nav-item.sub { padding: 7px 10px; margin: 1px 0; width: auto; font-size: 12px; font-weight: 500; gap: 8px; }
-  .nav-item.sub .st-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border-light); flex-shrink: 0; }
-  .nav-item.sub.active .st-dot { background: var(--accent); }
-  .nav-item.sub .chain-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .st-crumb { cursor: pointer; color: var(--text-muted); }
-  .st-crumb:hover { color: var(--accent); }
-  .st-index { display: flex; flex-direction: column; gap: 10px; }
-  .st-idx {
-    display: flex; align-items: center; gap: 14px; padding: 15px 18px; width: 100%;
-    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-    cursor: pointer; text-align: left; color: var(--text); font-family: var(--font);
-    transition: border-color 0.12s, background 0.12s;
+  /* 设置标签页: 顶部一排标签, 每个功能一块, 只显示当前标签 */
+  .st-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .st-tabs::-webkit-scrollbar { display: none; }
+  .st-tab {
+    display: flex; align-items: center; gap: 7px; padding: 11px 16px; margin-bottom: -1px;
+    font-family: var(--font); font-size: 13px; font-weight: 600; color: var(--text-dim);
+    background: transparent; border: none; border-bottom: 2px solid transparent; cursor: pointer; white-space: nowrap;
+    transition: color 0.12s, border-color 0.12s;
   }
-  .st-idx:hover { border-color: var(--accent); background: var(--surface-hover); }
-  .st-idx-main { flex: 1; min-width: 0; }
-  .st-idx-title { font-size: 14px; font-weight: 700; }
-  .st-idx-desc { font-size: 11.5px; color: var(--text-muted); margin-top: 3px; line-height: 1.5; }
-  .st-idx-state { font-family: var(--mono); font-size: 11px; color: var(--text-dim); white-space: nowrap; text-align: right; }
-  .st-idx-state.on { color: var(--green); }
-  .st-idx-state.off { color: var(--text-muted); }
-  .st-idx-arrow { color: var(--text-muted); font-size: 18px; line-height: 1; }
+  .st-tab:hover { color: var(--text); }
+  .st-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .st-tab .st-tab-ico { font-size: 14px; line-height: 1; }
+  .st-tab .st-tab-state { font-family: var(--mono); font-size: 10px; font-weight: 500; color: var(--text-muted); background: var(--bg); border: 1px solid var(--border); border-radius: 9px; padding: 1px 6px; }
+  .st-tab.active .st-tab-state { color: var(--accent); border-color: var(--accent-dim); background: var(--accent-dim); }
+  .st-tab .st-tab-state.on { color: var(--green); }
+  .st-sub-page .st-card { border-top-left-radius: 0; border-top-right-radius: 0; border-top: none; }
   .st-sub-page .st-card-head { padding: 18px 20px; }
   .st-sub-page .st-card-title { font-size: 16px; }
   .st-sub-page .st-card-desc { font-size: 12.5px; margin-top: 5px; }
@@ -283,8 +275,8 @@
   .st-sub-page .switch-track::after { width: 21px; height: 21px; }
   .st-sub-page .switch input:checked + .switch-track::after { transform: translateX(21px); }
   @media (max-width: 480px) {
-    .st-idx { padding: 12px 14px; gap: 10px; }
-    .st-idx-state { font-size: 10px; max-width: 34%; white-space: normal; }
+    .st-tab { padding: 10px 12px; font-size: 12px; gap: 5px; }
+    .st-tab .st-tab-state { display: none; }
     .st-sub-page .st-card-head { padding: 14px; }
     .st-sub-page .st-card-body { padding: 14px; }
     .st-page { padding: 12px 0 30px; gap: 12px; }
@@ -851,13 +843,6 @@
       <button class="nav-item" id="stNavBtn" onclick="openSettings()">
         <span class="chain-ico set">⚙</span> <span class="chain-name">设置</span>
       </button>
-      <div class="st-subnav" id="stSubNav">
-        <button class="nav-item sub" data-st="wallets" onclick="openSettings('wallets')"><span class="st-dot"></span><span class="chain-name">管理钱包</span></button>
-        <button class="nav-item sub" data-st="fund" onclick="openSettings('fund')"><span class="st-dot"></span><span class="chain-name">钱包资金查询</span></button>
-        <button class="nav-item sub" data-st="pnl" onclick="openSettings('pnl')"><span class="st-dot"></span><span class="chain-name">钱包盈亏</span></button>
-        <button class="nav-item sub" data-st="snapshot" onclick="openSettings('snapshot')"><span class="st-dot"></span><span class="chain-name">资金快照</span></button>
-        <button class="nav-item sub" data-st="notify" onclick="openSettings('notify')"><span class="st-dot"></span><span class="chain-name">出区间通知</span></button>
-      </div>
     </nav>
     <div class="sidebar-footer">UNISWAP V3+V4<br>v2.0 · rebuilt</div>
   </aside>
@@ -945,17 +930,16 @@
 <div id="settingsView" style="display:none;">
   <div class="header">
     <div class="header-left">
-      <span class="header-title" id="stTitle">设置</span>
+      <span class="header-title">设置</span>
     </div>
     <div class="header-right">
       <span class="chain-tag" id="stChainTag">BSC</span>
-      <button class="sn-btn2" id="stBackBtn" onclick="openSettings()" style="display:none">返回设置</button>
       <button class="refresh-btn" onclick="closeSettings()">返回总览</button>
     </div>
   </div>
   <div class="st-page">
-    <!-- 设置目录: 每个功能一个子页面 (侧栏「设置」下的子项 / 手机端从这里进) -->
-    <div class="st-index" id="stIndex"></div>
+    <!-- 标签页: 每个功能一个标签, 只显示当前标签的那块 -->
+    <div class="st-tabs" id="stTabs"></div>
     <section class="st-sub-page" data-st="wallets" style="display:none">
     <div class="st-card">
       <div class="st-card-head">
@@ -1861,13 +1845,12 @@ function showView(name) {
   $('snapView').style.display = snapOpen ? 'block' : 'none';
   $('pnlView').style.display = pnlOpen ? 'block' : 'none';
   $('stNavBtn').classList.toggle('active', settingsOpen);
-  if (!settingsOpen) document.querySelectorAll('#stSubNav .nav-item').forEach(b => b.classList.remove('active'));
   $('snNavBtn').classList.toggle('active', snapOpen);
   $('pnNavBtn').classList.toggle('active', pnlOpen);
   document.querySelectorAll('#chainNav .nav-item').forEach(b => b.classList.toggle('active', name === 'dash' && b.dataset.chain === activeChain));
   if (name !== 'dash') { try { localStorage.setItem('lpChain', activeChain); } catch {} }   // hash 被占用, 刷新后靠它恢复链
 }
-// 设置 = 目录页 (#settings) + 每个功能一个子页面 (#settings/<key>); 侧栏「设置」下列出子项, 手机端只留 ⚙ 从目录进
+// 设置 = 标签页: 每个功能一个标签 (#settings/<key>), 只显示当前标签那块; 上次选的标签记在 localStorage
 const ST_PAGES = [
   { key: 'wallets', ico: 'wm', icon: '💼', title: '管理钱包', desc: '总览页「管理钱包」面板的显示 / 隐藏；添加、编辑、停用钱包在总览页面板里操作' },
   { key: 'fund', ico: 'fund', icon: '💰', title: '钱包资金查询', desc: '统计条显示钱包余额与初始资金；按链勾选参与查询的钱包' },
@@ -1876,7 +1859,7 @@ const ST_PAGES = [
   { key: 'notify', ico: 'bell', icon: '🔔', title: '出区间通知', desc: '勾选钱包的活跃仓位出区间时，经哨兵 Telegram 推送' },
 ];
 let stKey = null;
-function stState(key) {   // 目录页右侧的状态摘要 (当前链)
+function stState(key) {   // 标签上的状态摘要 (当前链)
   const n = walletList.length;
   const cnt = arr => Array.isArray(arr) ? arr.length : n;
   switch (key) {
@@ -1893,34 +1876,33 @@ function stState(key) {   // 目录页右侧的状态摘要 (当前链)
   }
   return null;
 }
-function renderStIndex() {
-  const el = $('stIndex'); if (!el) return;
+function renderStTabs() {
+  const el = $('stTabs'); if (!el) return;
   el.innerHTML = ST_PAGES.map(p => {
     const st = stState(p.key);
-    return `<button class="st-idx" onclick="openSettings('${p.key}')">
-      <div class="st-card-ico ${p.ico}">${p.icon}</div>
-      <div class="st-idx-main"><div class="st-idx-title">${p.title}</div><div class="st-idx-desc">${p.desc}</div></div>
-      <span class="st-idx-state ${st ? (st.on ? 'on' : 'off') : ''}">${st ? escH(st.text) : '…'}</span><span class="st-idx-arrow">›</span></button>`;
+    return `<button class="st-tab${p.key === stKey ? ' active' : ''}" data-st="${p.key}" onclick="stSelectTab('${p.key}')" title="${escH(p.desc)}"><span class="st-tab-ico">${p.icon}</span>${p.title}${st ? `<span class="st-tab-state${st.on ? ' on' : ''}">${escH(st.text)}</span>` : ''}</button>`;
   }).join('');
+}
+function stSelectTab(key) {
+  stKey = ST_PAGES.some(p => p.key === key) ? key : ST_PAGES[0].key;
+  try { localStorage.setItem('stTab', stKey); } catch {}
+  document.querySelectorAll('#settingsView .st-sub-page').forEach(sec => { sec.style.display = sec.dataset.st === stKey ? '' : 'none'; });
+  document.querySelectorAll('#stTabs .st-tab').forEach(b => b.classList.toggle('active', b.dataset.st === stKey));
+  if (settingsOpen) history.replaceState(null, '', '#settings/' + stKey);
 }
 function openSettings(key) {
   showView('settings');
-  stKey = ST_PAGES.some(p => p.key === key) ? key : null;
   $('stChainTag').textContent = CHAIN_NAMES[activeChain] || activeChain;
-  document.querySelectorAll('#settingsView .st-sub-page').forEach(sec => { sec.style.display = sec.dataset.st === stKey ? '' : 'none'; });
-  $('stIndex').style.display = stKey ? 'none' : '';
-  $('stBackBtn').style.display = stKey ? '' : 'none';
-  const pg = ST_PAGES.find(p => p.key === stKey);
-  $('stTitle').innerHTML = pg ? `<span class="st-crumb" onclick="openSettings()">设置</span> › ${pg.title}` : '设置';
-  document.querySelectorAll('#stSubNav .nav-item').forEach(b => b.classList.toggle('active', b.dataset.st === stKey));
-  history.replaceState(null, '', stKey ? '#settings/' + stKey : '#settings');
-  renderStIndex();
+  let k = key;
+  if (!ST_PAGES.some(p => p.key === k)) { try { k = localStorage.getItem('stTab'); } catch {} }
+  stSelectTab(k);
+  renderStTabs();
   loadNotifyCfg(); loadFdCfg(); loadSpCfg(); loadUiCfg(); loadPnCfg();   // 进入时刷新状态
 }
-// 各配置渲染完顺带刷新目录页的状态摘要 (函数声明是全局绑定, 包一层即可, 不改各自的实现)
+// 各配置渲染完顺带刷新标签上的状态摘要 (函数声明是全局绑定, 包一层即可, 不改各自的实现)
 for (const fn of ['renderFd', 'renderSp', 'renderNotify', 'renderPnCfg', 'applyUiCfg']) {
   const orig = window[fn];
-  if (typeof orig === 'function') window[fn] = function (...a) { const r = orig.apply(this, a); renderStIndex(); return r; };
+  if (typeof orig === 'function') window[fn] = function (...a) { const r = orig.apply(this, a); renderStTabs(); return r; };
 }
 function closeSettings() {
   showView('dash');
@@ -2713,7 +2695,7 @@ loadFdCfg();
 loadUiCfg();
 loadPnCfg();
 loadData();
-if (location.hash.startsWith('#settings')) openSettings(location.hash.split('/')[1]);   // 设置页 / 子页刷新保持
+if (location.hash.startsWith('#settings')) openSettings(location.hash.split('/')[1]);   // 设置页 / 标签刷新保持
 else if (location.hash === '#snapshot') openSnap();   // 快照页刷新保持
 else if (location.hash === '#pnl') openPnl();         // 盈亏页刷新保持
 </script>
