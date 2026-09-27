@@ -339,9 +339,10 @@ function walletStatus(wallet) {
   if (!W) return { ledger: true, pending: true, scanning: s.busy };
   return { ledger: true, partial: !!W.partial, scanning: s.busy, catchingUp: !!W.stopped, updatedAt: W.computedAt || 0, txCount: Object.keys(W.txs).length };
 }
-function walletReport(wallet, liveWallet) {
+function walletReport(wallet, liveWallet, useLedger = true) {   // useLedger=false: 未勾选账本的钱包只按活跃仓出报告 (同 pnl-ledger)
   const status = walletStatus(wallet);
   const out = { ...status, positions: [], lots: [] };
+  if (!useLedger) { out.ledgerStale = !!status.ledger; out.ledger = false; out.pending = false; out.scanning = false; }
   const liveMap = new Map();
   for (const p of (liveWallet?.positions || [])) if (p.liquidityActive) liveMap.set(p._activityKey || p.positionKey, p);
   const seen = new Set();
@@ -354,7 +355,7 @@ function walletReport(wallet, liveWallet) {
     netProfitUSD: p.costBasisUSD > 0 ? (p.netProfitUSD ?? null) : null, netProfitPct: p.costBasisUSD > 0 ? (p.netProfitPct ?? null) : null, feesUnknown: !!p.feesUnknown,
     tokens: [p.token0, p.token1].map(t => ({ address: t.address, symbol: t.symbol })),
   });
-  if (status.ledger && !status.partial && !status.pending) {
+  if (useLedger && status.ledger && !status.partial && !status.pending) {
     const W = state().d.wallets[wallet];
     for (const [k, P] of Object.entries(W.pos)) {
       if (!P.c) continue;

@@ -979,13 +979,16 @@ function walletStatus(chainId, addr) {
   return { ledger: true, partial: !!W.partial, scanning: st.busy, catchingUp: !!W.stopped, updatedAt: W.computedAt || 0, txCount: Object.keys(W.txs).length };
 }
 // 钱包报告: 账本里的全部仓位 (活跃 + 已关闭), 活跃仓合并实时数据 (现值/待领费/盈亏字段由拉取主流程注入)
-function walletReport(chainId, addr, liveWallet) {
+// useLedger=false: 该钱包没勾选账本 (观察钱包未开账本 / 设置里没勾) — 不用账本结果 (可能是旧版算的、也不会再更新), 只按活跃仓出报告;
+//   ledgerStale 提示「盘里有旧账本数据, 开账本后会重算」
+function walletReport(chainId, addr, liveWallet, useLedger = true) {
   const status = walletStatus(chainId, addr);
   const out = { ...status, positions: [], lots: [] };
+  if (!useLedger) { out.ledgerStale = !!status.ledger; out.ledger = false; out.pending = false; out.scanning = false; }
   const liveMap = new Map();
   for (const p of (liveWallet?.positions || [])) liveMap.set(`${p.dex === 'pancake' ? 'pcs' : (p.protocol === 'V4' ? 'v4' : 'v3')}-${p.tokenId}`, p);
   const seen = new Set();
-  if (status.ledger && !status.partial && !status.pending) {
+  if (useLedger && status.ledger && !status.partial && !status.pending) {
     const W = ledgerState(chainId).d.wallets[low(addr)];
     for (const [key, P] of Object.entries(W.pos)) {
       if (!P.c) continue;
@@ -1004,11 +1007,13 @@ function rowFromLedger(key, P, live) {
   const valueUSD = live ? (live.positionValueUSD || 0) : 0;
   const pending = live ? (live.feesValueUSD || 0) : 0;
   const closeTs = active ? 0 : (c.closeTs || 0);
-  const unseen = !active && c.note === 'unseen';   // 提回没捕获到: 净利润算不出, 不给误导数字
+  // 提回没捕获到: 净利润算不出, 不给误导数字. 含旧版结果里的 'notlive' 标 (账本没再跑的观察钱包还留着旧字段), 以及
+  // 「已关闭但一分钱都没提回/没领过费」的仓 (退出 tx 没进账本, 否则至少有一笔提回) — 这类仓算 −成本 会把已实现盈亏拖出几十万的假亏
+  const unseen = !active && (c.note === 'unseen' || c.note === 'notlive' || (c.note !== 'transferred' && !(c.ret > 0) && !(c.fees > 0)));
   const net = valueUSD + pending + c.fees + c.ret - c.cost;
   return {
     key, protocol: P.k === 'v4' ? 'V4' : 'V3', dex: P.k === 'pcs' ? 'pancake' : undefined, tokenId: P.id, pair: live ? `${live.token0.symbol}/${live.token1.symbol}` : c.pair, feeLabel: live ? live.feeLabel : null, fee: c.fee,
-    status: active ? 'active' : 'closed', note: active ? '' : c.note, inRange: live ? !!live.inRange : null,
+    status: active ? 'active' : 'closed', note: active ? '' : (unseen ? 'unseen' : c.note), inRange: live ? !!live.inRange : null,
     openTs: c.openTs, closeTs, source: 'ledger',
     costUSD: c.cost, costApprox: c.approx, incomplete: c.inc, depositValueUSD: c.dep, adds: c.n, costBy: c.cb || null,
     valueUSD, pendingFeesUSD: pending, collectedFeesUSD: c.fees, withdrawnUSD: c.ret,

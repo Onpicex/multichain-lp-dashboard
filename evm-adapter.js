@@ -1764,6 +1764,7 @@ function loadFundCfgEvm() {
 }
 // 勾选子集; 未设置(非数组)=只看标了「自有」的钱包 (2026-09-28 起; 之前是全部钱包)
 function ownWallets(WALLETS) { return WALLETS.filter(w => w.own === true); }
+function ledgerWallets(WALLETS) { return WALLETS.filter(w => w.own === true || w.ledger === true); }   // 自有 ∪ 观察钱包里手动开了账本的
 function fundSelected(fundCfg, chainId, WALLETS) {
   if (!fundCfg.enabled) return [];
   const sel = fundCfg.wallets[chainId];
@@ -1784,8 +1785,8 @@ function pnlSelected(chainId, WALLETS) {
   const pc = loadPnlCfgEvm();
   if (!pc.enabled) return [];
   const pick = arr => { const s = new Set(arr.map(a => String(a).toLowerCase())); return WALLETS.filter(w => s.has(w.address.toLowerCase())); };
-  if (Array.isArray(pc.wallets[chainId])) return pick(pc.wallets[chainId]);
-  return ownWallets(WALLETS);   // 未单独设置 = 只看自有钱包
+  if (Array.isArray(pc.wallets[chainId])) return pick(pc.wallets[chainId]).concat(WALLETS.filter(w => w.ledger === true && !pc.wallets[chainId].some(a => String(a).toLowerCase() === w.address.toLowerCase())));
+  return ledgerWallets(WALLETS);   // 未单独设置 = 自有 + 手动开了账本的观察钱包
 }
 // 兜底快照按当前勾选过滤 (配置变更后旧快照可能含未勾选钱包)
 function filterIdleByWallets(idle, walletsSel) {
@@ -2302,7 +2303,8 @@ async function fetchInner(chainId, forceRefresh) {
 
   // 钱包闲置余额: 按 fund-config 启用/勾选过滤 (已停用钱包不查); 失败沿用上轮快照 (按当前勾选过滤), 不拖累主数据
   const fundCfg = loadFundCfgEvm();
-  const fundWallets = fundSelected(fundCfg, chainId, WALLETS.filter(w => stillOn.has(w.address.toLowerCase())));
+  // 2026-09-28: 余额对全部启用钱包查 (观察钱包的资金快照要用余额); 总览统计条只算自有/例外的那部分由前端按 own 过滤
+  const fundWallets = fundCfg.enabled ? WALLETS.filter(w => stillOn.has(w.address.toLowerCase())) : [];
   let idle = null;
   if (fundWallets.length) {
     idle = filterIdleByWallets(st.lastIdle || st.cache.data?.idle || null, fundWallets);
@@ -2313,7 +2315,7 @@ async function fetchInner(chainId, forceRefresh) {
   }
 
   // 强刷时同步跑一轮初始资金增量续扫 (每钱包 1 段×2 方向, 秒级), 让刷新按钮把资金数据一并带新
-  if (cfg.fundingFromLogs && fundWallets.length && forceRefresh) {
+  if (cfg.fundingFromLogs && fundSelected(fundCfg, chainId, fundWallets).length && forceRefresh) {
     await runFundingQueue(chainId).catch(e => console.error(`[${chainId}] funding sync:`, e.message?.slice(0, 80)));
   }
 
@@ -2381,7 +2383,8 @@ function mountEvmRoutes(app, adminGuard) {
       const data = st.cache.data;
       const liveWallet = (data?.wallets || []).find(w => w.address.toLowerCase() === addr) || null;
       const wcfg = loadWallets(chainId).find(w => w.address.toLowerCase() === addr) || null;
-      const rep = ledger.walletReport(chainId, addr, liveWallet);
+      const selected = pnlSelected(chainId, loadWallets(chainId)).some(w => w.address.toLowerCase() === addr);
+      const rep = ledger.walletReport(chainId, addr, liveWallet, selected);
       if (req.query.refresh === 'true' && ledger.enabled(chainId)) setImmediate(() => ledger.runQueue(chainId, liveByWallet(chainId)).catch(() => {}));
       let idleUSD = null;
       for (const [a, wI] of Object.entries(data?.idle?.byWallet || {})) if (a.toLowerCase() === addr) idleUSD = wI.totalUSD || 0;
@@ -2393,7 +2396,7 @@ function mountEvmRoutes(app, adminGuard) {
       res.json({
         chain: chainId, wallet: { address: addr, name: wcfg?.name || liveWallet?.name || addr, enabled: wcfg ? wcfg.enabled !== false : true },
         ...rep, idleUSD, lpUSD: liveWallet ? (liveWallet.totalUSD || 0) : 0, funding, dataTs: data?.timestamp || 0,
-        selected: pnlSelected(chainId, loadWallets(chainId)).some(w => w.address.toLowerCase() === addr), ledgerEnabled: loadPnlCfgEvm().enabled,
+        selected, ledgerEnabled: loadPnlCfgEvm().enabled,
       });
     });
     app.post(`${base}/wallets`, adminGuard, (req, res) => {
@@ -2432,9 +2435,11 @@ function mountEvmRoutes(app, adminGuard) {
       const wallets = loadWallets(chainId);
       const idx = wallets.findIndex(w => w.address.toLowerCase() === cur);
       if (idx === -1) return res.status(404).json({ error: '地址不存在' });
-      const { name, address, enabled, own } = req.body || {};
+      const { name, address, enabled, own, ledger } = req.body || {};
       let newName, newAddr, newEnabled;
       let newOwn;
+      let newLedger;
+      if (ledger !== undefined) { if (typeof ledger !== 'boolean') return res.status(400).json({ error: 'ledger 须为布尔值' }); newLedger = ledger; }   // 观察钱包手动开账本 (自有钱包默认开, 此标记无意义)
       if (own !== undefined) { if (typeof own !== 'boolean') return res.status(400).json({ error: 'own 须为布尔值' }); newOwn = own; }   // 自有(true)/观察(false): 资金查询·快照·盈亏·通知默认只看自有
       if (enabled !== undefined) {
         if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled 须为布尔值' });
@@ -2449,7 +2454,7 @@ function mountEvmRoutes(app, adminGuard) {
         if (!/^0x[0-9a-f]{40}$/.test(newAddr)) return res.status(400).json({ error: '无效的 EVM 地址' });
         if (newAddr !== cur && wallets.some((w, i) => i !== idx && w.address.toLowerCase() === newAddr)) return res.status(409).json({ error: '地址已存在' });
       }
-      if (newName === undefined && newAddr === undefined && newEnabled === undefined && newOwn === undefined) return res.status(400).json({ error: '需要 name / address / enabled / own' });
+      if (newName === undefined && newAddr === undefined && newEnabled === undefined && newOwn === undefined && newLedger === undefined) return res.status(400).json({ error: '需要 name / address / enabled / own / ledger' });
       const old = { ...wallets[idx] };
       const addrChanged = newAddr !== undefined && newAddr !== cur;
       const enabledChanged = newEnabled !== undefined && newEnabled !== isWalletOn(old);
@@ -2457,6 +2462,8 @@ function mountEvmRoutes(app, adminGuard) {
       if (newAddr !== undefined) wallets[idx].address = newAddr;
       if (newEnabled !== undefined) { if (newEnabled) delete wallets[idx].enabled; else wallets[idx].enabled = false; }
       if (newOwn !== undefined) { if (newOwn) wallets[idx].own = true; else delete wallets[idx].own; }
+      if (newLedger !== undefined) { if (newLedger) wallets[idx].ledger = true; else delete wallets[idx].ledger; }
+      if (newLedger === true) kickLedger(chainId);
       saveWallets(chainId, wallets);
       const st = chainState(chainId);
       if (addrChanged) {

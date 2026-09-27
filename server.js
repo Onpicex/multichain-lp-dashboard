@@ -1564,8 +1564,7 @@ async function _fetchPositionsInner(forceRefresh = false) {
   // 钱包闲置余额: 按 fund-config 启用/勾选过滤; 失败沿用上轮快照, 不拖累主数据
   const fundCfg = loadFundCfg();
   const fundSel = fundCfg.wallets.bsc;
-  const fundWallets = !fundCfg.enabled ? []
-    : (!Array.isArray(fundSel) ? activeWallets().filter(w => w.own === true) : activeWallets().filter(w => fundSel.some(a => String(a).toLowerCase() === w.address.toLowerCase())));   // 未单独设置 = 只看自有钱包
+  const fundWallets = !fundCfg.enabled ? [] : activeWallets();   // 2026-09-28: 全部启用钱包都查余额 (观察钱包快照要用); 统计条只算自有由前端过滤
   let idle = null;
   if (fundWallets.length) {
     idle = lastIdleBsc || cache.data?.idle || null;
@@ -1724,9 +1723,11 @@ app.patch('/api/wallets/:address', adminGuard, (req, res) => {
   const cur = req.params.address.toLowerCase();
   const idx = WALLETS.findIndex(w => w.address.toLowerCase() === cur);
   if (idx === -1) return res.status(404).json({ error: '地址不存在' });
-  const { name, address, enabled, own } = req.body || {};
+  const { name, address, enabled, own, ledger } = req.body || {};
   let newName, newAddr, newEnabled;
   let newOwn;
+  let newLedger;
+  if (ledger !== undefined) { if (typeof ledger !== 'boolean') return res.status(400).json({ error: 'ledger 须为布尔值' }); newLedger = ledger; }   // 观察钱包手动开账本 (自有钱包默认开, 此标记无意义)
   if (own !== undefined) { if (typeof own !== 'boolean') return res.status(400).json({ error: 'own 须为布尔值' }); newOwn = own; }   // 自有(true)/观察(false): 资金查询·快照·盈亏·通知默认只看自有
   if (enabled !== undefined) {
     if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled 须为布尔值' });
@@ -1741,7 +1742,7 @@ app.patch('/api/wallets/:address', adminGuard, (req, res) => {
     if (!/^0x[0-9a-f]{40}$/.test(newAddr)) return res.status(400).json({ error: '无效的 BSC 地址' });
     if (newAddr !== cur && WALLETS.some((w, i) => i !== idx && w.address.toLowerCase() === newAddr)) return res.status(409).json({ error: '地址已存在' });
   }
-  if (newName === undefined && newAddr === undefined && newEnabled === undefined && newOwn === undefined) return res.status(400).json({ error: '需要 name / address / enabled / own' });
+  if (newName === undefined && newAddr === undefined && newEnabled === undefined && newOwn === undefined && newLedger === undefined) return res.status(400).json({ error: '需要 name / address / enabled / own / ledger' });
   const old = { ...WALLETS[idx] };
   const addrChanged = newAddr !== undefined && newAddr !== cur;
   const enabledChanged = newEnabled !== undefined && newEnabled !== isWalletOn(old);
@@ -1749,6 +1750,8 @@ app.patch('/api/wallets/:address', adminGuard, (req, res) => {
   if (newAddr !== undefined) WALLETS[idx].address = newAddr;
   if (newEnabled !== undefined) { if (newEnabled) delete WALLETS[idx].enabled; else WALLETS[idx].enabled = false; }
   if (newOwn !== undefined) { if (newOwn) WALLETS[idx].own = true; else delete WALLETS[idx].own; }
+  if (newLedger !== undefined) { if (newLedger) WALLETS[idx].ledger = true; else delete WALLETS[idx].ledger; }
+  if (newLedger === true && bscKickLedger) setImmediate(bscKickLedger);
   saveWallets(WALLETS);
   if (addrChanged) {
     cache = { data: null, timestamp: 0 };
@@ -1764,6 +1767,56 @@ app.patch('/api/wallets/:address', adminGuard, (req, res) => {
   res.json({ ok: true, wallets: WALLETS });
 });
 
+// 钱包盈亏合并视图 /api/pnl/all?scope=own|obs[&chain=<id>][&refresh=true]
+//   own = 自有钱包 (∪ pnl-config 例外); obs = 观察钱包 (启用且未标自有); 各链各钱包走本地 /pnl 报告后合并, 行上带 chain / wallet; 60s 缓存
+const CHAIN_PNL_API = { bsc: '/api/pnl', sol: '/api/sol/pnl', eth: '/api/eth/pnl', rh: '/api/rh/pnl', base: '/api/base/pnl', arc: '/api/arc/pnl' };
+function walletsFileOf(chain) { return chain === 'bsc' ? 'wallets.json' : `wallets-${chain}.json`; }
+function chainWallets(chain) { try { return JSON.parse(fs.readFileSync(path.join(__dirname, walletsFileOf(chain)), 'utf8')).filter(w => w.enabled !== false); } catch { return []; } }
+function scopeWallets(chain, scope) {
+  const all = chainWallets(chain);
+  if (scope === 'obs') return all.filter(w => w.own !== true);
+  const pc = loadPnlCfg();
+  const norm = a => chain === 'sol' ? String(a) : String(a).toLowerCase();
+  if (Array.isArray(pc.wallets[chain])) { const s = new Set(pc.wallets[chain].map(norm)); return all.filter(w => w.own === true || s.has(norm(w.address))); }
+  return all.filter(w => w.own === true);
+}
+function fetchLocalJson(pathname, timeoutMs = 30000) {
+  return fetch(`http://127.0.0.1:${PORT}${pathname}`, { signal: AbortSignal.timeout(timeoutMs) }).then(r => r.ok ? r.json() : null).catch(() => null);
+}
+const pnlAllCache = {};   // `${scope}:${chain}` -> { ts, data }
+app.get('/api/pnl/all', async (req, res) => {
+  const scope = req.query.scope === 'obs' ? 'obs' : 'own';
+  const chainQ = String(req.query.chain || '');
+  const chains = chainQ && CHAIN_PNL_API[chainQ] ? [chainQ] : Object.keys(CHAIN_PNL_API);
+  const refresh = req.query.refresh === 'true';
+  const nocache = refresh || req.query.nocache === 'true';   // nocache: 只跳过合并缓存 (钱包开关账本后立刻看到新标记), 不踢扫描
+  const key = `${scope}:${chains.join(',')}`;
+  const c = pnlAllCache[key];
+  if (!nocache && c && Date.now() - c.ts < 60000) return res.json(c.data);
+  const out = { scope, chains: {}, wallets: [], positions: [], lpUSD: 0, idleUSD: 0, funding: null, ledgerScanning: false, dataTs: 0 };
+  let fin = 0, anyFund = false;
+  for (const ch of chains) {
+    const ws = scopeWallets(ch, scope);
+    if (!ws.length) continue;
+    out.chains[ch] = { wallets: ws.length };
+    for (const w of ws) {
+      const rep = await fetchLocalJson(`${CHAIN_PNL_API[ch]}?wallet=${encodeURIComponent(w.address)}${refresh ? '&refresh=true' : ''}`);
+      if (!rep) continue;
+      const wk = `${ch}:${w.address}`;
+      out.wallets.push({ chain: ch, address: w.address, name: w.name, own: w.own === true, ledger: w.ledger === true, ledgerOn: !!rep.ledger, ledgerStale: !!rep.ledgerStale, partial: !!rep.partial, pending: !!rep.pending, scanning: !!rep.scanning, updatedAt: rep.updatedAt || 0, lpUSD: rep.lpUSD || 0, idleUSD: rep.idleUSD, funding: rep.funding || null, n: (rep.positions || []).length });
+      for (const r of (rep.positions || [])) out.positions.push({ ...r, chain: ch, wallet: w.name, walletAddress: w.address, wk });
+      out.lpUSD += rep.lpUSD || 0;
+      if (typeof rep.idleUSD === 'number') out.idleUSD += rep.idleUSD;
+      if (rep.funding && !rep.funding.partial && typeof rep.funding.netUSD === 'number') { fin += rep.funding.netUSD; anyFund = true; }
+      if (rep.scanning) out.ledgerScanning = true;
+      if (rep.dataTs > out.dataTs) out.dataTs = rep.dataTs;
+    }
+  }
+  if (anyFund) out.funding = { netUSD: fin };
+  pnlAllCache[key] = { ts: Date.now(), data: out };
+  res.json(out);
+});
+
 // 钱包盈亏 (BSC): 无链上账本, 只有活跃仓 (成本按建仓时点价值), 历史仓位不可用
 app.get('/api/pnl', (req, res) => {
   const addr = String(req.query.wallet || '').trim().toLowerCase();
@@ -1771,11 +1824,12 @@ app.get('/api/pnl', (req, res) => {
   const data = cache.data;
   const liveWallet = (data?.wallets || []).find(w => w.address.toLowerCase() === addr) || null;
   const wcfg = WALLETS.find(w => w.address.toLowerCase() === addr) || null;
-  const rep = pnlLedger.walletReport('bsc', addr, liveWallet);
+  const selected = pnlSelectedAddrs('bsc', WALLETS.map(w => w.address)).has(addr);
+  const rep = pnlLedger.walletReport('bsc', addr, liveWallet, selected);
   let idleUSD = null;
   for (const [a, wI] of Object.entries(data?.idle?.byWallet || {})) if (a.toLowerCase() === addr) idleUSD = wI.totalUSD || 0;
   res.json({ chain: 'bsc', wallet: { address: addr, name: wcfg?.name || liveWallet?.name || addr, enabled: wcfg ? wcfg.enabled !== false : true }, ...rep, idleUSD, lpUSD: liveWallet ? (liveWallet.totalUSD || 0) : 0, funding: null, dataTs: data?.timestamp || 0,
-    selected: pnlSelectedAddrs('bsc', WALLETS.map(w => w.address)).has(addr), ledgerEnabled: loadPnlCfg().enabled });
+    selected, ledgerEnabled: loadPnlCfg().enabled });
 });
 
 app.get('/api/positions', async (req, res) => {
@@ -1901,8 +1955,9 @@ function pnlSelectedAddrs(chain, walletAddrs) {
   const pc = loadPnlCfg();
   if (!pc.enabled) return new Set();
   const norm = a => chain === 'sol' ? String(a) : String(a).toLowerCase();
-  if (Array.isArray(pc.wallets[chain])) return new Set(pc.wallets[chain].map(norm));
-  return new Set(WALLETS.filter(w => w.own === true).map(w => norm(w.address)));   // 未单独设置 = 只看自有钱包
+  const led = WALLETS.filter(w => w.ledger === true).map(w => norm(w.address));   // 观察钱包里手动开了账本的
+  if (Array.isArray(pc.wallets[chain])) return new Set([...pc.wallets[chain].map(norm), ...led]);
+  return new Set([...WALLETS.filter(w => w.own === true).map(w => norm(w.address)), ...led]);   // 未单独设置 = 自有 + 开账本的观察
 }
 app.get('/api/pnl/config', (req, res) => res.json(loadPnlCfg()));
 app.post('/api/pnl/config', adminGuard, (req, res) => {

@@ -14,7 +14,7 @@ const PORT = parseInt(process.env.PORT || '1788');
 
 const CHAIN_API = { bsc: '/api', sol: '/api/sol', eth: '/api/eth', rh: '/api/rh', base: '/api/base', arc: '/api/arc' };
 const CHAINS = Object.keys(CHAIN_API);
-const DEFAULT_CFG = { enabled: true, tz: 'Asia/Shanghai', wallets: {} };
+const DEFAULT_CFG = { enabled: true, tz: 'Asia/Shanghai', wallets: {}, observe: true };   // observe: 观察钱包也记 (小时级 + 日级)
 const TICK_MS = 5 * 60 * 1000;
 const M5_KEEP_MS = 24 * 3600 * 1000;
 const HOURLY_KEEP_MS = 30 * 86400000;
@@ -29,6 +29,7 @@ function loadCfg() {
   if (!validTz(c.tz)) c.tz = DEFAULT_CFG.tz;
   if (!c.wallets || typeof c.wallets !== 'object') c.wallets = {};
   c.enabled = c.enabled !== false;
+  c.observe = c.observe !== false;
   delete c.time;
   return c;
 }
@@ -37,6 +38,9 @@ function loadData() {
   if (!d.days || typeof d.days !== 'object') d.days = {};
   if (!Array.isArray(d.m5)) d.m5 = [];
   if (!Array.isArray(d.hourly)) d.hourly = [];
+  if (!d.obs || typeof d.obs !== 'object') d.obs = { hourly: [], days: {} };
+  if (!Array.isArray(d.obs.hourly)) d.obs.hourly = [];
+  if (!d.obs.days || typeof d.obs.days !== 'object') d.obs.days = {};
   delete d.latest;   // 旧「最新」行: 现在 days[今天] 就是最新
   return d;
 }
@@ -48,11 +52,13 @@ function localParts(ts, tz) {
   return { date: `${p.year}-${p.month}-${p.day}`, hm: `${p.hour}:${p.minute}`, hour: `${p.year}-${p.month}-${p.day} ${p.hour}` };
 }
 function normAddr(chain, a) { return chain === 'sol' ? String(a) : String(a).toLowerCase(); }
-// 该链标了「自有」且启用的钱包 (wallets.<chain> 未设置时的默认快照范围)
-function ownAddrs(chain) {
+// 该链的钱包记录 (启用的)
+function chainWallets(chain) {
   const file = chain === 'bsc' ? 'wallets.json' : `wallets-${chain}.json`;
-  try { return JSON.parse(fs.readFileSync(path.join(__dirname, file), 'utf8')).filter(w => w.own === true && w.enabled !== false).map(w => w.address); } catch { return []; }
+  try { return JSON.parse(fs.readFileSync(path.join(__dirname, file), 'utf8')).filter(w => w.enabled !== false); } catch { return []; }
 }
+function ownAddrs(chain) { return chainWallets(chain).filter(w => w.own === true).map(w => w.address); }      // 自有 (wallets.<chain> 未设置时的默认快照范围)
+function obsAddrs(chain) { return chainWallets(chain).filter(w => w.own !== true).map(w => w.address); }      // 观察 (别人的)
 function fetchLocal(pathname, timeoutMs = 60 * 1000) {
   return new Promise((resolve, reject) => {
     const req = http.get({ host: '127.0.0.1', port: PORT, path: pathname, timeout: timeoutMs }, res => {
@@ -130,13 +136,46 @@ async function takeSnapshot() {
 }
 async function _take() {
   const cfg = loadCfg();
+  const posData = {};   // 每链 /positions 只拉一次, 两个作用域共用
+  for (const ch of CHAINS) { try { posData[ch] = await fetchLocal(CHAIN_API[ch] + '/positions'); } catch { posData[ch] = null; } }
+  const own = await collect(cfg, posData, ch => Array.isArray(cfg.wallets[ch]) ? cfg.wallets[ch] : ownAddrs(ch));
+  const ts = Date.now();
+  const lp = localParts(ts, cfg.tz);
+  const data = loadData();
+  if (own) {
+    const entry = { ts, date: lp.date, time: lp.hm, tz: cfg.tz, ...own };
+    data.m5.push(entry);
+    data.m5 = data.m5.filter(e => ts - e.ts <= M5_KEEP_MS);
+    const hk = lp.hour, hi = data.hourly.findIndex(e => e._h === hk), he = { ...entry, _h: hk };
+    if (hi >= 0) data.hourly[hi] = he; else data.hourly.push(he);
+    data.hourly = data.hourly.filter(e => ts - e.ts <= HOURLY_KEEP_MS);
+    data.days[lp.date] = { ...entry, mode: 'auto' };
+  }
+  // 观察钱包: 小时级 + 日级 (5 分钟级省掉), 字段一样 (余额也查; 开了账本的还有盈亏)
+  if (cfg.observe) {
+    const obs = await collect(cfg, posData, ch => obsAddrs(ch));
+    if (obs) {
+      const entry = { ts, date: lp.date, time: lp.hm, tz: cfg.tz, ...obs };
+      const hk = lp.hour, hi = data.obs.hourly.findIndex(e => e._h === hk), he = { ...entry, _h: hk };
+      if (hi >= 0) data.obs.hourly[hi] = he; else data.obs.hourly.push(he);
+      data.obs.hourly = data.obs.hourly.filter(e => ts - e.ts <= HOURLY_KEEP_MS);
+      data.obs.days[lp.date] = { ...entry, mode: 'auto' };
+    }
+  }
+  if (!own && !(cfg.observe && data.obs.days[lp.date] && data.obs.days[lp.date].ts === ts)) throw new Error('没有可记录的钱包 (没有标「自有」的钱包, 观察钱包也没数据)');
+  saveData(data);
+  lastError = null; lastTs = ts;
+  return own ? data.days[lp.date] : data.obs.days[lp.date];
+}
+// 按作用域汇总各链: selOf(chain) 给该链的钱包地址列表; 返回 { lp, idle, ..., chains } 或 null (一个钱包都没有)
+async function collect(cfg, posData, selOf) {
   const chains = {}, failed = [], stale = [];
   const tot = { lp: 0, idle: 0, total: 0, fees: 0, cost: 0, np: 0, realized: 0, collected: 0, netIn: null, active: 0, inRange: 0, n: 0 };
   for (const ch of CHAINS) {
-    const sel = Array.isArray(cfg.wallets[ch]) ? cfg.wallets[ch] : ownAddrs(ch);
+    const sel = selOf(ch);
     if (!sel.length) continue;
-    let d;
-    try { d = await fetchLocal(CHAIN_API[ch] + '/positions'); } catch (e) { failed.push(ch); continue; }
+    const d = posData[ch];
+    if (!d) { failed.push(ch); continue; }
     const s = await summarizeChain(ch, d, sel);
     if (!s || !s.n) continue;
     const ageMin = Math.round((Date.now() - (s.dataTs || 0)) / 60000);
@@ -145,28 +184,12 @@ async function _take() {
     for (const k of ['lp', 'idle', 'total', 'fees', 'cost', 'np', 'realized', 'collected', 'active', 'inRange', 'n']) tot[k] += s[k];
     if (s.netIn != null) tot.netIn = (tot.netIn || 0) + s.netIn;
   }
-  if (!Object.keys(chains).length) throw new Error(failed.length ? '各链数据不可用: ' + failed.join(',') : '没有标「自有」的钱包');
-  const ts = Date.now();
-  const lp = localParts(ts, cfg.tz);
-  const entry = { ts, date: lp.date, time: lp.hm, tz: cfg.tz };
+  if (!Object.keys(chains).length) return null;
+  const entry = {};
   for (const k of KEYS) entry[k] = tot[k] == null ? null : round2(tot[k]);
   entry.active = tot.active; entry.inRange = tot.inRange; entry.n = tot.n; entry.chains = chains;
   if (failed.length) entry.failed = failed;
   if (stale.length) entry.stale = stale;
-  const data = loadData();
-  // m5: 全量条目, 24h
-  data.m5.push(entry);
-  data.m5 = data.m5.filter(e => ts - e.ts <= M5_KEEP_MS);
-  // hourly: 每小时保留最后一点 (同小时覆盖), 30 天
-  const hk = lp.hour;
-  const hi = data.hourly.findIndex(e => e._h === hk);
-  const he = { ...entry, _h: hk };
-  if (hi >= 0) data.hourly[hi] = he; else data.hourly.push(he);
-  data.hourly = data.hourly.filter(e => ts - e.ts <= HOURLY_KEEP_MS);
-  // days: 当日最后一点 = 日切 (随时间更新, 昨天及之前固定不动)
-  data.days[lp.date] = { ...entry, mode: 'auto' };
-  saveData(data);
-  lastError = null; lastTs = ts;
   return entry;
 }
 
@@ -177,7 +200,7 @@ async function tick() {
     const cfg = loadCfg();
     if (!cfg.enabled) return;
     const e = await takeSnapshot();
-    console.log(`[snapshot] ${e.date} ${e.time}: total $${e.total} (lp $${e.lp} + idle $${e.idle}), np $${e.np}, realized $${e.realized}, chains=${Object.keys(e.chains).join(',')}${e.stale ? ' stale=' + e.stale.join(',') : ''}`);
+    console.log(`[snapshot] ${e.date} ${e.time}: total $${e.total} (lp $${e.lp} + idle $${e.idle}), np $${e.np}, realized $${e.realized}, chains=${Object.keys(e.chains || {}).join(',')}${e.stale ? ' stale=' + e.stale.join(',') : ''}`);
   } catch (e) { lastError = e.message; console.error('[snapshot] 记录失败:', e.message); }
   finally { ticking = false; }
 }
@@ -189,7 +212,8 @@ function statusPayload() {
   const lastKey = keys[keys.length - 1];
   const today = localParts(Date.now(), cfg.tz).date;
   return {
-    enabled: cfg.enabled, tz: cfg.tz, wallets: cfg.wallets, intervalMin: TICK_MS / 60000,
+    enabled: cfg.enabled, observe: cfg.observe, tz: cfg.tz, wallets: cfg.wallets, intervalMin: TICK_MS / 60000,
+    obsDays: Object.keys(data.obs.days).length,
     lastRun: lastKey ? { date: lastKey, ts: data.days[lastKey].ts, mode: data.days[lastKey].mode } : null,
     lastTs: lastTs || (lastKey ? data.days[lastKey].ts : null), todayPoints: data.m5.filter(e => e.date === today).length,
     totalDays: keys.length, today, running: !!running, lastError,
@@ -201,7 +225,7 @@ function mountSnapshot(app, adminGuard) {
   app.post('/api/snapshot/config', adminGuard, (req, res) => {
     const body = req.body || {};
     const cur = loadCfg();
-    const next = { enabled: body.enabled !== false, tz: cur.tz, wallets: {} };
+    const next = { enabled: body.enabled !== false, observe: body.observe === undefined ? cur.observe : body.observe !== false, tz: cur.tz, wallets: {} };
     if (body.tz !== undefined) { if (!validTz(body.tz)) return res.status(400).json({ error: '无效时区' }); next.tz = body.tz; }
     const src = (body.wallets && typeof body.wallets === 'object') ? body.wallets : cur.wallets;
     for (const [ch, arr] of Object.entries(src)) { if (!CHAINS.includes(ch)) continue; if (Array.isArray(arr)) next.wallets[ch] = arr.slice(0, 60).map(a => String(a).slice(0, 64)); }
@@ -215,7 +239,10 @@ function mountSnapshot(app, adminGuard) {
     const keys = Object.keys(data.days).sort();
     const days = keys.map(k => data.days[k]);
     const m5 = data.m5.map(e => { const { chains, ...rest } = e; return rest; });
-    res.json({ days, hourly: data.hourly, m5, totalDays: keys.length, ...statusPayload() });
+    // 观察作用域: 日级全部 + 小时级只带最近 7 天 (钱包多, 省流量)
+    const okeys = Object.keys(data.obs.days).sort();
+    const obs = { days: okeys.map(k => data.obs.days[k]), hourly: data.obs.hourly.filter(e => Date.now() - e.ts <= 7 * 86400000) };
+    res.json({ days, hourly: data.hourly, m5, obs, totalDays: keys.length, ...statusPayload() });
   });
   app.post('/api/snapshot/now', adminGuard, async (req, res) => {
     try { res.json(await takeSnapshot()); } catch (e) { res.status(500).json({ error: e.message }); }
