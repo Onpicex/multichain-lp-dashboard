@@ -1494,6 +1494,8 @@ function costTip(costBy, tokens) {
   if (!costBy) return '';
   const symOf = a => { const t = (tokens || []).find(t => t && t.address && (t.address === a || String(t.address).toLowerCase() === String(a).toLowerCase())); return t ? t.symbol : (String(a).slice(0, 6) + '…'); };
   const lines = Object.entries(costBy).filter(([, v]) => v && v.q > 0).map(([a, v]) => `${symOf(a)}  ${fN(v.q)} 枚 · 成本 ${fU2(v.cost)} · 均价 ${fP(v.q > 0 ? v.cost / v.q : 0)}`);
+  // q<0 = zap 开仓时顺带找回钱包的币 (已从成本里抵扣)
+  for (const [a, v] of Object.entries(costBy).filter(([, v]) => v && v.q < 0)) lines.push(`${symOf(a)}  找零 ${fN(-v.q)} 枚 · 抵扣 ${fU2(-v.cost)}`);
   return lines.length ? '两种币的成本 (按入金时市值分摊)\n' + lines.join('\n') : '';
 }
 function mkDet(p) {
