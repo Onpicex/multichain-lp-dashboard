@@ -2560,7 +2560,10 @@ function pnDays(a, b) { const ms = Math.max(0, (b || Date.now()) - a); const d =
 function pnSigned(v, cls) { if (v == null || isNaN(v)) return '<span class="sn-zero">—</span>'; const c = cls || dCls(v); return '<span class="' + c + '">' + (v > 0 ? '+' : (v < 0 ? '−' : '')) + fU2(Math.abs(v)) + '</span>'; }
 function renderPnl() {
   const d = pnData; if (!d) return;
-  const rows = d.positions || [];
+  // 离谱数值 (单仓任一金额 > 1e12) = 后端历史定价出错的残留, 单独标「异常」, 不计入汇总 (账本下轮重算会修正)
+  const absurd = r => ['costUSD', 'valueUSD', 'withdrawnUSD', 'collectedFeesUSD', 'pendingFeesUSD', 'netProfitUSD', 'ilUSD'].some(k => Math.abs(r[k] || 0) > 1e12);
+  const rows = (d.positions || []).map(r => absurd(r) ? { ...r, _absurd: true, costUSD: r.costUSD > 1e12 ? 0 : r.costUSD, valueUSD: 0, withdrawnUSD: 0, collectedFeesUSD: 0, pendingFeesUSD: 0, netProfitUSD: null, netProfitPct: null, ilUSD: null, hodlValueUSD: null } : r);
+  const nAbsurd = rows.filter(r => r._absurd).length;
   const act = rows.filter(r => r.status === 'active').sort((x, y) => (y.valueUSD || 0) - (x.valueUSD || 0));
   const cls = rows.filter(r => r.status !== 'active').sort((x, y) => (y.closeTs || 0) - (x.closeTs || 0));
   const costed = r => r.costUSD > 0;
@@ -2606,6 +2609,7 @@ function renderPnl() {
   }
   const head = '<table class="sn-table pn-table"><thead><tr><th>交易对</th><th>状态</th><th class="sn-hm">开仓</th><th class="sn-hm">关闭 / 持有</th><th>开仓成本</th><th>现值</th><th class="sn-hm">已提回</th><th>手续费</th><th class="sn-hm">无常损失</th><th>净利润</th></tr></thead><tbody>';
   const rowH = r => {
+    if (r._absurd) return '<tr><td class="pn-pair">' + escH(r.pair || '') + '<span class="protocol-tag ' + String(r.protocol || 'v3').toLowerCase() + '">' + escH(r.protocol || '') + '</span><span class="pn-id">#' + escH(String(r.tokenId || '').slice(0, 12)) + '</span></td><td colspan="9"><span class="pn-st out" title="该仓某笔事件的历史池价离谱 (死池/薄池), 账本下轮重算会修正">数据异常 · 等待重算</span></td></tr>';
     const st = r.status === 'active'
       ? '<span class="pn-st ' + (r.inRange ? 'act' : 'out') + '">' + (r.inRange === null ? '活跃' : (r.inRange ? '区间内' : '区间外')) + '</span>'
       : '<span class="pn-st cls">已关闭' + (r.note === 'transferred' ? ' · 转出' : (r.note === 'empty' ? ' · 空仓' : (r.note === 'unseen' ? ' · 提回未捕获' : ''))) + '</span>';
@@ -2633,6 +2637,7 @@ function renderPnl() {
   else notes.push('本链公共 RPC 不支持按钱包扫全链 Transfer, 开仓成本暂按开仓时点池价估算 (带 *), 已关闭仓位不可用。');
   notes.push('无常损失 = 头寸现值 − 开仓存入的代币数量按现价持有不动的价值 (负数=做 LP 比拿着币亏)。净利润 = 现值 + 待领费 + 已领费 + 已提回本金 − 开仓成本; 已关闭仓 = 已提回 + 已领费 − 成本 (提回按当时市值)。');
   if (d.funding) notes.push('总体盈亏 = 钱包余额 + LP 价值 − 净入金 (净入金来自初始资金回溯, 只算与外部/内部钱包的转账)。');
+  if (nAbsurd) notes.push(nAbsurd + ' 个仓位数据异常 (历史池价离谱), 已排除出汇总, 账本下一轮重算后自动恢复。');
   $('pnNote').innerHTML = notes.map(escH).join('<br>');
 }
 

@@ -636,6 +636,12 @@ function buildRefPools(chainId) {
   for (const arr of Object.values(ref)) arr.sort((a, b) => b.score - a.score);
   return ref;
 }
+// 历史价合理性: 与当前价 (上轮定价) 偏离超过 100 倍 → 当无效 (死池/流动性极薄的池 slot0 是随便什么数)
+function priceSane(chainId, token, p) {
+  if (!(p > 0)) return false;
+  const cur = (stateOf(chainId).lastUsdPrices || {})[token] || 0;
+  return !(cur > 0) || (p <= cur * 100 && p >= cur / 100);
+}
 async function priceAt(chainId, token, block, ref) {
   const cfg = cfgOf(chainId);
   if (cfg.stables[token]) return { p: 1, approx: false };
@@ -647,7 +653,7 @@ async function priceAt(chainId, token, block, ref) {
   for (const r of (ref[token] || []).slice(0, 4)) {
     const px = await pxAt(chainId, r.spec, block);
     const p = px ? (r.side === 0 ? px.p0 : px.p1) : 0;
-    if (p > 0) return { p, approx: false };
+    if (priceSane(chainId, token, p)) return { p, approx: false };
   }
   const cur = (stateOf(chainId).lastUsdPrices || {})[token] || 0;
   return { p: cur, approx: true };
@@ -758,6 +764,7 @@ async function computeWallet(chainId, addr, livePositions) {
       const c = cOf(P);
       const v = await evAmounts(P, ev);
       if (!v) { c.inc = true; continue; }
+      if (!priceSane(chainId, v.meta.t0.address, v.px.p0) || !priceSane(chainId, v.meta.t1.address, v.px.p1)) { c.inc = true; continue; }   // 该块池价离谱: 本笔不入账, 标未定价
       const mkt0 = v.a0 * v.px.p0, mkt1 = v.a1 * v.px.p1;
       if (v.kind === 'dep') { deps.push({ P, c, v, mkt: mkt0 + mkt1 }); c.liq += v.liq; }
       else if (v.kind === 'wd') { wds.push({ P, c, v, mkt: mkt0 + mkt1 }); c.liq += (P.k !== 'v4' ? -v.liq : v.liq); if (P.k !== 'v4') { c.owed0 += v.a0; c.owed1 += v.a1; } }
@@ -775,7 +782,7 @@ async function computeWallet(chainId, addr, livePositions) {
     // B. 钱包流水 (人类单位 + 市值); 本 tx 涉及的仓位两侧 token 直接用该仓池子当块价 (比参考池更贴)
     const ownPx = {};
     for (const x of [...deps, ...wds, ...cols]) { ownPx[x.v.meta.t0.address] = x.v.px.p0; ownPx[x.v.meta.t1.address] = x.v.px.p1; }
-    const priceHere = async tok => (ownPx[tok] > 0 && !cfg.stables[tok]) ? { p: ownPx[tok], approx: false } : await priceAt(chainId, tok, tx.b, ref);
+    const priceHere = async tok => (!cfg.stables[tok] && priceSane(chainId, tok, ownPx[tok])) ? { p: ownPx[tok], approx: false } : await priceAt(chainId, tok, tx.b, ref);
     const outs = [], ins = [];
     for (const [tok, raw] of tx.flows) {
       const q = Math.abs(await hum(tok, raw));

@@ -188,8 +188,9 @@ function impliedPriceNear(W, mint, ts) {
 function priceAt(W, mint, ts, cur) {
   if (STABLES[mint]) return { p: 1, approx: false };
   const ip = impliedPriceNear(W, mint, ts);
-  if (ip) return { p: ip, approx: false };
-  return { p: cur[mint] || 0, approx: true };
+  const c = cur[mint] || 0;
+  if (ip && (!(c > 0) || (ip <= c * 100 && ip >= c / 100))) return { p: ip, approx: false };   // 隐含价与现价差 100 倍以上不可信
+  return { p: c, approx: true };
 }
 function computeWallet(wallet, livePositions) {
   const s = state();
