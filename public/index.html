@@ -2146,7 +2146,7 @@ function snSeries() {
   if (snRange === '24h') { src = snChain === 'all' && d.m5.length ? d.m5 : d.hourly; cutoff = now - 86400000; }
   else if (snRange === '7d') { src = d.hourly; cutoff = now - 7 * 86400000; }
   else if (snRange === '30d') { src = d.hourly.length ? d.hourly : d.days; cutoff = now - 30 * 86400000; }
-  else src = d.days;
+  else src = d.days.filter(snIsNew);
   const out = [];
   for (const e of src) {
     if (cutoff && e.ts < cutoff) continue;
@@ -2158,11 +2158,13 @@ function snSeries() {
   if (snRange === '30d' && src === d.hourly && out.length && d.days.length) {
     const first = out[0].ts;
     const pre = [];
-    for (const e of d.days) { if (e.ts >= first || e.ts < cutoff) continue; const z = snScope(e); if (!z) continue; const v = snMetricVal(z); if (v == null) continue; pre.push({ ts: e.ts, e, z, v }); }
+    for (const e of d.days.filter(snIsNew)) { if (e.ts >= first || e.ts < cutoff) continue; const z = snScope(e); if (!z) continue; const v = snMetricVal(z); if (v == null) continue; pre.push({ ts: e.ts, e, z, v }); }
     out.unshift(...pre);
   }
   return out.sort((a, b) => a.ts - b.ts);
 }
+// 改版 (2026-09-28) 前的每日定时记录: 钱包范围/字段都不同, 不参与统计与曲线, 表里保留并标「旧版」
+function snIsNew(e) { return e.mode === 'auto'; }
 function fD(v) { if (v == null || isNaN(v)) return '—'; const a = Math.abs(v); const s = v > 0 ? '+' : (v < 0 ? '−' : ''); if (a >= 1e6) return s + '$' + (a / 1e6).toFixed(2) + 'M'; return s + '$' + a.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function fPc(v, base) { if (!base || v == null || isNaN(v)) return ''; const p = v / Math.abs(base) * 100; return (p > 0 ? '+' : (p < 0 ? '−' : '')) + Math.abs(p).toFixed(2) + '%'; }
 function dCls(v) { return v == null || isNaN(v) || Math.abs(v) < 0.005 ? 'sn-zero' : (v > 0 ? 'sn-pos' : 'sn-neg'); }
@@ -2209,9 +2211,10 @@ function renderSnap() {
     tb.innerHTML = h; tb.classList.add('two-rows'); tb.style.display = 'block';
   } else tb.style.display = 'none';
 
-  // 日级序列 (统计条 + 表格用): 每日日切, 最新一条 = 今天 (随时间更新)
-  const daily = [];
-  for (const e of d.days) { const z = snScope(e); if (z) daily.push({ e, z }); }
+  // 日级序列: 每日日切, 最新一条 = 今天 (随时间更新); 统计条只用改版后的记录 (旧版钱包范围不同, 不可比)
+  const dailyAll = [];
+  for (const e of d.days) { const z = snScope(e); if (z) dailyAll.push({ e, z }); }
+  const daily = dailyAll.filter(x => snIsNew(x.e));
   if (!daily.length) {
     $('snStrip').style.display = 'none'; $('snChartCard').style.display = 'none';
     $('snTable').innerHTML = '<div class="sn-empty">还没有记录<br>' + (d.enabled ? '服务每 5 分钟自动记一次自有钱包的资金与盈亏，几分钟后再来看' : '自动记录已在设置中关闭') + '</div>';
@@ -2245,11 +2248,11 @@ function renderSnap() {
 
   // 表格: 按日, 新的在上
   let th = '<table class="sn-table"><thead><tr><th>日期</th><th>总资产</th><th>收益</th><th class="sn-hm">净入金变动</th><th class="sn-hm">钱包余额</th><th class="sn-hm">LP 价值</th><th class="sn-hm">未实现</th><th class="sn-hm">已实现</th><th class="sn-hm">手续费累计</th></tr></thead><tbody>';
-  for (let i = daily.length - 1; i >= 0; i--) {
-    const x = daily[i], pe = i > 0 ? daily[i - 1] : null;
+  for (let i = dailyAll.length - 1; i >= 0; i--) {
+    const x = dailyAll[i], pe = i > 0 && snIsNew(x.e) && snIsNew(dailyAll[i - 1].e) ? dailyAll[i - 1] : null;   // 只在新旧同版之间算收益
     const g = pe ? snGainBetween(pe.z, x.z) : null;
     const open = snOpenRow === x.e.date;
-    th += '<tr class="sn-row' + (open ? ' open' : '') + '" onclick="snToggleRow(\'' + x.e.date + '\')"><td><span class="sn-date">' + escH(x.e.date) + '</span><span class="sn-time">' + escH(x.e.time || '') + (i === daily.length - 1 ? ' 最新' : '') + '</span>' + snTags(x.e) + '</td>'
+    th += '<tr class="sn-row' + (open ? ' open' : '') + '" onclick="snToggleRow(\'' + x.e.date + '\')"><td><span class="sn-date">' + escH(x.e.date) + '</span><span class="sn-time">' + escH(x.e.time || '') + (i === dailyAll.length - 1 ? ' 最新' : '') + '</span>' + snTags(x.e) + '</td>'
       + '<td>' + fU(x.z.total) + '</td>'
       + '<td>' + (g ? '<span class="' + dCls(g.gain) + '">' + fD(g.gain) + '</span>' + (g.flowKnown ? '' : '<span class="sn-tag" title="无净入金数据, 含出入金">含出入金</span>') : '<span class="sn-zero">—</span>') + '</td>'
       + '<td class="sn-hm">' + (g && g.flowKnown ? '<span class="' + dCls(g.dNet) + '">' + fD(g.dNet) + '</span>' : '<span class="sn-zero">—</span>') + '</td>'
@@ -2267,7 +2270,7 @@ function snTags(e) {
   let t = '';
   if (e.stale && e.stale.length) t += '<span class="sn-tag warn" title="记录时这些链的缓存超过 12 分钟: ' + escH(e.stale.join(',')) + '">旧</span>';
   if (e.failed && e.failed.length) t += '<span class="sn-tag warn" title="记录时这些链拉取失败: ' + escH(e.failed.join(',')) + '">缺</span>';
-  if (e.mode && e.mode !== 'auto') t += '<span class="sn-tag" title="改版前的每日定时记录">旧版</span>';
+  if (!snIsNew(e)) t += '<span class="sn-tag" title="2026-09-28 改版前的每日定时记录: 钱包范围与字段不同, 不参与统计与曲线">旧版</span>';
   return t;
 }
 function snSubRow(nameHtml, subHtml, z, pz, cls, style) {
