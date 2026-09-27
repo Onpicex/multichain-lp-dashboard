@@ -223,7 +223,7 @@ function computeWallet(wallet, livePositions) {
   };
   const addLot = (mint, q, c, ax) => { if (STABLES[mint] || !(q > 0)) return; const L = lots[mint] || (lots[mint] = { q: 0, c: 0, ax: false }); L.q += q; L.c += c; if (ax) L.ax = true; };
   const C = {};
-  const cOf = k => C[k] || (C[k] = { cost: 0, ret: 0, fees: 0, a: {}, n: 0, approx: false, feesUnknown: false, lastTs: 0, closed: false, mints: {} });
+  const cOf = k => C[k] || (C[k] = { cost: 0, ret: 0, fees: 0, a: {}, cb: {}, n: 0, approx: false, feesUnknown: false, lastTs: 0, closed: false, mints: {} });
   for (const t of order) {
     // 本 tx 涉及的仓位 + 操作类型
     const ops = new Map();   // key -> Set(kind)
@@ -242,8 +242,8 @@ function computeWallet(wallet, livePositions) {
     if (ops.size) {
       const kinds = new Set(); for (const set of ops.values()) for (const k of set) kinds.add(k);
       const share = 1 / ops.size;
-      let outCost = 0, ax = false;
-      for (const [m, q] of outs) { const r = consume(m, q, t.ts); outCost += r.cost; if (r.approx) ax = true; }
+      let outCost = 0, ax = false; const outCostBy = {};
+      for (const [m, q] of outs) { const r = consume(m, q, t.ts); outCost += r.cost; outCostBy[m] = r.cost; if (r.approx) ax = true; }
       let inVal = 0, inAx = false;
       for (const [m, q] of ins) { const pr = priceAt(W, m, t.ts, cur); inVal += q * pr.p; if (pr.approx) inAx = true; }
       for (const [k, set0] of ops) {
@@ -255,7 +255,7 @@ function computeWallet(wallet, livePositions) {
         const set = named.size ? named : new Set(outs.length && !ins.length ? ['dep'] : (ins.length && !outs.length ? [t.type === 'COLLECT_FEES' ? 'col' : 'wd'] : (outs.length && ins.length ? ['dep', 'wd'] : [])));
         if (set.has('open') || set.has('dep')) {
           c.cost += outCost * share; c.n++; if (ax) c.approx = true;
-          for (const [m, q] of outs) c.a[m] = (c.a[m] || 0) + q * share;
+          for (const [m, q] of outs) { c.a[m] = (c.a[m] || 0) + q * share; const cb = c.cb[m] || (c.cb[m] = { q: 0, cost: 0 }); cb.q += q * share; cb.cost += (outCostBy[m] || 0) * share; }
           if (!set.has('wd') && !set.has('close')) c.cost -= inVal * share;   // 入金 tx 顺带的流入 (找零) 从成本里扣
         }
         if (set.has('wd') || set.has('col') || set.has('close')) {
@@ -296,7 +296,7 @@ function computeWallet(wallet, livePositions) {
     const nm = m => (sym[m] && sym[m].symbol) || STABLES[m] || (m === WSOL ? 'SOL' : m.slice(0, 4) + '…');
     const live = liveKeys.has(k);
     let status = live ? 'active' : (c.closed ? 'closed' : (c.ret > 0 || c.evs > 1 ? 'closed' : 'active'));
-    p.c = { cost: c.cost, ret: c.ret, fees: c.fees, a: c.a, n: c.n, approx: c.approx, feesUnknown: c.feesUnknown, openTs: p.openTs || 0, closeTs: status === 'closed' ? (c.closeTs || c.lastTs) : 0, status, note: !live && !c.closed && status === 'closed' ? 'empty' : '', pair: top.length === 2 ? `${nm(top[0])}/${nm(top[1])}` : (top[0] ? nm(top[0]) : '') , mints: mints };
+    p.c = { cost: c.cost, ret: c.ret, fees: c.fees, a: c.a, cb: c.cb, n: c.n, approx: c.approx, feesUnknown: c.feesUnknown, openTs: p.openTs || 0, closeTs: status === 'closed' ? (c.closeTs || c.lastTs) : 0, status, note: !live && !c.closed && status === 'closed' ? 'empty' : '', pair: top.length === 2 ? `${nm(top[0])}/${nm(top[1])}` : (top[0] ? nm(top[0]) : '') , mints: mints };
   }
   W.lots = Object.fromEntries(Object.entries(lots).filter(([, L]) => L.q > 1e-9).map(([m, L]) => [m, { q: L.q, c: L.c, ax: L.ax }]));
   W.computedAt = Date.now();
@@ -344,12 +344,14 @@ function walletReport(wallet, liveWallet) {
   const liveMap = new Map();
   for (const p of (liveWallet?.positions || [])) if (p.liquidityActive) liveMap.set(p._activityKey || p.positionKey, p);
   const seen = new Set();
+  const sym = deps.symbols() || {};
   const rowLive = (k, p) => ({
     key: k, protocol: p.protocol, platform: p.platform, tokenId: p.tokenId, pair: `${p.token0.symbol}/${p.token1.symbol}`, feeLabel: p.feeLabel,
     status: 'active', note: '', inRange: !!p.inRange, openTs: p.createdAt || 0, closeTs: 0, source: p.costSource || 'none',
-    costUSD: p.costBasisUSD || 0, costApprox: !!p.costApprox, valueUSD: p.positionValueUSD || 0, pendingFeesUSD: p.feesValueUSD || 0,
+    costUSD: p.costBasisUSD || 0, costApprox: !!p.costApprox, costBy: p.costByToken || null, valueUSD: p.positionValueUSD || 0, pendingFeesUSD: p.feesValueUSD || 0,
     collectedFeesUSD: p.collectedFeesUSD || 0, withdrawnUSD: p.withdrawnUSD || 0, hodlValueUSD: p.hodlValueUSD ?? null, ilUSD: p.ilUSD ?? null,
     netProfitUSD: p.costBasisUSD > 0 ? (p.netProfitUSD ?? null) : null, netProfitPct: p.costBasisUSD > 0 ? (p.netProfitPct ?? null) : null, feesUnknown: !!p.feesUnknown,
+    tokens: [p.token0, p.token1].map(t => ({ address: t.address, symbol: t.symbol })),
   });
   if (status.ledger && !status.partial && !status.pending) {
     const W = state().d.wallets[wallet];
@@ -363,8 +365,9 @@ function walletReport(wallet, liveWallet) {
       out.positions.push({
         key: k, protocol: PROTO[P.p] || P.p, platform: P.p, tokenId: k.slice(0, 8), pair: c.pair, feeLabel: null,
         status: 'closed', note: c.note, inRange: null, openTs: c.openTs, closeTs: c.closeTs, source: 'ledger',
-        costUSD: c.cost, costApprox: c.approx, valueUSD: 0, pendingFeesUSD: 0, collectedFeesUSD: c.fees, withdrawnUSD: c.ret,
+        costUSD: c.cost, costApprox: c.approx, costBy: c.cb || null, valueUSD: 0, pendingFeesUSD: 0, collectedFeesUSD: c.fees, withdrawnUSD: c.ret,
         hodlValueUSD: null, ilUSD: null, netProfitUSD: c.cost > 0 ? net : null, netProfitPct: c.cost > 0 ? net / c.cost * 100 : null, feesUnknown: c.feesUnknown,
+        tokens: (c.mints || []).map(m => ({ address: m, symbol: (sym[m] && sym[m].symbol) || STABLES[m] || (m === WSOL ? 'SOL' : m.slice(0, 4) + '…') })),
       });
     }
     out.lots = Object.entries(W.lots || {}).map(([m, L]) => ({ token: m, qty: L.q, costUSD: L.c, avgCost: L.q > 0 ? L.c / L.q : 0, approx: L.ax }));

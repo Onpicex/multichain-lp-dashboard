@@ -546,6 +546,16 @@
   .val-diff.loss { color: var(--red); }
   .pair-wallet { display: none; }
   .d-sub { font-family: var(--mono); font-size: 10px; color: var(--text-muted); margin-top: 1px; }
+  /* 悬浮提示 (开仓成本按币拆分): data-tip 里用换行分行 */
+  .has-tip { position: relative; cursor: help; text-decoration: underline dotted var(--text-muted); text-underline-offset: 3px; }
+  .has-tip::after {
+    content: attr(data-tip); display: none; position: absolute; left: 0; top: 100%; margin-top: 6px; z-index: 6;
+    background: var(--surface); border: 1px solid var(--border-light); border-radius: 6px; padding: 7px 10px;
+    font-family: var(--mono); font-size: 11px; font-weight: 500; color: var(--text); line-height: 1.65; white-space: pre-line; text-align: left;
+    min-width: 230px; max-width: 360px; box-shadow: 0 6px 18px rgba(0,0,0,0.45);
+  }
+  .has-tip:hover::after { display: block; }
+  td .has-tip::after { left: auto; right: 0; }
   .range-bar-labels { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--text-muted); margin-bottom: 6px; }
   .range-bar-track { height: 5px; background: var(--border-light); border-radius: 3px; position: relative; }
   .range-bar-fill { position: absolute; height: 100%; border-radius: 3px; background: linear-gradient(90deg, #6366f1, #22c55e); }
@@ -1444,6 +1454,13 @@ function protoTag(p) {
   return `<span class="protocol-tag ${proto.toLowerCase()}">${proto}</span>`;
 }
 
+// 开仓成本按币拆分的悬浮文本: costBy = { token地址: { q: 存入数量(毛), cost: 分摊成本 } }; tokens = [{address, symbol}]
+function costTip(costBy, tokens) {
+  if (!costBy) return '';
+  const symOf = a => { const t = (tokens || []).find(t => t && t.address && (t.address === a || String(t.address).toLowerCase() === String(a).toLowerCase())); return t ? t.symbol : (String(a).slice(0, 6) + '…'); };
+  const lines = Object.entries(costBy).filter(([, v]) => v && v.q > 0).map(([a, v]) => `${symOf(a)}  ${fN(v.q)} 枚 · 成本 ${fU2(v.cost)} · 均价 ${fP(v.q > 0 ? v.cost / v.q : 0)}`);
+  return lines.length ? '两种币的成本 (按入金时市值分摊)\n' + lines.join('\n') : '';
+}
 function mkDet(p) {
   const full = isFullRange(p);
   const pct = full ? 50 : (p.inRange
@@ -1465,21 +1482,7 @@ function mkDet(p) {
     : slug
     ? `<a class="uni-link" href="https://app.uniswap.org/positions/${(p.protocol||'V3').toLowerCase()}/${slug}/${p.tokenId}" target="_blank" rel="noopener">在 Uniswap 查看 ↗</a>`
     : '';
-  // 建仓价值 + 差价 (rh 链事件流水回溯)
-  // 差价 = (头寸现值 + 已提取本金) - 累计入金, 即本金盈亏, 不含手续费
-  let entryCells = '';
-  if (p.entryValueUSD > 0) {
-    const wdr = p.entryWithdrawnUSD || 0;
-    const diff = p.positionValueUSD + wdr - p.entryValueUSD;
-    const pc = diff / p.entryValueUSD * 100;
-    const sign = diff >= 0 ? '+' : '-';
-    const d = new Date(p.entryTs || p.createdAt);
-    const dstr = `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-    const sub2 = p.entryModified ? '数据不全 · 仅供参考' : (wdr > 0 ? `含已提本金 ${fU2(wdr)}` : '不含手续费');
-    entryCells = `
-      <div><div class="d-label">开仓时价值</div><div class="d-val">${fU(p.entryValueUSD)}</div><div class="d-sub">${dstr} 入场${p.entryAdds > 1 ? ' · ' + p.entryAdds + '笔' : ''} · 按当时池价</div></div>
-      <div><div class="d-label">建仓至今差价</div><div class="d-val ${diff >= 0 ? 'gain' : 'loss'}">${sign}${fU2(Math.abs(diff))} (${sign}${Math.abs(pc).toFixed(2)}%)</div><div class="d-sub">${sub2}</div></div>`;
-  }
+  // (原「开仓时价值」「建仓至今差价」两格 2026-09-28 按用户要求去掉: 有了开仓成本/无常损失/净利润后没用了)
   // 开仓成本 (真实购买成本) / 无常损失 / 净利润 —— 服务端 pnl-ledger.applyPnl 注入:
   //   rh·arc 走钱包账本 (实际付出, 含换币损耗); 其他链退回开仓时点池价 (approx)
   let pnlCells = '';
@@ -1488,7 +1491,8 @@ function mkDet(p) {
     const costSub = p.costSource === 'ledger'
       ? (p.costApprox ? '钱包实付 · 部分按当时市值补齐' : '钱包实付 · 含换币损耗/滑点')
       : '暂按开仓时池价估算 (本链无钱包账本)';
-    pnlCells += `<div><div class="d-label">开仓成本</div><div class="d-val">${fU(p.costBasisUSD)}${p.costApprox ? '<span class="pn-approx" title="含估算成分">*</span>' : ''}</div><div class="d-sub">${costSub}</div></div>`;
+    const tip = costTip(p.costByToken, [p.token0, p.token1]);
+    pnlCells += `<div><div class="d-label">开仓成本</div><div class="d-val${tip ? ' has-tip' : ''}"${tip ? ' data-tip="' + escH(tip) + '"' : ''}>${fU(p.costBasisUSD)}${p.costApprox ? '<span class="pn-approx" title="含估算成分">*</span>' : ''}</div><div class="d-sub">${costSub}${tip ? ' · 悬浮看两币拆分' : ''}</div></div>`;
     if (p.hodlValueUSD != null) {
       const il = p.ilUSD || 0, pc = p.hodlValueUSD > 0 ? il / p.hodlValueUSD * 100 : 0;
       pnlCells += `<div><div class="d-label">无常损失</div><div class="d-val ${il >= 0 ? 'gain' : 'loss'}">${sg(il)}${fU2(Math.abs(il))} (${sg(il)}${Math.abs(pc).toFixed(2)}%)</div><div class="d-sub">对比持币不动 ${fU(p.hodlValueUSD)}</div></div>`;
@@ -1510,7 +1514,6 @@ function mkDet(p) {
       ${p.pendingCake > 0 ? `<div><div class="d-label">CAKE 奖励 (待领)</div><div class="d-val fees">${fN(p.pendingCake)}</div>${p.rewardValueUSD ? `<div class="d-sub">${fU2(p.rewardValueUSD)}</div>` : ''}</div>` : ''}
       ${p.dailyRateCumulative ? `<div><div class="d-label">累计日化</div><div class="d-val fees">${p.dailyRateCumulative.toFixed(2)}%</div><div class="d-sub">${p.totalDays>=1 ? p.totalDays+'天'+((p.totalHours%24)>0?(p.totalHours%24)+'h':'') : (p.totalHours||0)+'h'} · ${p.protocol==='V4' ? '不含已领' : '含已领'}</div></div>` : ''}
       ${pnlCells}
-      ${entryCells}
     </div>
     <div class="range-bar-labels"><span>下限: ${fP(p.lowerPrice)}</span><span>上限: ${fP(p.upperPrice)}</span></div>
     <div class="range-bar-track"><div class="range-bar-fill" style="left:0;width:${pct}%"></div><div class="range-bar-cursor" style="left:${pct}%"></div></div>
@@ -1618,12 +1621,9 @@ function render(data) {
         <td class="fees-cell hide-m" style="text-align:right">${fU2(p.feesValueUSD)}</td>
         <td class="apr-cell">${p.dailyRateCurrent ? p.dailyRateCurrent.toFixed(2)+'%' : '—'}${p.dailyRateCurrent ? `<div class="apr-sub">${p.holdDays>=1 ? p.holdDays+'天'+(p.holdHours%24>0?(p.holdHours%24)+'h':'') : p.holdHours+'h'+((p.holdMinutes||0)>0?(p.holdMinutes+'m'):'')}${p.hasCollected ? ' ↻' : ''}</div>` : ''}</td>
         <td class="val-cell">${fU(p.totalValueUSD)}${(()=>{
-          if(!(p.entryValueUSD>0)) return '';
-          const wdr=p.entryWithdrawnUSD||0;
-          const diff=p.positionValueUSD+wdr-p.entryValueUSD;
-          const pc=diff/p.entryValueUSD*100;
-          const sign=diff>=0?'+':'-';
-          return `<div class="val-diff ${diff>=0?'gain':'loss'}">${sign}${fU2(Math.abs(diff))} · ${sign}${Math.abs(pc).toFixed(1)}%${p.entryModified?'*':''}</div>`;
+          if(!(p.costBasisUSD>0)) return '';
+          const np=p.netProfitUSD||0, pc=p.netProfitPct||0, sign=np>=0?'+':'-';
+          return `<div class="val-diff ${np>=0?'gain':'loss'}" title="净利润">${sign}${fU2(Math.abs(np))} · ${sign}${Math.abs(pc).toFixed(1)}%${p.costApprox?'*':''}</div>`;
         })()}</td>
       </tr><tr class="detail-row" id="det-${uid}"><td colspan="7">${mkDet(p)}</td></tr>`;
     }
@@ -2667,8 +2667,9 @@ function renderPnl() {
       ? '<span class="pn-st ' + (r.inRange ? 'act' : 'out') + '">' + (r.inRange === null ? '活跃' : (r.inRange ? '区间内' : '区间外')) + '</span>'
       : '<span class="pn-st cls">已关闭' + (r.note === 'transferred' ? ' · 转出' : (r.note === 'empty' ? ' · 空仓' : '')) + '</span>';
     const proto = r.dex === 'pancake' ? 'CAKE V3' : (r.platform ? r.platform.toUpperCase() + ' ' + r.protocol : r.protocol);
-    const cost = r.costUSD > 0 ? fU(r.costUSD) + (r.costApprox || r.incomplete ? '<span class="pn-approx" title="' + (r.incomplete ? '部分事件尚未定价' : (r.source === 'ledger' ? '部分按当时市值补齐' : '按开仓时池价估算')) + '">*</span>' : '') : '<span class="sn-zero">—</span>';
-    const costSub = r.costUSD > 0 && r.depositValueUSD > 0 && r.source === 'ledger' ? '<span class="pn-sub">开仓时价值 ' + fU(r.depositValueUSD) + '</span>' : '';
+    const ctip = costTip(r.costBy, r.tokens);
+    const cost = r.costUSD > 0 ? '<span' + (ctip ? ' class="has-tip" data-tip="' + escH(ctip) + '"' : '') + '>' + fU(r.costUSD) + '</span>' + (r.costApprox || r.incomplete ? '<span class="pn-approx" title="' + (r.incomplete ? '部分事件尚未定价' : (r.source === 'ledger' ? '部分按当时市值补齐' : '按开仓时池价估算')) + '">*</span>' : '') : '<span class="sn-zero">—</span>';
+    const costSub = '';   // 「开仓时价值」副行 2026-09-28 去掉 (与详情卡同步)
     const fees = fU2((r.pendingFeesUSD || 0) + (r.collectedFeesUSD || 0)) + (r.collectedFeesUSD > 0 ? '<span class="pn-sub">已领 ' + fU2(r.collectedFeesUSD) + '</span>' : '') + (r.feesUnknown ? '<span class="pn-sub">不含已领</span>' : '');
     const il = r.ilUSD != null ? pnSigned(r.ilUSD) + (r.hodlValueUSD > 0 ? '<span class="pn-sub">' + (r.ilUSD >= 0 ? '+' : '−') + Math.abs(r.ilUSD / r.hodlValueUSD * 100).toFixed(2) + '%</span>' : '') : '<span class="sn-zero">—</span>';
     const np = r.netProfitUSD != null ? pnSigned(r.netProfitUSD) + '<span class="pn-sub">' + (r.netProfitPct >= 0 ? '+' : '−') + Math.abs(r.netProfitPct || 0).toFixed(2) + '%</span>' : '<span class="sn-zero">—</span>';

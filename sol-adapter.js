@@ -693,7 +693,7 @@ async function _fetchAllSol() {
       // 盈亏字段 (sol-ledger 命中才有): 开仓成本 / 持币对照→无常损失 / 已领费 / 已提回 / 净利润
       {
         const lg = solLedger.positionPnl(wr.address, pos._activityKey || pos.positionKey);
-        if (lg) pnlLedger.applyPnl(pos, { cost: lg.cost, approx: lg.approx, source: 'ledger', am: lg.a, withdrawnUSD: lg.ret, collectedUSD: lg.fees > 0 ? lg.fees : undefined, feesUnknown: lg.feesUnknown }, a => prices[a] || 0);
+        if (lg) pnlLedger.applyPnl(pos, { cost: lg.cost, approx: lg.approx, source: 'ledger', am: lg.a, costBy: lg.cb, withdrawnUSD: lg.ret, collectedUSD: lg.fees > 0 ? lg.fees : undefined, feesUnknown: lg.feesUnknown }, a => prices[a] || 0);
       }
 
       // === 日化（与 BSC 同口径） ===

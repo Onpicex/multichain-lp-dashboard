@@ -1488,7 +1488,7 @@ async function _fetchPositionsInner(forceRefresh = false) {
         const kind = pos.dex === 'pancake' ? 'pcs' : (pos.protocol === 'V4' ? 'v4' : 'v3');
         const lg = pnlLedger.positionPnl('bsc', wr.address, kind, pos.tokenId);
         const priceOf = a => usdPrices[a] || 0;
-        if (lg) pnlLedger.applyPnl(pos, { cost: lg.cost, approx: lg.approx || lg.inc, source: 'ledger', am: lg.a, withdrawnUSD: lg.ret, collectedUSD: lg.fees }, priceOf);
+        if (lg) pnlLedger.applyPnl(pos, { cost: lg.cost, approx: lg.approx || lg.inc, source: 'ledger', am: lg.a, costBy: lg.cb, withdrawnUSD: lg.ret, collectedUSD: lg.fees }, priceOf);
         else if (pos.entryValueUSD > 0) pnlLedger.applyPnl(pos, { cost: pos.entryValueUSD, approx: true, source: 'entry', am: pos.entryAm || {}, withdrawnUSD: pos.entryWithdrawnUSD || 0, collectedUSD: pos.protocol === 'V4' ? 0 : undefined, feesUnknown: pos.protocol === 'V4' }, priceOf);
       }
 

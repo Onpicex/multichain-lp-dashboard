@@ -727,7 +727,7 @@ async function computeWallet(chainId, addr, livePositions) {
 
   // 仓位累计
   const C = {};
-  const cOf = P => C[`${P.k}-${P.id}`] || (C[`${P.k}-${P.id}`] = { cost: 0, dep: 0, ret: 0, fees: 0, a: {}, openTs: 0, lastTs: 0, n: 0, approx: false, inc: false, owed0: 0, owed1: 0, liq: 0n });
+  const cOf = P => C[`${P.k}-${P.id}`] || (C[`${P.k}-${P.id}`] = { cost: 0, dep: 0, ret: 0, fees: 0, a: {}, cb: {}, openTs: 0, lastTs: 0, n: 0, approx: false, inc: false, owed0: 0, owed1: 0, liq: 0n });
 
   // 仓位事件 → 数量 (人类单位) + 当块池价
   const evAmounts = async (P, ev) => {
@@ -792,9 +792,17 @@ async function computeWallet(chainId, addr, livePositions) {
       }
       for (const d of deps) {
         const share = depMkt > 0 ? d.mkt / depMkt : 1 / deps.length;
-        d.c.cost += Math.max(0, costTotal) * share; d.c.dep += d.mkt; d.c.n++;
+        const costHere = Math.max(0, costTotal) * share;
+        d.c.cost += costHere; d.c.dep += d.mkt; d.c.n++;
         d.c.a[d.v.meta.t0.address] = (d.c.a[d.v.meta.t0.address] || 0) + d.v.a0;
         d.c.a[d.v.meta.t1.address] = (d.c.a[d.v.meta.t1.address] || 0) + d.v.a1;
+        // 按币分摊 (悬浮提示用): 本笔成本按两侧入金市值份额摊到两种币, 记存入数量(毛)与摊到的成本
+        const m0 = d.v.a0 * d.v.px.p0, m1 = d.v.a1 * d.v.px.p1, mm = m0 + m1;
+        for (const [addr, q, mk] of [[d.v.meta.t0.address, d.v.a0, m0], [d.v.meta.t1.address, d.v.a1, m1]]) {
+          if (!(q > 0)) continue;
+          const cb = d.c.cb[addr] || (d.c.cb[addr] = { q: 0, cost: 0 });
+          cb.q += q; cb.cost += mm > 0 ? costHere * mk / mm : costHere / 2;
+        }
         if (!d.c.openTs) d.c.openTs = ts;
         if (anyApprox) d.c.approx = true;
       }
@@ -847,7 +855,7 @@ async function computeWallet(chainId, addr, livePositions) {
     else if (!liveKeys.has(key) && c.liq > 0n) { status = 'active'; note = 'notlive'; }
     for (const k of Object.keys(c.a)) if (Math.abs(c.a[k]) < 1e-12) c.a[k] = 0;
     P.c = {
-      cost: c.cost, dep: c.dep, ret: c.ret, fees: c.fees, a: c.a, n: c.n,
+      cost: c.cost, dep: c.dep, ret: c.ret, fees: c.fees, a: c.a, cb: c.cb, n: c.n,
       openTs: c.openTs || P.mts || 0, closeTs, status, note, approx: c.approx, inc: c.inc,
       pair: meta ? `${meta.t0.symbol}/${meta.t1.symbol}` : '', fee: meta ? meta.fee : 0, t0: meta ? meta.t0 : null, t1: meta ? meta.t1 : null,
     };
@@ -962,10 +970,11 @@ function rowFromLedger(key, P, live) {
     key, protocol: P.k === 'v4' ? 'V4' : 'V3', dex: P.k === 'pcs' ? 'pancake' : undefined, tokenId: P.id, pair: live ? `${live.token0.symbol}/${live.token1.symbol}` : c.pair, feeLabel: live ? live.feeLabel : null, fee: c.fee,
     status: active ? 'active' : 'closed', note: active ? '' : c.note, inRange: live ? !!live.inRange : null,
     openTs: c.openTs, closeTs, source: 'ledger',
-    costUSD: c.cost, costApprox: c.approx, incomplete: c.inc, depositValueUSD: c.dep, adds: c.n,
+    costUSD: c.cost, costApprox: c.approx, incomplete: c.inc, depositValueUSD: c.dep, adds: c.n, costBy: c.cb || null,
     valueUSD, pendingFeesUSD: pending, collectedFeesUSD: c.fees, withdrawnUSD: c.ret,
     hodlValueUSD: live ? (live.hodlValueUSD ?? null) : null, ilUSD: live ? (live.ilUSD ?? null) : null,
     netProfitUSD: c.cost > 0 ? net : null, netProfitPct: c.cost > 0 ? net / c.cost * 100 : null,
+    tokens: live ? [live.token0, live.token1].map(t => ({ address: t.address, symbol: t.symbol })) : [c.t0, c.t1].filter(Boolean).map(t => ({ address: t.address, symbol: t.symbol })),
   };
 }
 function rowFromLive(key, p) {
@@ -973,11 +982,11 @@ function rowFromLive(key, p) {
   return {
     key, protocol: p.protocol, dex: p.dex, tokenId: p.tokenId, pair: `${p.token0.symbol}/${p.token1.symbol}`, feeLabel: p.feeLabel, fee: p.fee,
     status: 'active', note: '', inRange: !!p.inRange, openTs: p.entryTs || p.createdAt || 0, closeTs: 0, source: p.costSource || 'none',
-    costUSD: cost, costApprox: !!p.costApprox, incomplete: false, depositValueUSD: p.entryValueUSD || 0, adds: p.entryAdds || 0,
+    costUSD: cost, costApprox: !!p.costApprox, incomplete: false, depositValueUSD: p.entryValueUSD || 0, adds: p.entryAdds || 0, costBy: p.costByToken || null,
     valueUSD: p.positionValueUSD || 0, pendingFeesUSD: p.feesValueUSD || 0, collectedFeesUSD: p.collectedFeesUSD || 0, withdrawnUSD: p.withdrawnUSD || 0,
     hodlValueUSD: p.hodlValueUSD ?? null, ilUSD: p.ilUSD ?? null,
     netProfitUSD: cost > 0 ? (p.netProfitUSD ?? null) : null, netProfitPct: cost > 0 ? (p.netProfitPct ?? null) : null,
-    feesUnknown: !!p.feesUnknown,
+    feesUnknown: !!p.feesUnknown, tokens: [p.token0, p.token1].map(t => ({ address: t.address, symbol: t.symbol })),
   };
 }
 
@@ -991,6 +1000,7 @@ function applyPnl(pos, src, priceOf) {
   pos.costBasisUSD = src.cost;
   pos.costApprox = !!src.approx;
   pos.costSource = src.source;
+  if (src.costBy) pos.costByToken = src.costBy;   // { token: { q: 存入数量, cost: 分摊成本 } }, 前端悬浮提示
   // Solana mint 是大小写敏感的 base58, 先按原样查价, 再退回小写 (EVM 地址)
   const px = tok => priceOf(tok) || priceOf(low(tok)) || 0;
   let hodl = 0, any = false;
