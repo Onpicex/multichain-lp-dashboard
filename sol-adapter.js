@@ -58,6 +58,9 @@ async function getPrices(mints) {
 }
 
 // --- Token metadata (symbol) via Jupiter, with fallback map + cache ---
+const solLedger = require('./sol-ledger');    // Solana 钱包盈亏账本 (Helius 数据源)
+const pnlLedger = require('./pnl-ledger');    // 只用它的 applyPnl (盈亏字段注入, 各链同一口径)
+let lastPricesSol = {};                        // 上轮定价 (mint -> USD), 供账本给已关闭仓/无换币记录的币估值
 const TOKEN_META_FILE = path.join(__dirname, 'token-meta-sol.json');
 let tokenMeta = {};
 try { tokenMeta = JSON.parse(fs.readFileSync(TOKEN_META_FILE, 'utf8')); } catch {}
@@ -687,6 +690,11 @@ async function _fetchAllSol() {
       pos.positionValueUSD = pos.amount0 * price0 + pos.amount1 * price1;
       pos.feesValueUSD = pos.feesOwed0 * price0 + pos.feesOwed1 * price1;
       pos.totalValueUSD = pos.positionValueUSD + pos.feesValueUSD;
+      // 盈亏字段 (sol-ledger 命中才有): 开仓成本 / 持币对照→无常损失 / 已领费 / 已提回 / 净利润
+      {
+        const lg = solLedger.positionPnl(wr.address, pos._activityKey || pos.positionKey);
+        if (lg) pnlLedger.applyPnl(pos, { cost: lg.cost, approx: lg.approx, source: 'ledger', am: lg.a, withdrawnUSD: lg.ret, collectedUSD: lg.fees > 0 ? lg.fees : undefined, feesUnknown: lg.feesUnknown }, a => prices[a] || 0);
+      }
 
       // === 日化（与 BSC 同口径） ===
       // createdAt = 仓位账户最早签名的 blockTime（Meteora position PDA / Raydium·Orca NFT mint）
@@ -708,7 +716,7 @@ async function _fetchAllSol() {
           pos.totalDays = totalDays >= 1 ? Math.floor(totalDays) : 0;
           pos.totalHours = Math.floor(totalDays * 24);
           pos.hasCollected = collectedUSD > 0 || !!pos.lastCollectAt;
-          pos.collectedFeesUSD = collectedUSD;
+          if (!(pos.collectedFeesUSD > 0)) pos.collectedFeesUSD = collectedUSD;   // 账本已给已领费 (按领取时价) 则以账本为准
         }
 
         // 2. 当前日化：未领手续费 / 本金 / 距上次操作（无操作则距创建）
@@ -776,6 +784,7 @@ async function _fetchAllSol() {
     chain: 'sol',
     stats: { totalActive, totalInRange, totalOutOfRange, totalFees, walletsWithActiveLP, totalWallets: activeWallets().length },
   };
+  lastPricesSol = prices;
   cache = { data: result, timestamp: Date.now() };
   saveCache();
   console.log(`[SOL] Fetch complete. ${wallets.length} wallets, ${totalActive} active, total $${grandTotalUSD.toFixed(2)}`);
@@ -845,15 +854,12 @@ function mountSolRoutes(app, adminGuard) {
     const data = cache.data;
     const lw = (data?.wallets || []).find(w => w.address === addr) || null;
     const wc = WALLETS.find(w => w.address === addr) || null;
-    const positions = (lw?.positions || []).filter(p => p.liquidityActive).map(p => ({
-      key: `${p.platform || p.protocol}-${p.positionKey || p.tokenId}`, protocol: p.protocol, platform: p.platform, tokenId: p.tokenId, pair: `${p.token0.symbol}/${p.token1.symbol}`, feeLabel: p.feeLabel,
-      status: 'active', note: '', inRange: !!p.inRange, openTs: p.createdAt || 0, closeTs: 0, source: 'none',
-      costUSD: 0, costApprox: false, valueUSD: p.positionValueUSD || 0, pendingFeesUSD: p.feesValueUSD || 0, collectedFeesUSD: p.collectedFeesUSD || 0, withdrawnUSD: 0,
-      hodlValueUSD: null, ilUSD: null, netProfitUSD: null, netProfitPct: null,
-    }));
+    const rep = solLedger.walletReport(addr, lw);
+    if (req.query.refresh === 'true' && solLedger.enabled()) setImmediate(() => kickSolLedger());
     let idleUSD = null;
     for (const [a, wI] of Object.entries(data?.idle?.byWallet || {})) if (a === addr) idleUSD = wI.totalUSD || 0;
-    res.json({ chain: 'sol', wallet: { address: addr, name: wc?.name || lw?.name || addr, enabled: wc ? wc.enabled !== false : true }, ledger: false, unsupported: true, positions, lots: [], idleUSD, lpUSD: lw ? (lw.totalUSD || 0) : 0, funding: null, dataTs: data?.timestamp || 0 });
+    res.json({ chain: 'sol', wallet: { address: addr, name: wc?.name || lw?.name || addr, enabled: wc ? wc.enabled !== false : true }, ...rep, idleUSD, lpUSD: lw ? (lw.totalUSD || 0) : 0, funding: null, dataTs: data?.timestamp || 0,
+      selected: solPnlWallets().some(w => w.address === addr), ledgerEnabled: solLedger.enabled() && loadPnlCfgSol().enabled });
   });
   app.get('/api/sol/positions', async (req, res) => {
     try {
@@ -943,7 +949,31 @@ function kickSolRefresh() {
     .finally(() => { inFlight = null; });
 }
 
-module.exports = { mountSolRoutes, kickSolRefresh };
+// --- Solana 钱包盈亏账本: 只扫设置页「钱包盈亏」勾选的钱包 (未单独勾选沿用「钱包资金查询」的勾选); 启动 190s 后首跑, 之后每 30min ---
+function readCfg(file) { try { const c = JSON.parse(fs.readFileSync(path.join(__dirname, file), 'utf8')); return { enabled: c.enabled !== false, wallets: (c.wallets && typeof c.wallets === 'object') ? c.wallets : {} }; } catch { return { enabled: true, wallets: {} }; } }
+function loadPnlCfgSol() { return readCfg('pnl-config.json'); }
+function solPnlWallets() {
+  const pc = loadPnlCfgSol(); if (!pc.enabled) return [];
+  const on = WALLETS.filter(w => w.enabled !== false);
+  const arr = Array.isArray(pc.wallets.sol) ? pc.wallets.sol : (Array.isArray(readCfg('fund-config.json').wallets.sol) ? readCfg('fund-config.json').wallets.sol : null);
+  if (!arr) return on;
+  const s = new Set(arr.map(String)); return on.filter(w => s.has(w.address));
+}
+solLedger.init({
+  prices: () => lastPricesSol,
+  symbols: () => { const o = {}; for (const [m, sym] of Object.entries(KNOWN_TOKENS)) o[m] = { symbol: sym }; for (const [m, v] of Object.entries(tokenMeta)) if (v && v.symbol) o[m] = v; return o; },
+  wallets: solPnlWallets,
+  log: console.log,
+});
+function liveByWalletSol() { const m = {}; for (const w of (cache.data?.wallets || [])) m[w.address] = (w.positions || []).filter(p => p.liquidityActive); return m; }
+function kickSolLedger() { if (!solLedger.enabled()) return; solLedger.runQueue(liveByWalletSol()).catch(e => console.error('[SOL] pnl-ledger:', e.message)); }
+if (solLedger.enabled()) {
+  setTimeout(kickSolLedger, 190 * 1000);
+  setInterval(kickSolLedger, solLedger.ROUND_MS);
+  console.log('[SOL] pnl-ledger 就绪 (Helius)');
+} else console.log('[SOL] pnl-ledger 停用 (未配置 HELIUS_KEY)');
+
+module.exports = { mountSolRoutes, kickSolRefresh, kickSolLedger };
 
 // --- 服务端定时自动刷新（与 BSC 同架构，不依赖前端触发）---
 setInterval(() => {

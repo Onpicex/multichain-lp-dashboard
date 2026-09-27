@@ -1787,11 +1787,12 @@ app.get('/api/positions', async (req, res) => {
 });
 
 // --- Solana (Meteora DLMM + Raydium CLMM + Orca Whirlpool) ---
-let solKickRefresh = null, evmKickRefresh = null, evmKickLedger = null, bscKickLedger = null;
+let solKickRefresh = null, evmKickRefresh = null, evmKickLedger = null, bscKickLedger = null, solKickLedger = null;
 try {
   const solMod = require('./sol-adapter');
   solMod.mountSolRoutes(app, adminGuard);
   solKickRefresh = solMod.kickSolRefresh || null;
+  solKickLedger = solMod.kickSolLedger || null;
   console.log('SOL adapter mounted (/api/sol/*)');
 } catch (e) {
   console.error('SOL adapter failed to mount:', e.message);
@@ -1916,7 +1917,7 @@ app.post('/api/pnl/config', adminGuard, (req, res) => {
     fs.writeFileSync(tmp, JSON.stringify(next, null, 2)); fs.renameSync(tmp, PNL_CFG_FILE);
   } catch (e) { return res.status(500).json({ error: '写入失败: ' + e.message }); }
   const ch = String(body._chain || '');
-  try { if (next.enabled && evmKickLedger && ['rh', 'arc', 'base', 'eth'].includes(ch)) evmKickLedger(ch); if (next.enabled && ch === 'bsc' && bscKickLedger) bscKickLedger(); } catch {}
+  try { if (next.enabled && evmKickLedger && ['rh', 'arc', 'base', 'eth'].includes(ch)) evmKickLedger(ch); if (next.enabled && ch === 'bsc' && bscKickLedger) bscKickLedger(); if (next.enabled && ch === 'sol' && solKickLedger) solKickLedger(); } catch {}
   console.log(`[pnl] config saved: enabled=${next.enabled}, chains=${Object.keys(next.wallets).join(',') || '(沿用资金查询)'}`);
   res.json(loadPnlCfg());
 });

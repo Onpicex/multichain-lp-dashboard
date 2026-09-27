@@ -2683,7 +2683,8 @@ function renderPnl() {
   if (cls.length) { bh += '<tr class="pn-sec"><td colspan="10">已关闭仓位 · ' + cls.length + '</td></tr>'; for (const r of cls) bh += rowH(r); }
   $('pnTable').innerHTML = head + bh + '</tbody></table>';
   const notes = [];
-  if (d.ledger) notes.push('开仓成本 = 钱包为该仓实际付出的金额 (按 Transfer 流水回放: 换币建立持仓成本, 开仓 tx 的净流出按成本扣; 一笔换币+开仓的 zap, 流出的稳定币即全部成本, 含换币损耗)。带 * 的含估算成分 (原生 ETH 直转 / 转入的仓 / 桥入代币按当时市值)。');
+  if (d.ledger && d.chain === 'sol') notes.push('开仓成本 = 钱包为该仓实际付出的金额 (Helius 解析的钱包交易: 换币建立持仓成本, 开仓/加仓交易的净流出按成本扣)。提回与手续费里的非稳定币按钱包最近一次换该币的隐含价折算, 没有则按现价 (带 *)。Raydium 减仓把手续费和本金一起转出, 拆不开, 全计入「已提回」并标「不含已领」。');
+  else if (d.ledger) notes.push('开仓成本 = 钱包为该仓实际付出的金额 (按 Transfer 流水回放: 换币建立持仓成本, 开仓 tx 的净流出按成本扣; 一笔换币+开仓的 zap, 流出的稳定币即全部成本, 含换币损耗)。带 * 的含估算成分 (原生 ETH 直转 / 转入的仓 / 桥入代币按当时市值)。');
   else if (d.unsupported) notes.push('Solana 仓位暂无开仓成本与无常损失来源 (仓位账户不存入金历史), 只列现值与手续费。');
   else notes.push('本链公共 RPC 不支持按钱包扫全链 Transfer, 开仓成本暂按开仓时点池价估算 (带 *), 已关闭仓位不可用。');
   notes.push('无常损失 = 头寸现值 − 开仓存入的代币数量按现价持有不动的价值 (负数=做 LP 比拿着币亏)。净利润 = 现值 + 待领费 + 已领费 + 已提回本金 − 开仓成本; 已关闭仓 = 已提回 + 已领费 − 成本 (提回按当时市值)。');
