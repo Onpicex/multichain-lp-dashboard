@@ -2367,7 +2367,7 @@ function kickLedger(chainId) {
 }
 
 function mountEvmRoutes(app, adminGuard) {
-  ledger.init({ EVM_CHAINS, chainState, getTokenInfo, entryPricesAtBlock, entryTokenPrices, sqrtPriceX96ToPrice, getTokenAmounts, ethUsdAtTime, coinUsdAtTime, loadActiveWallets, withRetry, sleep, findMintEvent, mintBlockFromScan,
+  ledger.init({ EVM_CHAINS, chainState, getTokenInfo, entryPricesAtBlock, entryTokenPrices, sqrtPriceX96ToPrice, getTokenAmounts, ethUsdAtTime, coinUsdAtTime, getUSDPrices, loadActiveWallets, withRetry, sleep, findMintEvent, mintBlockFromScan,
     ledgerWallets: chainId => pnlSelected(chainId, loadActiveWallets(chainId)), ledgerEnabled: () => loadPnlCfgEvm().enabled });
   for (const chainId of Object.keys(EVM_CHAINS)) {
     const base = `/api/${chainId}`;
@@ -2557,6 +2557,6 @@ function mountEvmRoutes(app, adminGuard) {
 //   4. 加 Arc 钱包地址 -> 重启服务 -> 验证首轮抓取
 // =============================================================
 module.exports = { mountEvmRoutes, EVM_CHAINS, kickRefresh, liveByWallet, kickLedger,
-  _ledgerApi: { EVM_CHAINS, chainState, getTokenInfo, entryPricesAtBlock, entryTokenPrices, sqrtPriceX96ToPrice, getTokenAmounts, ethUsdAtTime, coinUsdAtTime, loadActiveWallets, withRetry, sleep, findMintEvent, mintBlockFromScan },
+  _ledgerApi: { EVM_CHAINS, chainState, getTokenInfo, entryPricesAtBlock, entryTokenPrices, sqrtPriceX96ToPrice, getTokenAmounts, ethUsdAtTime, coinUsdAtTime, getUSDPrices, loadActiveWallets, withRetry, sleep, findMintEvent, mintBlockFromScan },
   _entryTest: { getV3EntryData, getV4EntryData, getV3EntrySubgraph, getV4EntrySubgraph, getTokenInfo } };
 module.exports._collectTest = { fillLastCollect };   // 领费时间的独立验证入口 (tools/collect-check.js)  // 建仓回溯的独立验证入口

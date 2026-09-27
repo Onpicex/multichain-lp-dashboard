@@ -955,14 +955,9 @@
       <div class="st-head">
         <div class="st-head-main">
           <div class="st-title">资金快照 <span class="st-badge" id="spCount">0 天</span></div>
-          <div class="st-desc">每天到点自动记录一次「钱包余额 + LP 价值」，在左侧「资金快照」页查看逐日增减 · 只记自有钱包</div>
+          <div class="st-desc">每 5 分钟自动记录自有钱包的资金与盈亏（总资产 / 收益 / 未实现 / 已实现 / 手续费 / 净入金），在左侧「资金快照」页看收益曲线与逐日明细 · 保留 24 小时的 5 分钟级、30 天的小时级、全部的日级</div>
         </div>
-        <label class="switch" title="启用/关闭每日自动快照"><input type="checkbox" id="spEnabled" onchange="saveSpCfg()"><span class="switch-track"></span></label>
-      </div>
-      <div class="st-opts">
-        <label class="nm-opt">每日快照时间 <input type="time" class="sp-time" id="spTime" value="00:05" onchange="saveSpCfg()"></label>
-        <span class="nm-opt" id="spTz" style="cursor:default"></span>
-        <button class="nm-test-btn" id="spNowBtn" onclick="snapNow()">立即快照</button>
+        <label class="switch" title="启用/关闭自动记录"><input type="checkbox" id="spEnabled" onchange="saveSpCfg()"><span class="switch-track"></span></label>
       </div>
       <div class="nm-status" id="spStatus"></div>
       <div class="st-sub">生效的钱包 <span class="st-sub-note">默认 = 管理钱包里标「自有」的；观察钱包不计入快照</span></div>
@@ -1000,8 +995,7 @@
     </div>
     <div class="header-right">
       <span class="meta-text" id="snMeta"></span>
-      <button class="sn-btn2" onclick="closeSnap()">返回总览</button>
-      <button class="refresh-btn" id="snNowBtn" onclick="snapNow()">立即快照</button>
+      <button class="refresh-btn" onclick="closeSnap()">返回总览</button>
     </div>
   </div>
   <div class="sn-page">
@@ -1009,7 +1003,7 @@
     <div class="sn-strip" id="snStrip" style="display:none;"></div>
     <div class="sn-chart-card" id="snChartCard" style="display:none;">
       <div class="sn-chart-head">
-        <span class="sn-chart-title" id="snChartTitle">总资金走势</span>
+        <span class="sn-chart-title" id="snChartTitle">收益</span>
         <span id="snMetricBtns"></span>
         <span class="sep"></span>
         <span id="snRangeBtns"></span>
@@ -1842,7 +1836,7 @@ function stState(key) {   // 标签上的状态摘要 (当前链)
       const c = sel ? walletList.filter(w => sel.has(nmNorm(w.address))).length : ownN;
       return { on: pnCfg.enabled !== false, text: pnCfg.enabled === false ? '关' : `${c}/${n}${sel ? '' : ' · 自有'}` };
     }
-    case 'snapshot': return spCfg ? { on: spCfg.enabled !== false, text: spCfg.enabled === false ? '关' : `${spCfg.time || '00:05'} · ${cnt((spCfg.wallets || {})[activeChain])}/${n}` } : null;
+    case 'snapshot': return spCfg ? { on: spCfg.enabled !== false, text: spCfg.enabled === false ? '关' : `${cnt((spCfg.wallets || {})[activeChain])}/${n}${Array.isArray((spCfg.wallets || {})[activeChain]) ? '' : ' · 自有'}` } : null;
     case 'notify': return notifyCfg ? { on: !!notifyCfg.enabled, text: notifyCfg.enabled ? `${nmSelArr().length}/${n} · ${notifyCfg.intervalMin || 5}分` : '关' } : null;
   }
   return null;
@@ -2086,16 +2080,16 @@ async function testNotify() {
 // ================= 资金快照页 (/api/snapshot/*) =================
 // 数据: days[] 每日正式记录(升序) + latest(手动「立即快照」); 每条 {date,time,total,lp,idle,fees,chains:{ch:{...,wallets:{addr:{name,...}}}}}
 let snData = null, snOpenRow = null;
-let snChain = 'all', snWallet = 'all', snMetric = 'total', snRange = 90;
+let snChain = 'all', snWallet = 'all', snMetric = 'gain', snRange = '30d';
 try {
   snChain = localStorage.getItem('snChain') || 'all'; snWallet = localStorage.getItem('snWallet') || 'all';
-  snMetric = localStorage.getItem('snMetric') || 'total'; snRange = parseInt(localStorage.getItem('snRange')) || 90;
+  snMetric = localStorage.getItem('snMetric2') || 'gain'; snRange = localStorage.getItem('snRange2') || '30d';
 } catch {}
-const SN_METRICS = { total: '总资金', idle: '钱包余额', lp: 'LP 价值', fees: '待领手续费' };
-const SN_RANGES = [[30, '30 天'], [90, '90 天'], [0, '全部']];
-function snSave() { try { localStorage.setItem('snChain', snChain); localStorage.setItem('snWallet', snWallet); localStorage.setItem('snMetric', snMetric); localStorage.setItem('snRange', String(snRange)); } catch {} }
-// snWallet 取值: 'all' | 'g:<组名>' (分组) | <钱包地址>
-// 分组规则与总览筛选栏完全一致: 钱包名第一个分隔符前的前缀 (groupKey), 同前缀 >=2 个成组, 零配置改名即改组
+// 指标: gain = 总资产 − 净入金 (把充提剔掉的真实收益; 没有净入金数据的链退回总资产并注明)
+const SN_METRICS = { gain: '收益', total: '总资产', lp: 'LP 价值', idle: '钱包余额', np: '未实现盈亏', realized: '已实现盈亏', collected: '手续费累计' };
+const SN_RANGES = [['24h', '24 小时'], ['7d', '7 天'], ['30d', '30 天'], ['all', '全部']];
+function snSave() { try { localStorage.setItem('snChain', snChain); localStorage.setItem('snWallet', snWallet); localStorage.setItem('snMetric2', snMetric); localStorage.setItem('snRange2', snRange); } catch {} }
+// snWallet 取值: 'all' | 'g:<组名>' (分组) | <钱包地址>; 分组规则与总览筛选栏一致 (钱包名第一个分隔符前的前缀, 同前缀 >=2 个成组)
 function snGroups(wm) {
   const byAll = {};
   for (const [a, n] of Object.entries(wm)) { const g = groupKey(n); if (g) (byAll[g] = byAll[g] || []).push([a, n]); }
@@ -2106,82 +2100,88 @@ function snGroups(wm) {
   const singles = Object.entries(wm).filter(([a]) => !gmap[a]).sort(nat);
   return { gList, gmap, byG, singles };
 }
-
 async function loadSnap() {
-  if (!snData) $('snTable').innerHTML = '<div class="state-box"><div class="spinner"></div><div class="state-text">加载快照…</div></div>';
+  if (!snData) $('snTable').innerHTML = '<div class="state-box"><div class="spinner"></div><div class="state-text">加载记录…</div></div>';
   try {
     const r = await fetch('/api/snapshot/list');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     snData = await r.json();
     renderSnap();
-  } catch (e) { $('snTable').innerHTML = '<div class="error-box"><p>⚠ 快照加载失败: ' + escH(e.message) + '</p></div>'; }
+  } catch (e) { $('snTable').innerHTML = '<div class="error-box"><p>⚠ 加载失败: ' + escH(e.message) + '</p></div>'; }
 }
-async function snapNow() {
-  const btns = [$('snNowBtn'), $('spNowBtn')];
-  btns.forEach(b => { b.disabled = true; b.textContent = '⏳ 快照中'; });
-  try {
-    const r = await fetch('/api/snapshot/now', { method: 'POST' });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status);
-    btns.forEach(b => { b.textContent = '✓ 已快照'; });
-    if (snapOpen) await loadSnap();
-    if (settingsOpen) loadSpCfg();
-  } catch (e) { btns.forEach(b => { b.textContent = '✗ ' + String(e.message).slice(0, 24); }); }
-  setTimeout(() => btns.forEach(b => { b.disabled = false; b.textContent = '立即快照'; }), 2500);
-}
-// 快照条目在当前筛选范围(链/钱包)内的汇总; 范围内无数据返回 null
+// 一条记录在当前筛选范围 (链/钱包/组) 内的汇总; 范围内无数据返回 null. netIn 只在全部钱包都有数据时给, 否则 null
+const SN_SUMK = ['total', 'lp', 'idle', 'fees', 'cost', 'np', 'realized', 'collected', 'active', 'inRange'];
+function snZero() { const z = {}; for (const k of SN_SUMK) z[k] = 0; z.netIn = null; z._n = 0; z._nin = 0; return z; }
+function snAdd(z, o) { for (const k of SN_SUMK) z[k] += Number(o[k]) || 0; z._n++; if (typeof o.netIn === 'number') { z.netIn = (z.netIn || 0) + o.netIn; z._nin++; } }
+function snFin(z) { if (z._n && z._nin < z._n) z.netIn = null; z.gain = z.netIn == null ? null : z.total - z.netIn; return z; }
 function snScope(e) {
-  const z = { total: 0, lp: 0, idle: 0, fees: 0, active: 0, inRange: 0 };
-  const add = o => { for (const k in z) z[k] += Number(o[k]) || 0; };
-  const chs = e.chains || {};
-  if (snChain === 'all') { if (!Object.keys(chs).length) return null; for (const c of Object.values(chs)) add(c); return z; }
-  const c = chs[snChain]; if (!c) return null;
-  if (snWallet === 'all') { add(c); return z; }
-  if (snWallet.startsWith('g:')) {   // 分组: 按当条快照里各钱包自己的名字判定组, 历史改名也能正确归属
-    const g = snWallet.slice(2); let hit = false;
-    for (const w of Object.values(c.wallets || {})) if (groupKey(w.name || '') === g) { add(w); hit = true; }
-    return hit ? z : null;
+  const chs = e.chains;
+  if (!chs) {   // m5 精简条目: 只有总量, 仅在「全部」范围可用
+    if (snChain !== 'all') return null;
+    const z = snZero(); snAdd(z, e); return snFin(z);
   }
-  const w = (c.wallets || {})[snWallet]; if (!w) return null;
-  add(w); return z;
+  const z = snZero();
+  if (snChain === 'all') { if (!Object.keys(chs).length) return null; for (const c of Object.values(chs)) snAdd(z, c); return snFin(z); }
+  const c = chs[snChain]; if (!c) return null;
+  if (snWallet === 'all') { snAdd(z, c); return snFin(z); }
+  const ws = c.wallets || {};
+  if (snWallet.startsWith('g:')) {
+    const g = snWallet.slice(2); let hit = false;
+    for (const w of Object.values(ws)) if (groupKey(w.name || '') === g) { snAdd(z, w); hit = true; }
+    return hit ? snFin(z) : null;
+  }
+  const w = ws[snWallet]; if (!w) return null;
+  snAdd(z, w); return snFin(z);
 }
-// 序列: 正式记录升序 + 最新手动快照(若比最后一条正式记录新)
+function snMetricVal(z) {
+  if (!z) return null;
+  if (snMetric === 'gain') return z.gain == null ? z.total : z.gain;
+  return z[snMetric];
+}
+// 图表序列: 24h → m5 (全部范围) / hourly; 7d、30d → hourly; 全部 → days
 function snSeries() {
-  const days = (snData.days || []).slice();
-  const last = days[days.length - 1];
-  const lt = snData.latest;
-  if (lt && (!last || lt.ts > last.ts)) days.push({ ...lt, _latest: true });
-  return days.map(e => ({ e, v: snScope(e) })).filter(x => x.v);
+  const d = snData; if (!d) return [];
+  const now = Date.now();
+  let src, cutoff = 0;
+  if (snRange === '24h') { src = snChain === 'all' && d.m5.length ? d.m5 : d.hourly; cutoff = now - 86400000; }
+  else if (snRange === '7d') { src = d.hourly; cutoff = now - 7 * 86400000; }
+  else if (snRange === '30d') { src = d.hourly.length ? d.hourly : d.days; cutoff = now - 30 * 86400000; }
+  else src = d.days;
+  const out = [];
+  for (const e of src) {
+    if (cutoff && e.ts < cutoff) continue;
+    const z = snScope(e); if (!z) continue;
+    const v = snMetricVal(z); if (v == null || isNaN(v)) continue;
+    out.push({ ts: e.ts, e, z, v });
+  }
+  // hourly 不足 30 天时用 days 补前段
+  if (snRange === '30d' && src === d.hourly && out.length && d.days.length) {
+    const first = out[0].ts;
+    const pre = [];
+    for (const e of d.days) { if (e.ts >= first || e.ts < cutoff) continue; const z = snScope(e); if (!z) continue; const v = snMetricVal(z); if (v == null) continue; pre.push({ ts: e.ts, e, z, v }); }
+    out.unshift(...pre);
+  }
+  return out.sort((a, b) => a.ts - b.ts);
 }
-function fD(v) { // 带符号的美元差值
-  if (v == null || isNaN(v)) return '—';
-  const a = Math.abs(v); if (a < 0.005) return '$0.00';
-  return (v > 0 ? '+' : '−') + fU2(a);
-}
-function fPc(v, base) { if (!base || isNaN(v)) return ''; const p = v / Math.abs(base) * 100; return (p > 0 ? '+' : (p < 0 ? '−' : '')) + Math.abs(p).toFixed(2) + '%'; }
-function dCls(v) { return !v || Math.abs(v) < 0.005 ? 'sn-zero' : (v > 0 ? 'sn-pos' : 'sn-neg'); }
+function fD(v) { if (v == null || isNaN(v)) return '—'; const a = Math.abs(v); const s = v > 0 ? '+' : (v < 0 ? '−' : ''); if (a >= 1e6) return s + '$' + (a / 1e6).toFixed(2) + 'M'; return s + '$' + a.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function fPc(v, base) { if (!base || v == null || isNaN(v)) return ''; const p = v / Math.abs(base) * 100; return (p > 0 ? '+' : (p < 0 ? '−' : '')) + Math.abs(p).toFixed(2) + '%'; }
+function dCls(v) { return v == null || isNaN(v) || Math.abs(v) < 0.005 ? 'sn-zero' : (v > 0 ? 'sn-pos' : 'sn-neg'); }
 function fK(v) { const a = Math.abs(v); const s = v < 0 ? '−' : ''; if (a >= 1e6) return s + '$' + (a / 1e6).toFixed(2) + 'M'; if (a >= 1e4) return s + '$' + (a / 1e3).toFixed(1) + 'k'; if (a >= 1e3) return s + '$' + (a / 1e3).toFixed(2) + 'k'; return s + '$' + a.toFixed(0); }
-function snDateLabel(e) { return e.date.slice(5).replace('-', '/'); }
-function snTags(e) {
-  let t = '';
-  if (e._latest) t += '<span class="sn-tag acc">最新·手动</span>';
-  else if (e.mode === 'manual') t += '<span class="sn-tag acc">手动</span>';
-  if (e.late) t += '<span class="sn-tag warn" title="计划时间未拍到, 服务恢复后补拍">补拍</span>';
-  if (e.stale && e.stale.length) t += '<span class="sn-tag warn" title="这些链当时数据超过 12 分钟未更新: ' + escH(e.stale.join(',')) + '">数据偏旧</span>';
-  if (e.failed && e.failed.length) t += '<span class="sn-tag warn" title="这些链当时无数据: ' + escH(e.failed.join(',')) + '">缺 ' + escH(e.failed.map(c => CHAIN_NAMES[c] || c).join('/')) + '</span>';
-  return t;
+function snTs(ts, withDate) { const d = new Date(ts); const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); return withDate ? (d.getMonth() + 1) + '/' + d.getDate() + ' ' + hm : hm; }
+// 两条记录之间的「收益」= Δ总资产 − Δ净入金 (双方都有净入金才剔); 返回 { gain, dNet, flowKnown }
+function snGainBetween(za, zb) {
+  if (!za || !zb) return null;
+  const dTotal = zb.total - za.total;
+  if (za.netIn != null && zb.netIn != null) { const dNet = zb.netIn - za.netIn; return { gain: dTotal - dNet, dNet, flowKnown: true }; }
+  return { gain: dTotal, dNet: null, flowKnown: false };
 }
-
 function renderSnap() {
   if (!snData) return;
-  const cfgTxt = (snData.enabled ? '每日 ' + snData.time + ' 自动快照' : '自动快照已停用') + ' · 共 ' + (snData.totalDays || 0) + ' 天';
-  $('snMeta').textContent = cfgTxt;
-  const allDays = snData.days || [];
-  // 可选链 = 历史里出现过的链; 可选钱包 = 该链历史里出现过的钱包(名字取最近一次)
+  const d = snData;
+  $('snMeta').textContent = (d.enabled ? '每 ' + (d.intervalMin || 5) + ' 分钟自动记录' : '自动记录已停用') + (d.lastTs ? ' · 最近 ' + tA(d.lastTs) : '') + ' · 共 ' + (d.totalDays || 0) + ' 天';
+  // 可选链 / 钱包: 从 days + hourly 里出现过的
   const chainSet = new Set(); const wmap = {};
-  for (const e of allDays.concat(snData.latest ? [snData.latest] : [])) {
-    for (const [ch, c] of Object.entries(e.chains || {})) { chainSet.add(ch); for (const [a, w] of Object.entries(c.wallets || {})) { if (!wmap[ch]) wmap[ch] = {}; wmap[ch][a] = w.name || a; } }
-  }
+  for (const e of [...d.days, ...d.hourly]) for (const [ch, c] of Object.entries(e.chains || {})) { chainSet.add(ch); for (const [a, w] of Object.entries(c.wallets || {})) { if (!wmap[ch]) wmap[ch] = {}; wmap[ch][a] = w.name || a; } }
   if (snChain !== 'all' && !chainSet.has(snChain)) snChain = 'all';
   const snGI = snChain === 'all' ? null : snGroups(wmap[snChain] || {});
   if (snChain !== 'all' && snWallet !== 'all') {
@@ -2189,133 +2189,131 @@ function renderSnap() {
     else if (!(wmap[snChain] || {})[snWallet]) snWallet = 'all';
   }
   if (snChain === 'all') snWallet = 'all';
+  // 工具栏: 链一行, 钱包一行
   const tb = $('snToolbar');
   if (chainSet.size) {
-    let h = '<span class="filter-label">链</span><button class="ftag ' + (snChain === 'all' ? 'active' : '') + '" onclick="snSetChain(\'all\')">全部</button>';
+    let h = '<div class="tb-row"><span class="filter-label">链</span><button class="ftag ' + (snChain === 'all' ? 'active' : '') + '" onclick="snSetChain(\'all\')">全部</button>';
     for (const ch of Object.keys(CHAIN_NAMES)) if (chainSet.has(ch)) h += '<button class="ftag ' + (snChain === ch ? 'active' : '') + '" onclick="snSetChain(\'' + ch + '\')">' + CHAIN_NAMES[ch] + '</button>';
+    h += '</div>';
     if (snChain !== 'all' && Object.keys(wmap[snChain] || {}).length > 1) {
-      // 两级分组 (Chrome 标签组式, 与总览筛选栏同款): 点组 -> 选中该组并展开组内钱包; 再点组 -> 收起回「全部」
-      h += '<span class="filter-label">钱包</span><button class="ftag ' + (snWallet === 'all' ? 'active' : '') + '" onclick="snSetWallet(\'all\')">全部</button>';
-      const openG = snWallet.startsWith('g:') ? snWallet.slice(2) : (snGI.gmap[snWallet] || null);   // 展开的组 = 选中的组, 或所选钱包所属的组
+      h += '<div class="tb-row"><span class="filter-label">钱包</span><button class="ftag ' + (snWallet === 'all' ? 'active' : '') + '" onclick="snSetWallet(\'all\')">全部</button>';
+      const openG = snWallet.startsWith('g:') ? snWallet.slice(2) : (snGI.gmap[snWallet] || null);
       for (const g of snGI.gList) {
         const open = openG === g, col = groupColor(g), mem = snGI.byG[g];
-        h += '<button class="ftag fgrp' + (snWallet === 'g:' + g ? ' active' : '') + (open ? ' open' : '') + '" style="--gc:' + col + '" data-f="' + escH(open ? 'all' : 'g:' + g) + '" onclick="snSetWallet(this.dataset.f)" title="' + (open ? '再点收起' : '点开看组内钱包') + '"><span class="fdot"></span>' + escH(g) + '<span class="fcount">' + mem.length + '</span><span class="farrow">' + (open ? '▾' : '▸') + '</span></button>';
-        if (open) {
-          h += '<span class="fsub" style="--gc:' + col + '">';
-          for (const [a, n] of mem) h += '<button class="ftag fwal' + (snWallet === a ? ' active' : '') + '" onclick="snSetWallet(\'' + escH(a) + '\')" title="' + escH(n) + '">' + escH(groupRest(n) || n) + '</button>';
-          h += '</span>';
-        }
+        h += '<button class="ftag fgrp' + (snWallet === 'g:' + g ? ' active' : '') + (open ? ' open' : '') + '" style="--gc:' + col + '" data-f="' + escH(open ? 'all' : 'g:' + g) + '" onclick="snSetWallet(this.dataset.f)"><span class="fdot"></span>' + escH(g) + '<span class="fcount">' + mem.length + '</span><span class="farrow">' + (open ? '▾' : '▸') + '</span></button>';
+        if (open) { h += '<span class="fsub" style="--gc:' + col + '">'; for (const [a, n] of mem) h += '<button class="ftag fwal' + (snWallet === a ? ' active' : '') + '" onclick="snSetWallet(\'' + escH(a) + '\')" title="' + escH(n) + '">' + escH(groupRest(n) || n) + '</button>'; h += '</span>'; }
       }
       for (const [a, n] of snGI.singles) h += '<button class="ftag ' + (snWallet === a ? 'active' : '') + '" onclick="snSetWallet(\'' + escH(a) + '\')">' + escH(n) + '</button>';
+      h += '</div>';
     }
-    tb.innerHTML = h; tb.style.display = 'flex';
+    tb.innerHTML = h; tb.classList.add('two-rows'); tb.style.display = 'block';
   } else tb.style.display = 'none';
 
-  const ser = snSeries();
-  if (!ser.length) {
+  // 日级序列 (统计条 + 表格用): 每日日切, 最新一条 = 今天 (随时间更新)
+  const daily = [];
+  for (const e of d.days) { const z = snScope(e); if (z) daily.push({ e, z }); }
+  if (!daily.length) {
     $('snStrip').style.display = 'none'; $('snChartCard').style.display = 'none';
-    $('snTable').innerHTML = '<div class="sn-empty">还没有快照记录<br>' + (snData.enabled ? '每天 ' + snData.time + '（' + snData.tz + '）自动记录一次；也可以点右上角「立即快照」马上记一条' : '自动快照已在设置中关闭；可点右上角「立即快照」手动记一条') + '</div>';
-    $('snNote').textContent = '';
-    return;
+    $('snTable').innerHTML = '<div class="sn-empty">还没有记录<br>' + (d.enabled ? '服务每 5 分钟自动记一次自有钱包的资金与盈亏，几分钟后再来看' : '自动记录已在设置中关闭') + '</div>';
+    $('snNote').textContent = ''; return;
   }
-  // 统计条: 最新 / 较上一次 / 较 7 天前 / 较 30 天前 / 自首次
-  const cur = ser[ser.length - 1], prev = ser.length > 1 ? ser[ser.length - 2] : null, first = ser[0];
-  const back = nDays => { // 最接近「当前日期 - n 天」且不晚于它的记录
-    const target = new Date(cur.e.date + 'T00:00:00Z').getTime() - nDays * 86400000;
-    let best = null;
-    for (const x of ser) { const t = new Date(x.e.date + 'T00:00:00Z').getTime(); if (t <= target && (!best || t > new Date(best.e.date + 'T00:00:00Z').getTime())) best = x; }
-    return best;
+  const cur = daily[daily.length - 1], first = daily[0];
+  const back = nDays => { const cutoff = new Date(cur.e.date + 'T00:00:00Z').getTime() - nDays * 86400000; let best = null; for (const x of daily) { const t = new Date(x.e.date + 'T00:00:00Z').getTime(); if (t <= cutoff) best = x; } return best; };
+  const prev = daily.length > 1 ? daily[daily.length - 2] : null, d7 = back(7), d30 = back(30);
+  const cell = (label, val, cls, sub) => '<div class="stat-cell"><div class="stat-label">' + label + '</div><div class="stat-val ' + (cls || '') + '">' + val + '</div>' + (sub ? '<div class="stat-sub">' + sub + '</div>' : '') + '</div>';
+  const gainCell = (label, ref) => {
+    if (!ref) return cell(label, '—', '', '无对照记录');
+    const g = snGainBetween(ref.z, cur.z);
+    return cell(label, '<span class="' + dCls(g.gain) + '">' + fD(g.gain) + '</span>', '', (g.flowKnown ? (g.dNet ? '净入金 ' + fD(g.dNet) + ' 已剔除' : '期间无出入金') : '含出入金 (无净入金数据)') + ' · ' + fPc(g.gain, ref.z.total));
   };
-  const b7 = back(7), b30 = back(30);
-  const cell = (label, x, sub) => {
-    if (!x) return '<div class="stat-cell"><div class="stat-label">' + label + '</div><div class="stat-val sn-zero">—</div><div class="stat-sub">' + sub + '</div></div>';
-    const d = cur.v.total - x.v.total;
-    return '<div class="stat-cell"><div class="stat-label">' + label + '</div><div class="stat-val ' + dCls(d) + '">' + fD(d) + '</div><div class="stat-sub">' + fPc(d, x.v.total) + ' · 对比 ' + snDateLabel(x.e) + '</div></div>';
-  };
-  $('snStrip').innerHTML =
-    '<div class="stat-cell big"><div class="stat-label">最新快照 · ' + escH(cur.e.date) + ' ' + escH(cur.e.time || '') + '</div><div class="stat-val" style="color:var(--green)">' + fU(cur.v.total) + '</div><div class="stat-sub">钱包 ' + fU(cur.v.idle) + ' + LP ' + fU(cur.v.lp) + '</div></div>'
-    + cell('较上一次', prev, '只有一条记录') + cell('较 7 天前', b7, '不足 7 天') + cell('较 30 天前', b30, '不足 30 天') + cell('自首次', first !== cur ? first : null, '首次 ' + snDateLabel(first.e));
-  $('snStrip').style.display = 'grid';
+  let sh = '';
+  sh += cell('最新总资产', fU(cur.z.total), 'green', '钱包 ' + fU(cur.z.idle) + ' + LP ' + fU(cur.z.lp) + ' · ' + escH(cur.e.date + ' ' + (cur.e.time || '')));
+  sh += gainCell('今日收益 (较昨日日切)', prev);
+  sh += gainCell('7 天收益', d7);
+  sh += gainCell('30 天收益', d30);
+  sh += gainCell('累计收益 (自首条记录)', first === cur ? null : first);
+  sh += cell('未实现 / 已实现 / 手续费', '<span class="' + dCls(cur.z.np) + '">' + fD(cur.z.np) + '</span> <span class="sn-zero">/</span> <span class="' + dCls(cur.z.realized) + '">' + fD(cur.z.realized) + '</span>', '', '手续费累计 ' + fU2(cur.z.collected || 0) + (cur.z.netIn != null ? ' · 净入金 ' + fU(cur.z.netIn) : ''));
+  $('snStrip').innerHTML = sh; $('snStrip').style.display = 'grid';
 
-  // 图表
-  $('snChartCard').style.display = 'block';
-  $('snChartTitle').textContent = SN_METRICS[snMetric] + '走势' + (snChain === 'all' ? '' : ' · ' + CHAIN_NAMES[snChain]
-    + (snWallet === 'all' ? '' : ' · ' + (snWallet.startsWith('g:') ? snWallet.slice(2) + ' 组' : ((wmap[snChain] || {})[snWallet] || ''))));
+  // 图
   $('snMetricBtns').innerHTML = Object.entries(SN_METRICS).map(([k, n]) => '<button class="ftag ' + (snMetric === k ? 'active' : '') + '" onclick="snSetMetric(\'' + k + '\')">' + n + '</button>').join('');
-  $('snRangeBtns').innerHTML = SN_RANGES.map(([d, n]) => '<button class="ftag ' + (snRange === d ? 'active' : '') + '" onclick="snSetRange(' + d + ')">' + n + '</button>').join('');
-  snDrawChart(ser);
+  $('snRangeBtns').innerHTML = SN_RANGES.map(([k, n]) => '<button class="ftag ' + (snRange === k ? 'active' : '') + '" onclick="snSetRange(\'' + k + '\')">' + n + '</button>').join('');
+  const ser = snSeries();
+  const flowKnown = ser.length && ser.every(x => x.z.gain != null);
+  $('snChartTitle').textContent = (snMetric === 'gain' ? (flowKnown ? '收益 (总资产 − 净入金)' : '总资产 (本范围无净入金数据, 含出入金)') : SN_METRICS[snMetric]) + ' · ' + (ser.length ? ser.length + ' 点' : '无数据');
+  if (ser.length >= 2) { $('snChartCard').style.display = ''; snDrawChart(ser); } else $('snChartCard').style.display = 'none';
 
-  // 表格 (最新在前)
-  const cols = '<th>日期</th><th>总资金</th><th>钱包余额</th><th>LP 价值</th><th class="sn-hm">待领费</th><th class="sn-hm">活跃仓</th><th>较上次</th><th>自首次</th>';
-  let h = '<table class="sn-table"><thead><tr>' + cols + '</tr></thead><tbody>';
-  for (let i = ser.length - 1; i >= 0; i--) {
-    const x = ser[i], p = i > 0 ? ser[i - 1] : null;
-    const d = p ? x.v.total - p.v.total : null, df = x !== first ? x.v.total - first.v.total : null;
-    const key = x.e._latest ? 'latest' : x.e.date;
-    h += '<tr class="sn-row ' + (snOpenRow === key ? 'open' : '') + '" onclick="snToggleRow(\'' + key + '\')">'
-      + '<td><span class="sn-date">' + escH(x.e.date) + '</span><span class="sn-time">' + escH(x.e.time || '') + '</span>' + snTags(x.e) + '</td>'
-      + '<td>' + fU2(x.v.total) + '</td><td>' + fU2(x.v.idle) + '</td><td>' + fU2(x.v.lp) + '</td>'
-      + '<td class="sn-hm">' + fU2(x.v.fees) + '</td><td class="sn-hm">' + x.v.active + '<span style="color:var(--text-muted)">/' + x.v.inRange + '内</span></td>'
-      + '<td class="' + dCls(d) + '">' + (d == null ? '—' : fD(d) + ' <span style="font-size:10.5px;opacity:.8">' + fPc(d, p.v.total) + '</span>') + '</td>'
-      + '<td class="' + dCls(df) + '">' + (df == null ? '—' : fD(df) + ' <span style="font-size:10.5px;opacity:.8">' + fPc(df, first.v.total) + '</span>') + '</td></tr>';
-    if (snOpenRow === key) h += '<tr class="sn-detail"><td colspan="8">' + snDetail(x.e, p ? p.e : null) + '</td></tr>';
+  // 表格: 按日, 新的在上
+  let th = '<table class="sn-table"><thead><tr><th>日期</th><th>总资产</th><th>收益</th><th class="sn-hm">净入金变动</th><th class="sn-hm">钱包余额</th><th class="sn-hm">LP 价值</th><th class="sn-hm">未实现</th><th class="sn-hm">已实现</th><th class="sn-hm">手续费累计</th></tr></thead><tbody>';
+  for (let i = daily.length - 1; i >= 0; i--) {
+    const x = daily[i], pe = i > 0 ? daily[i - 1] : null;
+    const g = pe ? snGainBetween(pe.z, x.z) : null;
+    const open = snOpenRow === x.e.date;
+    th += '<tr class="sn-row' + (open ? ' open' : '') + '" onclick="snToggleRow(\'' + x.e.date + '\')"><td><span class="sn-date">' + escH(x.e.date) + '</span><span class="sn-time">' + escH(x.e.time || '') + (i === daily.length - 1 ? ' 最新' : '') + '</span>' + snTags(x.e) + '</td>'
+      + '<td>' + fU(x.z.total) + '</td>'
+      + '<td>' + (g ? '<span class="' + dCls(g.gain) + '">' + fD(g.gain) + '</span>' + (g.flowKnown ? '' : '<span class="sn-tag" title="无净入金数据, 含出入金">含出入金</span>') : '<span class="sn-zero">—</span>') + '</td>'
+      + '<td class="sn-hm">' + (g && g.flowKnown ? '<span class="' + dCls(g.dNet) + '">' + fD(g.dNet) + '</span>' : '<span class="sn-zero">—</span>') + '</td>'
+      + '<td class="sn-hm">' + fU(x.z.idle) + '</td><td class="sn-hm">' + fU(x.z.lp) + '</td>'
+      + '<td class="sn-hm">' + (x.e.np == null && !x.e.chains ? '—' : '<span class="' + dCls(x.z.np) + '">' + fD(x.z.np) + '</span>') + '</td>'
+      + '<td class="sn-hm"><span class="' + dCls(x.z.realized) + '">' + fD(x.z.realized) + '</span></td>'
+      + '<td class="sn-hm">' + fU2(x.z.collected || 0) + '</td></tr>';
+    if (open) th += '<tr class="sn-detail"><td colspan="9">' + snDetail(x.e, pe ? pe.e : null) + '</td></tr>';
   }
-  h += '</tbody></table>';
-  $('snTable').innerHTML = h;
-  $('snNote').innerHTML = '口径：总资金 = 钱包余额（闲置代币，来自「钱包资金查询」勾选的钱包）+ LP 价值（含待领手续费）· 每日记录取快照时刻的仪表盘缓存（各链每 5 分钟自刷新）· 时间为 ' + escH(snData.tz || '') + ' · 点击行可展开' + (snChain === 'all' ? '各链' : (snWallet.startsWith('g:') ? '组内钱包' : '各钱包（同名前缀自动归组）')) + '明细；「立即快照」只更新「最新」行，不覆盖当日正式记录';
+  th += '</tbody></table>';
+  $('snTable').innerHTML = th;
+  $('snNote').innerHTML = escH('口径：总资产 = 钱包余额 + LP 价值（含待领费）· 收益 = 总资产变动 − 净入金变动（净入金来自初始资金回溯，目前只有 Robinhood 链有；其它链的「收益」含出入金）· 未实现盈亏 = 活跃仓 现值+手续费−开仓成本 · 已实现盈亏 = 已关闭仓合计 · 每 5 分钟记一点，保留 24 小时的 5 分钟级、30 天的小时级、全部的日级（按 ' + (snData.tz || 'Asia/Shanghai') + ' 零点切日，当天那行随时间更新）· 点击行看各链 / 各钱包明细');
 }
-// 明细: 全部链视角 = 按链拆; 单链视角 = 按钱包拆并按组分块 (组汇总行 + 组内钱包行); 每行附较上一条记录的差值
-function snSubRow(nameHtml, subHtml, v, pv, cls, style) {
-  const d = pv ? (v.total || 0) - (pv.total || 0) : null;
-  return '<tr class="' + (cls || '') + '"' + (style ? ' style="' + style + '"' : '') + '>'
-    + '<td><span class="sn-name">' + nameHtml + '</span><span class="sn-addr">' + subHtml + '</span></td>'
-    + '<td>' + fU2(v.total) + '</td><td>' + fU2(v.idle) + '</td><td>' + fU2(v.lp) + '</td><td class="sn-hm">' + fU2(v.fees) + '</td>'
-    + '<td class="sn-hm">' + (v.active || 0) + '<span style="color:var(--text-muted)">/' + (v.inRange || 0) + '内</span></td>'
-    + '<td class="' + dCls(d) + '">' + (d == null ? '<span class="sn-zero">新</span>' : fD(d) + ' <span style="font-size:10px;opacity:.8">' + fPc(d, pv.total) + '</span>') + '</td></tr>';
+function snTags(e) {
+  let t = '';
+  if (e.stale && e.stale.length) t += '<span class="sn-tag warn" title="记录时这些链的缓存超过 12 分钟: ' + escH(e.stale.join(',')) + '">旧</span>';
+  if (e.failed && e.failed.length) t += '<span class="sn-tag warn" title="记录时这些链拉取失败: ' + escH(e.failed.join(',')) + '">缺</span>';
+  if (e.mode && e.mode !== 'auto') t += '<span class="sn-tag" title="改版前的每日定时记录">旧版</span>';
+  return t;
 }
-function snSum(list) {   // list: [[addr, walletObj], ...]
-  const z = { total: 0, lp: 0, idle: 0, fees: 0, active: 0, inRange: 0 };
-  for (const [, w] of list) for (const k in z) z[k] += Number(w[k]) || 0;
-  return z;
+function snSubRow(nameHtml, subHtml, z, pz, cls, style) {
+  const g = pz ? snGainBetween(pz, z) : null;
+  return '<tr' + (cls ? ' class="' + cls + '"' : '') + (style ? ' style="' + style + '"' : '') + '><td><span class="sn-name">' + nameHtml + '</span>' + (subHtml ? '<span class="sn-addr">' + subHtml + '</span>' : '') + '</td>'
+    + '<td>' + fU(z.total) + '</td><td>' + fU(z.idle) + '</td><td>' + fU(z.lp) + '</td><td class="sn-hm"><span class="' + dCls(z.np) + '">' + fD(z.np) + '</span></td><td class="sn-hm"><span class="' + dCls(z.realized) + '">' + fD(z.realized) + '</span></td>'
+    + '<td>' + (g ? '<span class="' + dCls(g.gain) + '">' + fD(g.gain) + '</span>' : '<span class="sn-zero">—</span>') + '</td></tr>';
 }
+function snSumZ(list) { const z = snZero(); for (const [, o] of list) snAdd(z, o); return snFin(z); }
 function snDetail(e, pe) {
-  const head = '<table class="sn-sub"><thead><tr><th>' + (snChain === 'all' ? '链' : '钱包') + '</th><th>总资金</th><th>钱包余额</th><th>LP 价值</th><th class="sn-hm">待领费</th><th class="sn-hm">活跃仓</th><th>较上次</th></tr></thead><tbody>';
+  const head = '<table class="sn-sub"><thead><tr><th>' + (snChain === 'all' ? '链' : '钱包') + '</th><th>总资产</th><th>钱包余额</th><th>LP 价值</th><th class="sn-hm">未实现</th><th class="sn-hm">已实现</th><th>较上日收益</th></tr></thead><tbody>';
   const empty = '<div class="idle-empty">无明细</div>';
   let b = '';
   if (snChain === 'all') {
     for (const ch of Object.keys(CHAIN_NAMES)) {
       const c = (e.chains || {})[ch]; if (!c) continue;
       const pc = pe ? (pe.chains || {})[ch] : null;
-      b += snSubRow(escH(CHAIN_NAMES[ch]), escH(c.n + ' 钱包' + (c.stale ? ' · 数据 ' + c.stale + ' 分钟前' : '')), c, pc);
+      b += snSubRow(escH(CHAIN_NAMES[ch]), escH(c.n + ' 钱包' + (c.stale ? ' · 数据 ' + c.stale + ' 分钟前' : '')), snFin(Object.assign(snZero(), (() => { const z = snZero(); snAdd(z, c); return z; })())), pc ? (() => { const z = snZero(); snAdd(z, pc); return snFin(z); })() : null);
     }
     return b ? head + b + '</tbody></table>' : empty;
   }
-  const c = (e.chains || {})[snChain]; if (!c) return '';
+  const c = (e.chains || {})[snChain]; if (!c) return empty;
   const pw = pe ? (((pe.chains || {})[snChain] || {}).wallets || null) : null;
   const ents = Object.entries(c.wallets || {});
   if (!ents.length) return empty;
-  // 分组按当条快照里各钱包自己的名字判定 (历史改名也正确归属); 选中某个组时只渲染该组
   const byAll = {};
   for (const [a, w] of ents) { const g = groupKey(w.name || ''); if (g) (byAll[g] = byAll[g] || []).push([a, w]); }
   const selG = snWallet.startsWith('g:') ? snWallet.slice(2) : null;
-  const inG = new Set();
-  const blocks = [];
+  const inG = new Set(); const blocks = [];
   for (const [g, mem] of Object.entries(byAll)) {
     if (mem.length < 2) continue;
     for (const [a] of mem) inG.add(a);
     if (selG && g !== selG) continue;
     const pm = pw ? mem.filter(([a]) => pw[a]).map(([a]) => [a, pw[a]]) : [];
-    blocks.push({ g, mem: mem.slice().sort((x, y) => (y[1].total || 0) - (x[1].total || 0)), v: snSum(mem), pv: pm.length ? snSum(pm) : null });
+    blocks.push({ g, mem: mem.slice().sort((x, y) => (y[1].total || 0) - (x[1].total || 0)), z: snSumZ(mem), pz: pm.length ? snSumZ(pm) : null });
   }
-  blocks.sort((x, y) => y.v.total - x.v.total);
+  blocks.sort((x, y) => y.z.total - x.z.total);
+  const one = o => { const z = snZero(); snAdd(z, o); return snFin(z); };
   for (const blk of blocks) {
     const st = '--gc:' + groupColor(blk.g);
-    b += snSubRow('<span class="sn-gdot"></span>' + escH(blk.g), '<span class="sn-gcount">' + blk.mem.length + ' 个钱包</span>', blk.v, blk.pv, 'sn-grp', st);
-    for (const [a, w] of blk.mem) b += snSubRow(escH(groupRest(w.name || '') || w.name || a), escH(sA(a)), w, pw ? pw[a] : null, 'sn-gmem', st);
+    b += snSubRow('<span class="sn-gdot"></span>' + escH(blk.g), '<span class="sn-gcount">' + blk.mem.length + ' 个钱包</span>', blk.z, blk.pz, 'sn-grp', st);
+    for (const [a, w] of blk.mem) b += snSubRow(escH(groupRest(w.name || '') || w.name || a), escH(sA(a)), one(w), pw && pw[a] ? one(pw[a]) : null, 'sn-gmem', st);
   }
-  if (!selG) {   // 未成组的钱包照旧平铺, 排在分组之后
+  if (!selG) {
     const singles = ents.filter(([a]) => !inG.has(a)).sort((x, y) => (y[1].total || 0) - (x[1].total || 0));
-    for (const [a, w] of singles) b += snSubRow(escH(w.name || a), escH(sA(a)), w, pw ? pw[a] : null);
+    for (const [a, w] of singles) b += snSubRow(escH(w.name || a), escH(sA(a)), one(w), pw && pw[a] ? one(pw[a]) : null);
   }
   return b ? head + b + '</tbody></table>' : empty;
 }
@@ -2323,51 +2321,37 @@ function snToggleRow(k) { snOpenRow = snOpenRow === k ? null : k; renderSnap(); 
 function snSetChain(c) { snChain = c; snWallet = 'all'; snOpenRow = null; snSave(); renderSnap(); }
 function snSetWallet(w) { snWallet = w; snOpenRow = null; snSave(); renderSnap(); }
 function snSetMetric(m) { snMetric = m; snSave(); renderSnap(); }
-function snSetRange(d) { snRange = d; snSave(); renderSnap(); }
-
-// SVG 折线: 单序列 + 十字线悬停提示; 尺寸取容器实际像素, 窗口变化时重画
+function snSetRange(r) { snRange = r; snSave(); renderSnap(); }
 let snChartPts = [];
-function snDrawChart(serAll) {
+function snDrawChart(ser) {
   const wrap = $('snChartWrap'), svg = $('snSvg'), tip = $('snTip');
   const W = wrap.clientWidth || 600, H = wrap.clientHeight || 230;
   const M = { l: 56, r: 18, t: 14, b: 26 };
-  let ser = serAll;
-  if (snRange > 0) {
-    const cutoff = new Date(serAll[serAll.length - 1].e.date + 'T00:00:00Z').getTime() - (snRange - 1) * 86400000;
-    ser = serAll.filter(x => new Date(x.e.date + 'T00:00:00Z').getTime() >= cutoff);
-  }
-  const vals = ser.map(x => x.v[snMetric] || 0);
-  const t0 = new Date(ser[0].e.date + 'T00:00:00Z').getTime(), t1 = ser.length > 1 ? ser[ser.length - 1].e.ts || t0 + 1 : t0 + 86400000;
-  const xs = ser.map(x => x.e._latest || ser.length === 1 ? (x.e.ts || t0) : new Date(x.e.date + 'T00:00:00Z').getTime());
-  const xmin = Math.min(...xs), xmax = Math.max(...xs), xspan = Math.max(xmax - xmin, 3600000);
+  const vals = ser.map(x => x.v), xs = ser.map(x => x.ts);
+  const xmin = Math.min(...xs), xmax = Math.max(...xs), xspan = Math.max(xmax - xmin, 600000);
   let vmin = Math.min(...vals), vmax = Math.max(...vals);
   let pad = (vmax - vmin) * 0.12; if (pad === 0) pad = Math.max(Math.abs(vmax) * 0.02, 1);
   vmin -= pad; vmax += pad; if (Math.min(...vals) >= 0 && vmin < 0) vmin = 0;
   const X = t => M.l + (t - xmin) / xspan * (W - M.l - M.r);
   const Y = v => M.t + (1 - (v - vmin) / (vmax - vmin)) * (H - M.t - M.b);
-  const pts = ser.map((x, i) => ({ x: X(xs[i]), y: Y(vals[i]), v: vals[i], e: x.e, d: i > 0 ? vals[i] - vals[i - 1] : null, pv: i > 0 ? vals[i - 1] : null }));
+  const pts = ser.map((x, i) => ({ x: X(x.ts), y: Y(x.v), v: x.v, ts: x.ts, e: x.e, d: i > 0 ? x.v - ser[i - 1].v : null, pv: i > 0 ? ser[i - 1].v : null }));
   snChartPts = pts;
-  // y 网格 4 条 + 标签
   let g = '<g class="grid">', ax = '<g class="axis">';
-  for (let i = 0; i <= 4; i++) {
-    const v = vmin + (vmax - vmin) * i / 4, y = Y(v);
-    g += '<line x1="' + M.l + '" x2="' + (W - M.r) + '" y1="' + y.toFixed(1) + '" y2="' + y.toFixed(1) + '"/>';
-    ax += '<text x="' + (M.l - 8) + '" y="' + (y + 3.5).toFixed(1) + '" text-anchor="end">' + fK(v) + '</text>';
-  }
+  for (let i = 0; i <= 4; i++) { const v = vmin + (vmax - vmin) * i / 4, y = Y(v); g += '<line x1="' + M.l + '" x2="' + (W - M.r) + '" y1="' + y.toFixed(1) + '" y2="' + y.toFixed(1) + '"/>'; ax += '<text x="' + (M.l - 8) + '" y="' + (y + 3.5).toFixed(1) + '" text-anchor="end">' + fK(v) + '</text>'; }
   g += '</g>';
-  // x 标签: 最多 6 个, 去重
-  const nx = Math.max(2, Math.min(Math.floor((W - M.l - M.r) / 75), 6, ser.length)); const seen = new Set();   // 标签数随宽度: 每 75px 最多 1 个, 避免手机端重叠
+  const withDate = xspan > 86400000 * 1.5;
+  const nx = Math.max(2, Math.min(Math.floor((W - M.l - M.r) / 80), 6, ser.length)); const seen = new Set();
   for (let i = 0; i < nx; i++) {
     const idx = ser.length === 1 ? 0 : Math.round(i * (ser.length - 1) / (nx - 1));
     if (seen.has(idx)) continue; seen.add(idx);
     const anchor = idx === 0 ? 'start' : (idx === ser.length - 1 ? 'end' : 'middle');
-    ax += '<text x="' + pts[idx].x.toFixed(1) + '" y="' + (H - 6) + '" text-anchor="' + anchor + '">' + snDateLabel(ser[idx].e) + '</text>';
+    const lab = snRange === 'all' ? ser[idx].e.date.slice(5).replace('-', '/') : snTs(ser[idx].ts, withDate);
+    ax += '<text x="' + pts[idx].x.toFixed(1) + '" y="' + (H - 6) + '" text-anchor="' + anchor + '">' + lab + '</text>';
   }
   ax += '</g>';
   const lineD = pts.map((p, i) => (i ? 'L' : 'M') + p.x.toFixed(1) + ' ' + p.y.toFixed(1)).join(' ');
   const areaD = lineD + ' L' + pts[pts.length - 1].x.toFixed(1) + ' ' + Y(vmin).toFixed(1) + ' L' + pts[0].x.toFixed(1) + ' ' + Y(vmin).toFixed(1) + ' Z';
-  let dots = '';
-  if (pts.length <= 60) for (const p of pts) dots += '<circle class="dot" cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="3"/>';
+  let dots = ''; if (pts.length <= 60) for (const p of pts) dots += '<circle class="dot" cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="3"/>';
   const last = pts[pts.length - 1];
   const lab = '<text class="lastlab" x="' + Math.min(last.x, W - M.r - 4).toFixed(1) + '" y="' + (last.y - 9).toFixed(1) + '" text-anchor="end">' + fK(last.v) + '</text>';
   svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
@@ -2380,8 +2364,7 @@ function snDrawChart(serAll) {
     let best = pts[0]; for (const p of pts) if (Math.abs(p.x - mx) < Math.abs(best.x - mx)) best = p;
     hv.style.display = ''; hv.querySelector('line').setAttribute('x1', best.x); hv.querySelector('line').setAttribute('x2', best.x);
     hv.querySelector('circle').setAttribute('cx', best.x); hv.querySelector('circle').setAttribute('cy', best.y);
-    tip.innerHTML = '<b>' + escH(best.e.date) + ' ' + escH(best.e.time || '') + (best.e._latest ? ' 最新' : '') + '</b><br>' + SN_METRICS[snMetric] + ' ' + fU2(best.v)
-      + (best.d == null ? '' : '<br><span class="' + dCls(best.d) + '">' + fD(best.d) + ' ' + fPc(best.d, best.pv) + '</span>');
+    tip.innerHTML = '<b>' + escH(best.e.date + ' ' + (best.e.time || snTs(best.ts))) + '</b><br>' + SN_METRICS[snMetric] + ' ' + fU2(best.v) + (best.d == null ? '' : '<br><span class="' + dCls(best.d) + '">' + fD(best.d) + ' ' + fPc(best.d, best.pv) + '</span>');
     tip.style.display = 'block';
     const tw = tip.offsetWidth; let lx = best.x + 12; if (lx + tw > W - 4) lx = best.x - tw - 12;
     tip.style.left = lx + 'px'; tip.style.top = Math.max(0, best.y - 40) + 'px';
@@ -2390,7 +2373,7 @@ function snDrawChart(serAll) {
   ov.onmouseleave = () => { hv.style.display = 'none'; tip.style.display = 'none'; };
 }
 let snResizeT = null;
-window.addEventListener('resize', () => { if (!snapOpen || !snData) return; clearTimeout(snResizeT); snResizeT = setTimeout(() => { const s = snSeries(); if (s.length) snDrawChart(s); }, 150); });
+window.addEventListener('resize', () => { if (!snapOpen || !snData) return; clearTimeout(snResizeT); snResizeT = setTimeout(() => { const s = snSeries(); if (s.length >= 2) snDrawChart(s); }, 150); });
 
 // --- 设置页: 资金快照配置 (wallets.<chain> 未设置=全部参与; []=全不参与, 与资金查询同语义) ---
 let spCfg = null;
@@ -2410,27 +2393,13 @@ function spSelSet() {
 function renderSp() {
   if (!spCfg) return;
   $('spEnabled').checked = spCfg.enabled !== false;
-  $('spTime').value = spCfg.time || '00:05';
-  $('spTz').textContent = '时区 ' + (spCfg.tz || '');
   $('spCount').textContent = (spCfg.totalDays || 0) + ' 天';
-  const lr = spCfg.lastRun ? ('上次快照 ' + spCfg.lastRun.date + '（' + tA(spCfg.lastRun.ts) + (spCfg.lastRun.mode === 'manual' ? '，手动' : '') + '）') : '尚无快照记录';
-  const nx = !spCfg.enabled ? '自动快照已停用' : (spCfg.todayDone ? '今日已完成，下次 明天 ' + spCfg.time : '下次 今天 ' + spCfg.time + (spCfg.running ? '（进行中…）' : ''));
-  $('spStatus').innerHTML = escH(lr) + ' · ' + escH(nx) + (spCfg.lastError ? ' · <span style="color:var(--red)">上次失败: ' + escH(spCfg.lastError) + '</span>' : '');
-  const sel = spSelSet();
+  $('spStatus').textContent = (spCfg.enabled === false ? '自动记录已停用' : '每 ' + (spCfg.intervalMin || 5) + ' 分钟自动记录') + (spCfg.lastTs ? ' · 最近 ' + tA(spCfg.lastTs) : ' · 尚无记录') + ' · 今日 ' + (spCfg.todayPoints || 0) + ' 个点 · 时区 ' + (spCfg.tz || '') + (spCfg.lastError ? ' · 上次失败: ' + spCfg.lastError : '');
   $('spList').innerHTML = stEffective(Array.isArray((spCfg.wallets || {})[activeChain]) ? spCfg.wallets[activeChain] : null, 'spFollowOwn');
-}
-function spToggleWallet(addr, on) {
-  if (!Array.isArray(spCfg.wallets[activeChain])) spCfg.wallets[activeChain] = walletList.map(w => nmNorm(w.address));
-  const arr = spCfg.wallets[activeChain], n = nmNorm(addr);
-  const i = arr.findIndex(a => nmNorm(a) === n);
-  if (on && i < 0) arr.push(n);
-  if (!on && i >= 0) arr.splice(i, 1);
-  saveSpCfg();
 }
 async function saveSpCfg() {
   if (!spCfg) return;
   const body = { enabled: $('spEnabled').checked, wallets: spCfg.wallets || {} };
-  const t = $('spTime').value; if (/^\d{2}:\d{2}$/.test(t)) body.time = t;
   try {
     const r = await fetch('/api/snapshot/config', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),

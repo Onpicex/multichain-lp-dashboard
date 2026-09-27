@@ -639,8 +639,22 @@ function buildRefPools(chainId) {
 // 历史价合理性: 与当前价 (上轮定价) 偏离超过 100 倍 → 当无效 (死池/流动性极薄的池 slot0 是随便什么数)
 function priceSane(chainId, token, p) {
   if (!(p > 0)) return false;
-  const cur = (stateOf(chainId).lastUsdPrices || {})[token] || 0;
+  const st = ledgerState(chainId);
+  const cur = ((st.d.cur || {})[token] || {}).p || (stateOf(chainId).lastUsdPrices || {})[token] || 0;
   return !(cur > 0) || (p <= cur * 100 && p >= cur / 100);
+}
+// 账本涉及的 token 现价 (coingecko 按合约地址批量, 6h 缓存): 给 priceSane 当参考 —— 上轮定价只覆盖活跃仓的 token,
+// 已关闭仓的币 (如某钱包的 cbBTC) 没参考价, 死池的离谱历史价就拦不住 (2026-09-28 base 手续费 1e40 的真因)
+async function refreshCurPrices(chainId, tokens) {
+  const st = ledgerState(chainId);
+  st.d.cur = st.d.cur || {};
+  const cfg = cfgOf(chainId);
+  const need = [...tokens].filter(t => t && !cfg.stables[t] && !(st.d.cur[t] && Date.now() - st.d.cur[t].ts < 6 * 3600 * 1000));
+  if (!need.length || !E.getUSDPrices || extra[chainId]) return;
+  try {
+    const m = await E.getUSDPrices(chainId, need, []);
+    for (const t of need) { const p = m && m[t]; if (p > 0) st.d.cur[t] = { p, ts: Date.now() }; }
+  } catch (e) { console.error(`[${chainId}] pnl-ledger 现价参考拉取失败:`, e.message?.slice(0, 80)); }
 }
 async function priceAt(chainId, token, block, ref) {
   const cfg = cfgOf(chainId);
@@ -669,6 +683,13 @@ async function computeWallet(chainId, addr, livePositions) {
   if (!W || W.partial) return;
   const ref = buildRefPools(chainId);
   const liveKeys = new Set((livePositions || []).map(p => `${p.dex === 'pancake' ? 'pcs' : (p.protocol === 'V4' ? 'v4' : 'v3')}-${p.tokenId}`));
+  // 现价参考: 本钱包流水与仓位涉及的全部 token
+  {
+    const toks = new Set();
+    for (const t of Object.values(W.txs)) for (const [, [tok]] of Object.entries(t.e || {})) toks.add(low(tok));
+    for (const P of Object.values(W.pos)) { const m = P.spec && st.d.pools[P.spec]; if (m) { toks.add(m.t0.address); toks.add(m.t1.address); } }
+    await refreshCurPrices(chainId, toks);
+  }
 
   // tx 汇总
   const txs = new Map();
