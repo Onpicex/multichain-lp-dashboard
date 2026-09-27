@@ -710,6 +710,7 @@ async function runQueue(chainId, livePositionsByWallet, opts = {}) {
         await computeWallet(chainId, addr, (livePositionsByWallet && livePositionsByWallet[addr]) || []);
         const n = Object.values(W.pos).filter(P => P.c).length, cl = Object.values(W.pos).filter(P => P.c && P.c.status === 'closed').length;
         console.log(`[${chainId}] pnl-ledger ${w.name}: ${Object.keys(W.txs).length} tx, ${n} 仓 (已关闭 ${cl})${W.stopped ? ' · 流水未扫完下轮续' : ''}`);
+        save(chainId);   // 每个钱包算完就落盘: 重放一个大钱包要几分钟, 中途重启不丢已算好的 (2026-09-27 v3 轮被重启打断, 两个钱包白算)
       } catch (e) { console.error(`[${chainId}] pnl-ledger 重放 ${w.name}:`, e.message?.slice(0, 100)); }
     }
     save(chainId);
