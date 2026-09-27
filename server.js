@@ -1803,7 +1803,7 @@ app.get('/api/pnl/all', async (req, res) => {
       const rep = await fetchLocalJson(`${CHAIN_PNL_API[ch]}?wallet=${encodeURIComponent(w.address)}${refresh ? '&refresh=true' : ''}`);
       if (!rep) continue;
       const wk = `${ch}:${w.address}`;
-      out.wallets.push({ chain: ch, address: w.address, name: w.name, own: w.own === true, ledger: w.ledger === true, ledgerOn: !!rep.ledger, ledgerStale: !!rep.ledgerStale, partial: !!rep.partial, pending: !!rep.pending, scanning: !!rep.scanning, updatedAt: rep.updatedAt || 0, lpUSD: rep.lpUSD || 0, idleUSD: rep.idleUSD, funding: rep.funding || null, n: (rep.positions || []).length });
+      out.wallets.push({ chain: ch, address: w.address, name: w.name, own: w.own === true, ledger: w.ledger === true, ledgerOn: !!rep.ledger, ledgerStale: !!rep.ledgerStale, priceMiss: rep.priceMiss || 0, partial: !!rep.partial, pending: !!rep.pending, scanning: !!rep.scanning, updatedAt: rep.updatedAt || 0, lpUSD: rep.lpUSD || 0, idleUSD: rep.idleUSD, funding: rep.funding || null, n: (rep.positions || []).length });
       for (const r of (rep.positions || [])) out.positions.push({ ...r, chain: ch, wallet: w.name, walletAddress: w.address, wk });
       out.lpUSD += rep.lpUSD || 0;
       if (typeof rep.idleUSD === 'number') out.idleUSD += rep.idleUSD;

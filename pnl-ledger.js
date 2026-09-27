@@ -577,44 +577,87 @@ async function scanV4Events(chainId, deadline) {
 const MIN_SQRT = 4295128739n, MAX_SQRT = 1461446703485210103287273052203988822378723970342n;
 function sqrtSane(sq) { try { const v = BigInt(sq); return v > MIN_SQRT * 4n && v < MAX_SQRT / 4n; } catch { return false; } }
 let pxDirty = 0;
+// 某池在某块的 sqrtPriceX96: Ankr 链走归档 eth_call (V3 pool.slot0 / V4 stateView.getSlot0), 其它链找目标块附近最近一笔 Swap
+async function sqrtAtBlock(chainId, spec, meta, block) {
+  if (!isAnkr(chainId)) {
+    const specObj = meta.kind === 'v4' ? { kind: 'v4', poolId: spec } : { kind: 'v3', poolAddress: spec };
+    return await E.poolPriceNearBlock(chainId, specObj, block);
+  }
+  const cfg = cfgOf(chainId);
+  const provider = providerFor(chainId);
+  const tag = '0x' + Number(block).toString(16);
+  if (meta.kind === 'v4') {
+    const iface = new ethers.Interface(['function getSlot0(bytes32) view returns (uint160 sqrtPriceX96,int24 tick,uint24 protocolFee,uint24 lpFee)']);
+    const res = await E.withRetry(() => provider.send('eth_call', [{ to: cfg.v4.stateView, data: iface.encodeFunctionData('getSlot0', [spec]) }, tag]), 2, 700);
+    return iface.decodeFunctionResult('getSlot0', res)[0];
+  }
+  // slot0() 只取第一槽 sqrtPriceX96 (Pancake 的 feeProtocol 是 uint32, 套 Uniswap ABI 整体解码会越界)
+  const res = await E.withRetry(() => provider.send('eth_call', [{ to: spec, data: '0x3850c7bd' }, tag]), 2, 700);
+  return res && res.length >= 66 ? BigInt(res.slice(0, 66)) : 0n;
+}
+// 原生币 × 稳定币 的池 (给原生币定价用的链上参考)
+function nativeRefPools(chainId) {
+  const st = ledgerState(chainId); const cfg = cfgOf(chainId); const wn = low(cfg.wrappedNative);
+  const out = [];
+  for (const [spec, m] of Object.entries(st.d.pools)) {
+    if (m.t0.address === wn && cfg.stables[m.t1.address]) out.push({ spec, side: 0 });
+    else if (m.t1.address === wn && cfg.stables[m.t0.address]) out.push({ spec, side: 1 });
+  }
+  return out;
+}
+// 原生币 (ETH / BNB) 在某块的美元价: coingecko 小时价 (evm-adapter 持久缓存) → 原生币/稳定币参考池当块价 (链上, 确定) → 0 (调用方按现价估并标 transient)
+//   2026-09-28 前只有 coingecko 一条路, 限流失败就静默退现价, Base 自有钱包已实现盈亏一轮 −222 一轮 +239 就是这么来的
+async function nativeUsdAt(chainId, block, ts) {
+  const st = ledgerState(chainId); const cfg = cfgOf(chainId); const wn = low(cfg.wrappedNative);
+  if (cfg.stables[wn]) return 1;   // arc: 原生币就是 USDC
+  const t = ts || st.d.bts[block] || await blockTs(chainId, block);
+  const p = t ? await E.coinUsdAtTime(cfg.nativePriceId || 'ethereum', t) : 0;
+  if (p > 0) return p;
+  for (const r of nativeRefPools(chainId).slice(0, 3)) {
+    const px = await pxAt(chainId, r.spec, block);   // 原生币/稳定币池: usdFromPool 走稳定币一侧, 不会绕回这里
+    const v = px ? (r.side === 0 ? px.p0 : px.p1) : 0;
+    if (priceSane(chainId, wn, v)) return v;
+  }
+  return 0;
+}
+// 池价 → 两侧美元单价: 一侧稳定币直接换; 一侧原生币经 nativeUsdAt; 都不是 → null (该池不能独立定价, 由参考池兜)
+async function usdFromPool(chainId, meta, sqrt, block, ts) {
+  const cfg = cfgOf(chainId);
+  const a0 = meta.t0.address, a1 = meta.t1.address;
+  const s0 = !!cfg.stables[a0], s1 = !!cfg.stables[a1];
+  if (s0 && s1) return { p0: 1, p1: 1 };
+  const pr = E.sqrtPriceX96ToPrice(sqrt, meta.t0.decimals, meta.t1.decimals);   // 1 个 t0 值多少 t1
+  if (!(pr > 0)) return null;
+  if (s1) return { p0: pr, p1: 1 };
+  if (s0) return { p0: 1, p1: 1 / pr };
+  const wn = low(cfg.wrappedNative);
+  if (a0 === wn || a1 === wn) {
+    const eth = await nativeUsdAt(chainId, block, ts);
+    if (!(eth > 0)) return null;
+    return a0 === wn ? { p0: eth, p1: eth / pr } : { p0: pr * eth, p1: eth };
+  }
+  return null;
+}
+// 某池某块的两侧美元价 (持久缓存 st.d.px): { p0, p1, sq, ts }
+//   缓存三态: 定价完成 {p0,p1,sq,ts} / 池价到手但美元没换成 {sq,ts} (ETH 价暂缺, 下轮只补美元, 不占冷却) / 池价拿不到 {f} (空池/边界价, 6h 后再试)
 async function pxAt(chainId, spec, block) {
   const st = ledgerState(chainId);
   const key = `${spec}:${block}`;
-  const c = st.d.px[key];
-  if (c && c.p0 != null) { if (sqrtSane(c.sq)) return c; delete st.d.px[key]; }   // 旧缓存里的边界值作废重取
-  if (c && c.f && Date.now() - c.f < PX_RETRY_MS) return null;
+  let c = st.d.px[key];
+  if (c && c.p0 != null) { if (sqrtSane(c.sq)) return c; delete st.d.px[key]; c = null; }   // 旧缓存里的边界值作废重取
   const meta = st.d.pools[spec];
   if (!meta) return null;
-  let r = null;
-  if (isAnkr(chainId)) {
-    // 归档 eth_call: V3 pool.slot0() / V4 stateView.getSlot0(poolId) 在当块的 sqrtPriceX96 (Ankr 全档含 archive)
-    try {
-      const cfg = cfgOf(chainId);
-      const provider = providerFor(chainId);
-      const tag = '0x' + Number(block).toString(16);
-      let sqrt = null;
-      if (meta.kind === 'v4') {
-        const iface = new ethers.Interface(['function getSlot0(bytes32) view returns (uint160 sqrtPriceX96,int24 tick,uint24 protocolFee,uint24 lpFee)']);
-        const res = await E.withRetry(() => provider.send('eth_call', [{ to: cfg.v4.stateView, data: iface.encodeFunctionData('getSlot0', [spec]) }, tag]), 2, 700);
-        sqrt = iface.decodeFunctionResult('getSlot0', res)[0];
-      } else {
-        // slot0() 只取第一槽 sqrtPriceX96 (Pancake 的 feeProtocol 是 uint32, 套 Uniswap ABI 整体解码会越界)
-        const res = await E.withRetry(() => provider.send('eth_call', [{ to: spec, data: '0x3850c7bd' }, tag]), 2, 700);
-        sqrt = res && res.length >= 66 ? BigInt(res.slice(0, 66)) : 0n;
-      }
-      const ts = await blockTs(chainId, block);
-      if (sqrt > 0n && ts) {
-        const px = await E.entryTokenPrices(cfg, meta.t0, meta.t1, E.sqrtPriceX96ToPrice(sqrt, meta.t0.decimals, meta.t1.decimals), ts);
-        if (px) r = { ...px, sqrt, ts };
-      }
-    } catch {}
-  } else {
-    const specObj = meta.kind === 'v4' ? { kind: 'v4', poolId: spec } : { kind: 'v3', poolAddress: spec };
-    r = await E.entryPricesAtBlock(chainId, specObj, meta.t0, meta.t1, block, new Map()).catch(() => null);
+  let sqrt = null, ts = null;
+  if (c && c.sq && sqrtSane(c.sq)) { sqrt = BigInt(c.sq); ts = c.ts; }
+  else {
+    if (c && c.f && Date.now() - c.f < PX_RETRY_MS) return null;
+    try { sqrt = await sqrtAtBlock(chainId, spec, meta, block); if (sqrt && sqrt > 0n) ts = st.d.bts[block] || await blockTs(chainId, block); } catch {}
+    if (!sqrt || !sqrtSane(sqrt) || !ts) { st.d.px[key] = { f: Date.now() }; return null; }   // 空池/边界价当没取到
+    if (!st.d.bts[block]) st.d.bts[block] = ts;
   }
-  if (!r || !sqrtSane(r.sqrt) || !(r.p0 > 0) || !(r.p1 > 0)) { st.d.px[key] = { f: Date.now() }; return null; }   // 空池/边界价当没取到
-  st.d.px[key] = { p0: r.p0, p1: r.p1, sq: r.sqrt.toString(), ts: r.ts };
-  if (!st.d.bts[block]) st.d.bts[block] = r.ts;
+  const px = await usdFromPool(chainId, meta, sqrt, block, ts);
+  if (!px || !(px.p0 > 0) || !(px.p1 > 0)) { st.d.px[key] = { sq: sqrt.toString(), ts }; st.pxMiss = (st.pxMiss || 0) + 1; return null; }   // 美元换算暂缺: 记 transient, 下轮再试
+  st.d.px[key] = { p0: px.p0, p1: px.p1, sq: sqrt.toString(), ts };
   if (++pxDirty % 25 === 0) save(chainId);   // 历史价是最贵的部分 (arc 每次 2s), 重放中途重启不白算
   return st.d.px[key];
 }
@@ -658,11 +701,14 @@ async function refreshCurPrices(chainId, tokens) {
 }
 async function priceAt(chainId, token, block, ref) {
   const cfg = cfgOf(chainId);
+  const st = ledgerState(chainId);
   if (cfg.stables[token]) return { p: 1, approx: false };
+  const miss0 = st.pxMiss || 0;
   if (token === low(cfg.wrappedNative)) {
-    const ts = await blockTs(chainId, block);
-    const p = ts ? await E.coinUsdAtTime(cfg.nativePriceId || 'ethereum', ts) : 0;   // ETH / BNB 小时价
+    const p = await nativeUsdAt(chainId, block, null);   // coingecko 小时价 → 原生币/稳定币池当块价
     if (p > 0) return { p, approx: false };
+    const cur = (stateOf(chainId).lastUsdPrices || {})[token] || 0;
+    return { p: cur, approx: true, transient: true };   // 两条路都没拿到 = 暂时性的 (限流/RPC), 不是没价来源
   }
   for (const r of (ref[token] || []).slice(0, 4)) {
     const px = await pxAt(chainId, r.spec, block);
@@ -670,7 +716,7 @@ async function priceAt(chainId, token, block, ref) {
     if (priceSane(chainId, token, p)) return { p, approx: false };
   }
   const cur = (stateOf(chainId).lastUsdPrices || {})[token] || 0;
-  return { p: cur, approx: true };
+  return { p: cur, approx: true, transient: (st.pxMiss || 0) > miss0 };   // 参考池里有「池价到手美元没换成」的 → 暂时性
 }
 
 // =============================================================
@@ -740,16 +786,18 @@ async function computeWallet(chainId, addr, livePositions) {
 
   // 持仓批次
   const lots = {};
+  let priceMiss = 0, txMiss = false;   // 暂时性缺价 (coingecko 限流 / RPC 抖): 本钱包这轮有几处; 同 tx 涉及的仓位标 inc, 下轮重算
+  const priceAtW = async (tok, block) => { const r = await priceAt(chainId, tok, block, ref); if (r.transient) { priceMiss++; txMiss = true; } return r; };
   const consume = async (tok, qty, block) => {
     if (cfg.stables[tok]) return { cost: qty, approx: false };
     const L = lots[tok];
     if (L && L.q > 0) {
       if (L.q >= qty * 0.999999) { const c = L.c * Math.min(1, qty / L.q); L.q -= qty; L.c -= c; if (L.q < 1e-12) { L.q = 0; L.c = 0; } return { cost: c, approx: !!L.ax }; }
       const c = L.c, excess = qty - L.q; L.q = 0; L.c = 0;
-      const pm = await priceAt(chainId, tok, block, ref);
+      const pm = await priceAtW(tok, block);
       return { cost: c + excess * pm.p, approx: true };
     }
-    const pm = await priceAt(chainId, tok, block, ref);
+    const pm = await priceAtW(tok, block);
     return { cost: qty * pm.p, approx: true };
   };
   const addLot = (tok, qty, cost, approx) => {
@@ -779,12 +827,14 @@ async function computeWallet(chainId, addr, livePositions) {
 
   for (const tx of order) {
     const ts = st.d.bts[tx.b] || await blockTs(chainId, tx.b);
+    txMiss = false;
     // A. 仓位事件
     const deps = [], wds = [], cols = [];
     for (const { P, ev } of tx.pev) {
       const c = cOf(P);
+      const miss0 = st.pxMiss || 0;
       const v = await evAmounts(P, ev);
-      if (!v) { c.inc = true; continue; }
+      if (!v) { c.inc = true; if ((st.pxMiss || 0) > miss0) { priceMiss++; txMiss = true; } continue; }
       if (!priceSane(chainId, v.meta.t0.address, v.px.p0) || !priceSane(chainId, v.meta.t1.address, v.px.p1)) { c.inc = true; continue; }   // 该块池价离谱: 本笔不入账, 标未定价
       const mkt0 = v.a0 * v.px.p0, mkt1 = v.a1 * v.px.p1;
       if (v.kind === 'dep') { deps.push({ P, c, v, mkt: mkt0 + mkt1 }); c.liq += v.liq; }
@@ -803,7 +853,7 @@ async function computeWallet(chainId, addr, livePositions) {
     // B. 钱包流水 (人类单位 + 市值); 本 tx 涉及的仓位两侧 token 直接用该仓池子当块价 (比参考池更贴)
     const ownPx = {};
     for (const x of [...deps, ...wds, ...cols]) { ownPx[x.v.meta.t0.address] = x.v.px.p0; ownPx[x.v.meta.t1.address] = x.v.px.p1; }
-    const priceHere = async tok => (!cfg.stables[tok] && priceSane(chainId, tok, ownPx[tok])) ? { p: ownPx[tok], approx: false } : await priceAt(chainId, tok, tx.b, ref);
+    const priceHere = async tok => (!cfg.stables[tok] && priceSane(chainId, tok, ownPx[tok])) ? { p: ownPx[tok], approx: false } : await priceAtW(tok, tx.b);
     const outs = [], ins = [];
     for (const [tok, raw] of tx.flows) {
       const q = Math.abs(await hum(tok, raw));
@@ -877,6 +927,7 @@ async function computeWallet(chainId, addr, livePositions) {
     } else {
       for (const o of outs) await consume(o.tok, o.q, tx.b);
     }
+    if (txMiss) for (const { P } of tx.pev) cOf(P).inc = true;   // 本 tx 有暂时性缺价: 涉及的仓位标未定价, 下轮重算
   }
 
   // 收官: 状态 / 时间
@@ -900,6 +951,8 @@ async function computeWallet(chainId, addr, livePositions) {
     };
   }
   W.lots = Object.fromEntries(Object.entries(lots).filter(([, L]) => L.q > 1e-9).map(([t, L]) => [t, { q: L.q, c: L.c, ax: L.ax }]));
+  W.priceMiss = priceMiss;
+  if (priceMiss) console.log(`[${chainId}] pnl-ledger ${addr.slice(0, 10)}: ${priceMiss} 处历史价暂缺 (coingecko 限流/RPC), 已按现价估, 下轮重算`);
   W.computedAt = Date.now();
 }
 
@@ -976,7 +1029,7 @@ function walletStatus(chainId, addr) {
   const st = ledgerState(chainId);
   const W = st.d.wallets[low(addr)];
   if (!W) return { ledger: true, pending: true, busy: st.busy };
-  return { ledger: true, partial: !!W.partial, scanning: st.busy, catchingUp: !!W.stopped, updatedAt: W.computedAt || 0, txCount: Object.keys(W.txs).length };
+  return { ledger: true, partial: !!W.partial, scanning: st.busy, catchingUp: !!W.stopped, updatedAt: W.computedAt || 0, txCount: Object.keys(W.txs).length, priceMiss: W.priceMiss || 0 };
 }
 // 钱包报告: 账本里的全部仓位 (活跃 + 已关闭), 活跃仓合并实时数据 (现值/待领费/盈亏字段由拉取主流程注入)
 // useLedger=false: 该钱包没勾选账本 (观察钱包未开账本 / 设置里没勾) — 不用账本结果 (可能是旧版算的、也不会再更新), 只按活跃仓出报告;

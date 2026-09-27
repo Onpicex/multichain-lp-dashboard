@@ -748,27 +748,45 @@ function saveEntryCache(st) {
   try { fs.writeFileSync(st.entryFile, JSON.stringify(st.entryCache)); } catch {}
 }
 
-// coingecko ETH 历史价: 小时桶缓存 + 串行队列 (免费档限流敏感); 拿不到返回 0, 不缓存下轮重试
+// coingecko 原生币历史价: 小时桶缓存 **落盘** coin-hist-cache.json (2026-09-28 前只在内存: 每次重启后首轮成百次拉取被免费档限流,
+//   失败静默退到「现价」→ 账本成本/提回一轮一个数) + 串行队列 + 429/5xx 按 Retry-After 等待重试; 仍拿不到返回 0 (不缓存, 下轮再试), 失败按分钟聚合打日志
+const COIN_HIST_FILE = path.join(__dirname, 'coin-hist-cache.json');
 const coinHistCache = new Map();   // `${coinId}:${小时桶}` -> 美元价 (ETH / BNB 等原生币, 供账本与建仓回溯)
+try { for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync(COIN_HIST_FILE, 'utf8')))) if (v > 0) coinHistCache.set(k, v); } catch {}
+let coinHistSaveTimer = null;
+function saveCoinHist() {
+  if (coinHistSaveTimer) return;
+  coinHistSaveTimer = setTimeout(() => { coinHistSaveTimer = null; try { fs.writeFileSync(COIN_HIST_FILE, JSON.stringify(Object.fromEntries(coinHistCache))); } catch {} }, 5000);
+}
 let cgQueue = Promise.resolve();
+const cgFail = { n: 0, at: 0 };
+function cgNoteFail(why) {
+  cgFail.n++;
+  if (Date.now() - cgFail.at > 60000) { cgFail.at = Date.now(); console.error(`[coingecko] 历史价拉取失败 ${cgFail.n} 次 (最近: ${why}); 受影响的账本事件改用链上参考池价或按现价估 (approx), 下轮重试`); cgFail.n = 0; }
+}
 function coinUsdAtTime(coinId, tsMs) {
   const bucket = Math.floor(tsMs / 3600000);
   const k = b => `${coinId}:${b}`;
-  for (const b of [bucket, bucket - 1, bucket + 1]) if (coinHistCache.has(k(b))) return Promise.resolve(coinHistCache.get(k(b)));
+  if (coinHistCache.has(k(bucket))) return Promise.resolve(coinHistCache.get(k(bucket)));
+  const neighbor = () => { for (const b of [bucket - 1, bucket + 1]) if (coinHistCache.has(k(b))) return coinHistCache.get(k(b)); return 0; };   // 只在拉不到时借邻桶 (先借会让结果随处理顺序变)
   const run = cgQueue.then(async () => {
     if (coinHistCache.has(k(bucket))) return coinHistCache.get(k(bucket));
-    try {
-      const from = Math.floor(tsMs / 1000) - 7200, to = Math.floor(tsMs / 1000) + 7200;
-      const res = await fetch(`https://api.coingecko.com/api/v3/coins/${coinId}/market_chart/range?vs_currency=usd&from=${from}&to=${to}`, { signal: AbortSignal.timeout(12000) });
-      if (!res.ok) return 0;
-      const d = await res.json();
-      let best = 0, bd = Infinity;
-      for (const [t, p] of (d.prices || [])) { const dd = Math.abs(t - tsMs); if (dd < bd) { bd = dd; best = p; } }
-      if (best > 0) coinHistCache.set(k(bucket), best);
-      return best;
-    } catch { return 0; }
+    const from = Math.floor(tsMs / 1000) - 7200, to = Math.floor(tsMs / 1000) + 7200;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await fetch(`https://api.coingecko.com/api/v3/coins/${coinId}/market_chart/range?vs_currency=usd&from=${from}&to=${to}`, { signal: AbortSignal.timeout(12000) });
+        if (res.status === 429 || res.status >= 500) { const ra = Number(res.headers.get('retry-after')) || 0; await sleep(Math.min(60, ra || (attempt + 1) * 15) * 1000); continue; }
+        if (!res.ok) { cgNoteFail('HTTP ' + res.status); return neighbor(); }
+        const d = await res.json();
+        let best = 0, bd = Infinity;
+        for (const [t, p] of (d.prices || [])) { const dd = Math.abs(t - tsMs); if (dd < bd) { bd = dd; best = p; } }
+        if (best > 0) { coinHistCache.set(k(bucket), best); saveCoinHist(); return best; }
+        cgNoteFail('返回空'); return neighbor();
+      } catch (e) { if (attempt === 2) { cgNoteFail(e.name === 'TimeoutError' ? '超时' : (e.message || 'error').slice(0, 40)); return neighbor(); } await sleep(3000); }
+    }
+    cgNoteFail('429 重试 3 次仍限流'); return neighbor();
   });
-  cgQueue = run.then(() => sleep(1500), () => sleep(1500));
+  cgQueue = run.then(() => sleep(2500), () => sleep(2500));   // 免费档实测 1.5s 间隔就 429; 缓存落盘后稳态请求很少
   return run;
 }
 function ethUsdAtTime(tsMs) { return coinUsdAtTime('ethereum', tsMs); }
@@ -2564,6 +2582,6 @@ function mountEvmRoutes(app, adminGuard) {
 //   4. 加 Arc 钱包地址 -> 重启服务 -> 验证首轮抓取
 // =============================================================
 module.exports = { mountEvmRoutes, EVM_CHAINS, kickRefresh, liveByWallet, kickLedger,
-  _ledgerApi: { EVM_CHAINS, chainState, getTokenInfo, entryPricesAtBlock, entryTokenPrices, sqrtPriceX96ToPrice, getTokenAmounts, ethUsdAtTime, coinUsdAtTime, getUSDPrices, loadActiveWallets, withRetry, sleep, findMintEvent, mintBlockFromScan },
+  _ledgerApi: { EVM_CHAINS, chainState, getTokenInfo, entryPricesAtBlock, entryTokenPrices, poolPriceNearBlock, sqrtPriceX96ToPrice, getTokenAmounts, ethUsdAtTime, coinUsdAtTime, getUSDPrices, loadActiveWallets, withRetry, sleep, findMintEvent, mintBlockFromScan },
   _entryTest: { getV3EntryData, getV4EntryData, getV3EntrySubgraph, getV4EntrySubgraph, getTokenInfo } };
 module.exports._collectTest = { fillLastCollect };   // 领费时间的独立验证入口 (tools/collect-check.js)  // 建仓回溯的独立验证入口

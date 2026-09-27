@@ -2639,7 +2639,7 @@ function renderPnl() {
   else if (fund.length) fh += '<span class="st-sub-note">净入金只有 ' + fund.length + '/' + wallets.length + ' 个钱包有 (rh 链), 不合计</span>';
   // 观察范围: 每个钱包一行账本开关; 自有范围只在账本未就绪时提示
   const wRows = wallets.map(w => {
-    const st = w.partial ? '高频钱包 · 账本放弃' : (w.ledgerOn ? (w.pending ? '账本待扫' : (w.scanning ? '扫描中' : '账本 ' + (w.updatedAt ? tA(w.updatedAt) : '待算'))) : (w.ledgerStale ? '未开账本 · 盘里有旧账本, 开后重算' : '未开账本'));
+    const st = w.partial ? '高频钱包 · 账本放弃' : (w.ledgerOn ? (w.pending ? '账本待扫' : (w.scanning ? '扫描中' : '账本 ' + (w.updatedAt ? tA(w.updatedAt) : '待算') + (w.priceMiss ? ' · ' + w.priceMiss + ' 处历史价暂缺, 下轮重算' : ''))) : (w.ledgerStale ? '未开账本 · 盘里有旧账本, 开后重算' : '未开账本'));
     const btn = pnScope === 'obs' && !w.own ? ' <button class="nm-test-btn" onclick="pnToggleLedger(\'' + w.chain + '\', \'' + escH(w.address) + '\', ' + (w.ledger ? 'false' : 'true') + ')">' + (w.ledger ? '关账本' : '开账本') + '</button>' : '';
     return '<span class="pn-wrow"><b>' + escH(w.name) + '</b> <span class="st-sub-note">' + CHAIN_NAMES[w.chain] + ' · ' + st + '</span>' + btn + '</span>';
   });
