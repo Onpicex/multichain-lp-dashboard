@@ -359,6 +359,7 @@ async function withRetry(fn, retries = 3, delayMs = 1000) {
 
 // --- Cache ---
 let cache = { data: null, timestamp: 0 };
+let lastUsdPricesBsc = {};   // 上轮定价 (pnl-ledger 给无参考池的 token 当近似价)
 const CACHE_TTL = 5 * 60 * 1000; // 5 min auto-refresh (2026-09-05 由 10min 调快)
 const POS_CACHE_FILE = path.join(__dirname, 'positions-cache.json');
 // Load persisted cache on startup so pm2 restarts don't blank the dashboard
@@ -1438,6 +1439,7 @@ async function _fetchPositionsInner(forceRefresh = false) {
   const CAKE_ADDR = require('./pancake-bsc').CAKE.toLowerCase();
   const idleCandBsc = [...new Set([...allTokenAddresses, ...STABLECOINS, WBNB.toLowerCase(), CAKE_ADDR])];
   const usdPrices = await getUSDPrices(idleCandBsc, allPositions);
+  lastUsdPricesBsc = usdPrices;
   const cakePrice = usdPrices[CAKE_ADDR] || 0;
 
   // Calculate USD values
@@ -1481,10 +1483,13 @@ async function _fetchPositionsInner(forceRefresh = false) {
           pos.entryAm = ed.am || null;
         }
       }
-      // 盈亏字段: BSC 无钱包账本 → 成本 = 建仓时点价值 (approx); 已领费 V3 子图/Pancake 事件有, V4 无 (feesUnknown)
-      if (pos.entryValueUSD > 0) {
+      // 盈亏字段: Ankr 账本命中 → 真实成本/已提回/已领费; 否则成本 = 建仓时点价值 (approx), 已领费 V3 子图/Pancake 事件有, V4 无 (feesUnknown)
+      {
+        const kind = pos.dex === 'pancake' ? 'pcs' : (pos.protocol === 'V4' ? 'v4' : 'v3');
+        const lg = pnlLedger.positionPnl('bsc', wr.address, kind, pos.tokenId);
         const priceOf = a => usdPrices[a] || 0;
-        pnlLedger.applyPnl(pos, { cost: pos.entryValueUSD, approx: true, source: 'entry', am: pos.entryAm || {}, withdrawnUSD: pos.entryWithdrawnUSD || 0, collectedUSD: pos.protocol === 'V4' ? 0 : undefined, feesUnknown: pos.protocol === 'V4' }, priceOf);
+        if (lg) pnlLedger.applyPnl(pos, { cost: lg.cost, approx: lg.approx || lg.inc, source: 'ledger', am: lg.a, withdrawnUSD: lg.ret, collectedUSD: lg.fees }, priceOf);
+        else if (pos.entryValueUSD > 0) pnlLedger.applyPnl(pos, { cost: pos.entryValueUSD, approx: true, source: 'entry', am: pos.entryAm || {}, withdrawnUSD: pos.entryWithdrawnUSD || 0, collectedUSD: pos.protocol === 'V4' ? 0 : undefined, feesUnknown: pos.protocol === 'V4' }, priceOf);
       }
 
       // === Two daily rate metrics ===
@@ -1782,7 +1787,7 @@ app.get('/api/positions', async (req, res) => {
 });
 
 // --- Solana (Meteora DLMM + Raydium CLMM + Orca Whirlpool) ---
-let solKickRefresh = null, evmKickRefresh = null, evmKickLedger = null;
+let solKickRefresh = null, evmKickRefresh = null, evmKickLedger = null, bscKickLedger = null;
 try {
   const solMod = require('./sol-adapter');
   solMod.mountSolRoutes(app, adminGuard);
@@ -1800,6 +1805,30 @@ try {
   evmKickLedger = evmMod.kickLedger || null;
 } catch (e) {
   console.error('EVM adapter failed to mount:', e.message);
+}
+
+// --- BSC 钱包盈亏账本: 数据源 Ankr (需 ANKR_KEY); Uniswap V3/V4 + Pancake V3 (kind=pcs) 一并入账 ---
+try {
+  const pcsMod = require('./pancake-bsc');
+  pnlLedger.registerChain('bsc', {
+    cfg: {
+      name: 'BSC', ledgerFromAnkr: 'bsc',
+      v3: { npm: V3_POSITION_MANAGER, pcsNpm: pcsMod.NPM },
+      v4: { pm: V4_POSITION_MANAGER, stateView: V4_STATE_VIEW, poolManager: V4_POOL_MANAGER },
+      stables: { [USDT_ADDRESS]: 'USDT', [USDC_ADDRESS]: 'USDC', [BUSD_ADDRESS]: 'BUSD' },
+      wrappedNative: WBNB, nativePriceId: 'binancecoin',
+    },
+    chainState: () => ({ provider, lastUsdPrices: lastUsdPricesBsc }),
+    getTokenInfo: (a) => getTokenInfo(a),
+    wallets: () => { const sel = pnlSelectedAddrs('bsc', activeWallets().map(w => w.address)); return activeWallets().filter(w => sel.has(w.address.toLowerCase())); },
+  });
+  const liveByWalletBsc = () => { const m = {}; for (const w of (cache.data?.wallets || [])) m[w.address.toLowerCase()] = (w.positions || []).filter(p => p.liquidityActive); return m; };
+  bscKickLedger = () => { if (!pnlLedger.enabled('bsc')) return; pnlLedger.runQueue('bsc', liveByWalletBsc()).catch(e => console.error('[bsc] pnl-ledger:', e.message)); };
+  setTimeout(bscKickLedger, 170 * 1000);
+  setInterval(bscKickLedger, pnlLedger.ROUND_MS);
+  console.log(`BSC pnl-ledger registered (${pnlLedger.enabled('bsc') ? 'Ankr 数据源就绪' : '未配置 ANKR_KEY, 停用'})`);
+} catch (e) {
+  console.error('BSC pnl-ledger register failed:', e.message);
 }
 
 // --- Robinhood 股票代币 x 美股成交额: 2026-09-06 拆分为独立项目 /home/ubuntu/rh-stocktokens ---
@@ -1887,7 +1916,7 @@ app.post('/api/pnl/config', adminGuard, (req, res) => {
     fs.writeFileSync(tmp, JSON.stringify(next, null, 2)); fs.renameSync(tmp, PNL_CFG_FILE);
   } catch (e) { return res.status(500).json({ error: '写入失败: ' + e.message }); }
   const ch = String(body._chain || '');
-  try { if (next.enabled && evmKickLedger && ['rh', 'arc'].includes(ch)) evmKickLedger(ch); } catch {}
+  try { if (next.enabled && evmKickLedger && ['rh', 'arc', 'base', 'eth'].includes(ch)) evmKickLedger(ch); if (next.enabled && ch === 'bsc' && bscKickLedger) bscKickLedger(); } catch {}
   console.log(`[pnl] config saved: enabled=${next.enabled}, chains=${Object.keys(next.wallets).join(',') || '(沿用资金查询)'}`);
   res.json(loadPnlCfg());
 });

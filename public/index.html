@@ -2666,14 +2666,14 @@ function renderPnl() {
     const st = r.status === 'active'
       ? '<span class="pn-st ' + (r.inRange ? 'act' : 'out') + '">' + (r.inRange === null ? '活跃' : (r.inRange ? '区间内' : '区间外')) + '</span>'
       : '<span class="pn-st cls">已关闭' + (r.note === 'transferred' ? ' · 转出' : (r.note === 'empty' ? ' · 空仓' : '')) + '</span>';
-    const proto = r.platform ? r.platform.toUpperCase() + ' ' + r.protocol : r.protocol;
+    const proto = r.dex === 'pancake' ? 'CAKE V3' : (r.platform ? r.platform.toUpperCase() + ' ' + r.protocol : r.protocol);
     const cost = r.costUSD > 0 ? fU(r.costUSD) + (r.costApprox || r.incomplete ? '<span class="pn-approx" title="' + (r.incomplete ? '部分事件尚未定价' : (r.source === 'ledger' ? '部分按当时市值补齐' : '按开仓时池价估算')) + '">*</span>' : '') : '<span class="sn-zero">—</span>';
     const costSub = r.costUSD > 0 && r.depositValueUSD > 0 && r.source === 'ledger' ? '<span class="pn-sub">开仓时价值 ' + fU(r.depositValueUSD) + '</span>' : '';
     const fees = fU2((r.pendingFeesUSD || 0) + (r.collectedFeesUSD || 0)) + (r.collectedFeesUSD > 0 ? '<span class="pn-sub">已领 ' + fU2(r.collectedFeesUSD) + '</span>' : '') + (r.feesUnknown ? '<span class="pn-sub">不含已领</span>' : '');
     const il = r.ilUSD != null ? pnSigned(r.ilUSD) + (r.hodlValueUSD > 0 ? '<span class="pn-sub">' + (r.ilUSD >= 0 ? '+' : '−') + Math.abs(r.ilUSD / r.hodlValueUSD * 100).toFixed(2) + '%</span>' : '') : '<span class="sn-zero">—</span>';
     const np = r.netProfitUSD != null ? pnSigned(r.netProfitUSD) + '<span class="pn-sub">' + (r.netProfitPct >= 0 ? '+' : '−') + Math.abs(r.netProfitPct || 0).toFixed(2) + '%</span>' : '<span class="sn-zero">—</span>';
     const closeCell = r.status === 'active' ? '持有 ' + pnDays(r.openTs) : pnD(r.closeTs) + (r.openTs && r.closeTs ? '<span class="pn-sub">持有 ' + pnDays(r.openTs, r.closeTs) + '</span>' : '');
-    return '<tr><td class="pn-pair">' + escH(r.pair || '') + '<span class="protocol-tag ' + String(r.protocol || 'v3').toLowerCase() + '">' + escH(proto) + '</span>' + (r.feeLabel ? '<span class="fee-tag">' + escH(r.feeLabel) + '</span>' : '') + '<span class="pn-id">#' + escH(String(r.tokenId || '').slice(0, 12)) + '</span></td>'
+    return '<tr><td class="pn-pair">' + escH(r.pair || '') + '<span class="protocol-tag ' + (r.dex === 'pancake' ? 'pcs' : String(r.protocol || 'v3').toLowerCase()) + '">' + escH(proto) + '</span>' + (r.feeLabel ? '<span class="fee-tag">' + escH(r.feeLabel) + '</span>' : '') + '<span class="pn-id">#' + escH(String(r.tokenId || '').slice(0, 12)) + '</span></td>'
       + '<td>' + st + '</td><td class="sn-hm">' + pnD(r.openTs) + '</td><td class="sn-hm">' + closeCell + '</td>'
       + '<td>' + cost + costSub + '</td><td>' + (r.status === 'active' ? fU(r.valueUSD + r.pendingFeesUSD) : '<span class="sn-zero">—</span>') + '</td>'
       + '<td class="sn-hm">' + (r.withdrawnUSD > 0 ? fU(r.withdrawnUSD) : '<span class="sn-zero">—</span>') + '</td><td>' + fees + '</td><td class="sn-hm">' + il + '</td><td>' + np + '</td></tr>';

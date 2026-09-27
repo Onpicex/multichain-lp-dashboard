@@ -15,6 +15,11 @@
 //   - V3 仓位事件: NPM Increase/Decrease/Collect, topic1=tokenId (一个钱包全部 id 用 OR 列表一次扫)
 //   - V4 仓位事件: PoolManager ModifyLiquidity (topics poolId + sender=PM), data.salt=tokenId; 按池共享扫描
 //   - 历史池价: Swap 事件 sqrtPriceX96 (evm-adapter.entryPricesAtBlock), 稳定币=1, WETH=coingecko 小时价
+// 【Ankr 数据源 (base / eth, cfg.ledgerFromAnkr=<ankr 链名>, 需 .env ANKR_KEY)】这几条链公共 RPC 不让按钱包扫全链日志
+//   (base.org >2000 块 413, publicnode 封 getLogs) → 改用 Ankr Advanced API (Freemium 免费档, 2 亿 credits/月, 30 rps):
+//   ankr_getTokenTransfers = 钱包全部 ERC20 转账 (含第三方打进来的); ankr_getTransactionsByAddress(includeLogs) = 钱包自己发的
+//   全部交易 + 完整日志 → NFT mint/burn、V3 Inc/Dec/Col、池 Mint、V4 ModifyLiquidity 全从日志里取, 不用再按池/按 id 扫链;
+//   还多一个好处: tx.value 能看到原生 ETH 流出 (rh 上是盲区)。历史池价走 Ankr 归档节点 eth_call slot0 (全档含 archive)。
 // 全部结果持久化到 pnl-ledger-<chain>.json (游标增量), 拉取主流程零 RPC 只读内存。
 // 拿不准的宁可标 approx / 缺失, 不硬编。高频 bot 钱包 (原始 Transfer 超 RAW_LIMIT) 放弃 (partial)。
 // =============================================================
@@ -43,7 +48,56 @@ const PM_KEYS_ABI = ['function poolKeys(bytes25) view returns (address currency0
 const state = {};   // chainId -> { file, d, busy, lastRun }
 
 function init(api) { E = api; }
-function enabled(chainId) { return !!(E && E.EVM_CHAINS[chainId] && E.EVM_CHAINS[chainId].ledgerFromLogs && !E.EVM_CHAINS[chainId].pending); }
+// 非 evm-adapter 管的链 (bsc 在 server.js) 由 registerChain 注入: { cfg, chainState(), getTokenInfo(addr), wallets() }
+//   cfg 结构与 EVM_CHAINS 同: v3.npm (+ v3.pcsNpm = Pancake V3 NPM, 仓位 kind='pcs'), v4.{pm,stateView,poolManager}, stables, wrappedNative, nativePriceId, ledgerFromAnkr
+const extra = {};
+function registerChain(chainId, def) { extra[chainId] = def; }
+function cfgOf(chainId) { return (E && E.EVM_CHAINS[chainId]) || (extra[chainId] && extra[chainId].cfg) || null; }
+function stateOf(chainId) { return extra[chainId] ? extra[chainId].chainState() : E.chainState(chainId); }
+function tokenInfoOf(chainId, addr) { return extra[chainId] ? extra[chainId].getTokenInfo(addr) : E.getTokenInfo(chainId, addr); }
+function walletsOf(chainId) { if (extra[chainId]) return extra[chainId].wallets(); return E.ledgerWallets ? E.ledgerWallets(chainId) : E.loadActiveWallets(chainId); }
+function enabled(chainId) { const c = cfgOf(chainId); return !!(c && !c.pending && (c.ledgerFromLogs || (c.ledgerFromAnkr && ankrKey()))); }
+function isAnkr(chainId) { const c = cfgOf(chainId); return !!(c && c.ledgerFromAnkr && ankrKey()); }
+function npmOf(cfg, kind) { return kind === 'v4' ? cfg.v4.pm : (kind === 'pcs' ? cfg.v3.pcsNpm : cfg.v3.npm); }
+function ankrKey() { return (process.env.ANKR_KEY || '').trim(); }
+const ankrProviders = {};
+// 链上读 (归档 eth_call / getBlock / receipt): Ankr 链用 Ankr 节点 (含 archive, publicnode 会剪枝老块), 其余用主 provider
+function providerFor(chainId) {
+  const cfg = cfgOf(chainId);
+  if (!isAnkr(chainId)) return stateOf(chainId).provider;
+  if (!ankrProviders[chainId]) ankrProviders[chainId] = new ethers.JsonRpcProvider(`https://rpc.ankr.com/${cfg.ledgerFromAnkr}/${ankrKey()}`, undefined, { staticNetwork: true });
+  return ankrProviders[chainId];
+}
+// Ankr 调用: 进程内全局串行 (base/eth/bsc 三条链同时跑也只有一条队列, ≥300ms 一次 ≈ 3 rps);
+// 实测 Freemium 对 Advanced API 的限流比标称 30 rps 紧得多 (2026-09-28 两链并发 ~8 rps 就 429 "retry in 10s"),
+// 429 按它说的等 11s 再试, 最多 6 次; 仍不行返回 null → 调用方按「本轮没扫完」处理下轮续
+let ankrQueue = Promise.resolve();
+let ankrLast = 0;
+function ankrCall(method, params) {
+  const run = ankrQueue.then(async () => {
+    for (let i = 0; i < 6; i++) {
+      const wait = 300 - (Date.now() - ankrLast); if (wait > 0) await E.sleep(wait);
+      ankrLast = Date.now();
+      let r;
+      try {
+        r = await fetch(`https://rpc.ankr.com/multichain/${ankrKey()}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(60000) });
+      } catch (e) { if (i === 5) throw e; await E.sleep(2000 * (i + 1)); continue; }
+      if (r.status === 429) { await E.sleep(11000); continue; }
+      if (r.status >= 500) { await E.sleep(2000 * (i + 1)); continue; }
+      let j; try { j = await r.json(); } catch { await E.sleep(2000); continue; }
+      if (j.error) {
+        const msg = String(j.error.message || '');
+        if (/rate limit|too many/i.test(msg)) { await E.sleep(11000); continue; }
+        if (/busy|timeout|temporar/i.test(msg) && i < 5) { await E.sleep(2000 * (i + 1)); continue; }
+        throw new Error(msg.slice(0, 160));
+      }
+      return j.result;
+    }
+    return null;
+  });
+  ankrQueue = run.catch(() => {});
+  return run;
+}
 
 function ledgerState(chainId) {
   if (!state[chainId]) {
@@ -72,8 +126,8 @@ function num(x) { const v = Number(x); return isFinite(v) ? v : 0; }
 
 // --- 自适应分段 getLogs: 超时/超量则缩段重试; 带截止时间 (预算) 与 RPC 限速 (arc) ---
 async function scanAdaptive(chainId, filter, fromBlock, toBlock, deadline) {
-  const st = E.chainState(chainId);
-  const cfg = E.EVM_CHAINS[chainId];
+  const st = stateOf(chainId);
+  const cfg = cfgOf(chainId);
   const maxChunk = Math.min(5000000, cfg.logChunk || 5000000);
   const gap = cfg.logGapMs || 400;
   const out = [];
@@ -100,7 +154,7 @@ async function scanAdaptive(chainId, filter, fromBlock, toBlock, deadline) {
 async function blockTs(chainId, block) {
   const st = ledgerState(chainId);
   if (st.d.bts[block]) return st.d.bts[block];
-  const b = await E.withRetry(() => E.chainState(chainId).provider.getBlock(block), 2, 500).catch(() => null);
+  const b = await E.withRetry(() => providerFor(chainId).getBlock(block), 2, 500).catch(() => null);
   if (!b) return 0;
   st.d.bts[block] = b.timestamp * 1000;
   return st.d.bts[block];
@@ -111,10 +165,10 @@ async function blockTs(chainId, block) {
 // =============================================================
 async function scanWallet(chainId, addr, deadline) {
   const st = ledgerState(chainId);
-  const cfg = E.EVM_CHAINS[chainId];
+  const cfg = cfgOf(chainId);
   const W = st.d.wallets[addr] || (st.d.wallets[addr] = { scannedTo: -1, partial: false, txs: {}, pos: {}, updatedAt: 0 });
   if (W.partial) return W;
-  const latest = await E.chainState(chainId).provider.getBlockNumber();
+  const latest = await stateOf(chainId).provider.getBlockNumber();
   const floor = cfg.ledgerFloorBlock != null ? cfg.ledgerFloorBlock : (cfg.logChunk ? (cfg.v4.deployBlock || 0) : 0);
   const from = Math.max(floor, W.scannedTo + 1);
   if (from > latest) return W;
@@ -163,6 +217,99 @@ async function scanWallet(chainId, addr, deadline) {
   return W;
 }
 
+// Ankr 版钱包扫描: A) ankr_getTokenTransfers → ERC20 流水 (含第三方打入); B) ankr_getTransactionsByAddress(includeLogs) →
+//   钱包自己发的交易: 原生 ETH 流出 (伪 token = wrappedNative)、NFT mint/burn/转出、V3 Inc/Dec/Col、池 Mint、V4 ModifyLiquidity
+//   两段都翻完才推进游标 (逐条按 tx+logIndex 幂等, 半途重来不会重复)
+const V3_TOPICS = new Set([V3_INC, V3_DEC, V3_COL]);
+function hexNum(x) { return typeof x === 'string' && x.startsWith('0x') ? parseInt(x, 16) : Number(x); }
+async function scanWalletAnkr(chainId, addr, deadline) {
+  const st = ledgerState(chainId);
+  const cfg = cfgOf(chainId);
+  const bc = cfg.ledgerFromAnkr;
+  const W = st.d.wallets[addr] || (st.d.wallets[addr] = { scannedTo: -1, partial: false, txs: {}, pos: {}, updatedAt: 0 });
+  if (W.partial) return W;
+  const latest = await providerFor(chainId).getBlockNumber();
+  const from = Math.max(cfg.ledgerFloorBlock || 0, W.scannedTo + 1);
+  const to = latest - 5;   // 留几块给索引追平
+  if (from > to) return W;
+  const npm = low(cfg.v3.npm), pcs = low(cfg.v3.pcsNpm || ''), pm = low(cfg.v4.pm), poolMgr = low(cfg.v4.poolManager), wn = low(cfg.wrappedNative), pmTopic = padAddr(cfg.v4.pm);
+  const kindOfNpm = a => a === npm ? 'v3' : (pcs && a === pcs) ? 'pcs' : null;
+  st.d.tok = st.d.tok || {};
+  let raw = Object.values(W.txs).reduce((s, t) => s + Object.keys(t.e || {}).length, 0);
+  // A. 代币转账
+  let token = null, pages = 0;
+  do {
+    if (Date.now() > deadline) { W.stopped = 'budget'; return W; }
+    const r = await ankrCall('ankr_getTokenTransfers', { address: addr, blockchain: [bc], fromBlock: from, toBlock: to, pageSize: 1000, pageToken: token || undefined, descOrder: false });
+    if (!r) { W.stopped = 'rpc'; return W; }
+    for (const x of (r.transfers || [])) {
+      const c = low(x.contractAddress || '');
+      if (!c || !/^0x[0-9a-f]{40}$/.test(c)) continue;                           // 原生币条目 (无合约地址) 由 B 段的 tx.value 负责
+      const fromA = low(x.fromAddress), toA = low(x.toAddress);
+      if (fromA === toA) continue;
+      const amt = BigInt(x.valueRawInteger || '0'); if (amt === 0n) continue;
+      const b = Number(x.blockHeight); if (!(b >= from && b <= to)) continue;
+      const h = String(x.transactionHash).toLowerCase();
+      const tx = W.txs[h] || (W.txs[h] = { b });
+      (tx.e = tx.e || {})[Number(x.logIndex)] = [c, (toA === addr ? amt : -amt).toString()];
+      if (x.timestamp) st.d.bts[b] = Number(x.timestamp) * 1000;
+      if (x.tokenDecimals != null && !st.d.tok[c]) st.d.tok[c] = { symbol: x.tokenSymbol || c.slice(0, 6), decimals: Number(x.tokenDecimals) };
+      raw++;
+    }
+    token = r.nextPageToken || null; pages++;
+    if (raw > RAW_LIMIT) { W.partial = true; W.txs = {}; W.pos = {}; W.updatedAt = Date.now(); console.log(`[${chainId}] pnl-ledger ${addr.slice(0, 10)}: Transfer 超上限, 高频钱包放弃`); return W; }
+  } while (token && pages < 200);
+  // B. 钱包发的交易 + 日志
+  token = null; pages = 0;
+  do {
+    if (Date.now() > deadline) { W.stopped = 'budget'; return W; }
+    const r = await ankrCall('ankr_getTransactionsByAddress', { address: addr, blockchain: [bc], fromBlock: from, toBlock: to, pageSize: 100, pageToken: token || undefined, descOrder: false, includeLogs: true });
+    if (!r) { W.stopped = 'rpc'; return W; }
+    for (const x of (r.transactions || [])) {
+      const b = hexNum(x.blockNumber); if (!(b >= from && b <= to)) continue;
+      if (x.status != null && hexNum(x.status) === 0) continue;                  // 失败交易
+      const h = String(x.hash).toLowerCase();
+      const tx = W.txs[h] || (W.txs[h] = { b });
+      if (x.timestamp) st.d.bts[b] = hexNum(x.timestamp) * 1000;
+      const fromA = low(x.from), toA = low(x.to || '');
+      const val = x.value ? BigInt(x.value) : 0n;
+      if (val > 0n && fromA !== toA) {
+        if (fromA === addr) (tx.e = tx.e || {})['v'] = [wn, (-val).toString()];   // 原生 ETH 流出 → 按 WETH 记 (V4 原生池入金可见)
+        else if (toA === addr) (tx.e = tx.e || {})['v'] = [wn, val.toString()];
+      }
+      if (fromA !== addr) { tx.r = 1; continue; }                                // 别人发的 (打款进来): 不会有本钱包的仓位操作
+      const m = [], v3 = {}, pmints = {};
+      for (const l of (x.logs || [])) {
+        const a = low(l.address), tp = l.topics || [];
+        const li = hexNum(l.logIndex);
+        if (tp.length === 4 && tp[0] === TRANSFER_TOPIC && (a === npm || a === pm || (pcs && a === pcs))) {
+          const f = topicAddr(tp[1]), t2 = topicAddr(tp[2]), id = BigInt(tp[3]).toString();
+          let dir; if (tp[1] === ZERO32) dir = 'mint'; else if (tp[2] === ZERO32) dir = 'burn'; else dir = t2 === addr ? 'in' : (f === addr ? 'out' : null);
+          if (dir === 'mint' && t2 !== addr) continue; if (dir === 'burn' && f !== addr) continue; if (!dir) continue;
+          (tx.n = tx.n || {})[li] = [a === pm ? 'v4' : kindOfNpm(a), id, dir];
+        } else if (kindOfNpm(a) && V3_TOPICS.has(tp[0]) && tp.length >= 2) {
+          const hex = String(l.data).slice(2);
+          // [类型, tokenId, amount0, amount1, liquidity, kind(v3|pcs)]
+          v3[li] = [tp[0] === V3_INC ? 'inc' : tp[0] === V3_DEC ? 'dec' : 'col', BigInt(tp[1]).toString(), BigInt('0x' + hex.slice(64, 128)).toString(), BigInt('0x' + hex.slice(128, 192)).toString(), tp[0] === V3_COL ? '0' : BigInt('0x' + hex.slice(0, 64)).toString(), kindOfNpm(a)];
+        } else if (tp[0] === V3_POOL_MINT && tp.length === 4) {
+          pmints[li] = [a, hexI24(tp[2]), hexI24(tp[3])];
+        } else if (a === poolMgr && tp[0] === V4_MODIFY && low(tp[2] || '') === pmTopic) {
+          const hex = String(l.data).slice(2);
+          m.push([low(tp[1]), BigInt('0x' + hex.slice(192, 256)).toString(), hexI24(hex.slice(0, 64)), hexI24(hex.slice(64, 128)), hexInt(hex.slice(128, 192)).toString(), li]);
+        }
+      }
+      if (m.length) tx.m = m; else delete tx.m;
+      if (Object.keys(v3).length) tx.v3 = v3; else delete tx.v3;
+      if (Object.keys(pmints).length) tx.pm = pmints; else delete tx.pm;
+      tx.r = 1;
+    }
+    token = r.nextPageToken || null; pages++;
+  } while (token && pages < 500);
+  for (const t of Object.values(W.txs)) if (t.b <= to && !t.r) t.r = 1;         // 只在 A 段出现的 tx (第三方打款) 没有仓位操作
+  W.scannedTo = to; W.stopped = null; W.updatedAt = Date.now();
+  return W;
+}
+
 // =============================================================
 // 2. 仓位发现 + 池元数据 + 仓位事件
 // =============================================================
@@ -170,18 +317,18 @@ async function poolMeta(chainId, kind, spec) {
   const st = ledgerState(chainId);
   const key = low(spec);
   if (st.d.pools[key]) return st.d.pools[key];
-  const cfg = E.EVM_CHAINS[chainId];
-  const provider = E.chainState(chainId).provider;
+  const cfg = cfgOf(chainId);
+  const provider = providerFor(chainId);
   let meta = null;
-  if (kind === 'v3') {
+  if (kind === 'v3' || kind === 'pcs') {
     const c = new ethers.Contract(spec, POOL_META_ABI, provider);
     const [a0, a1, fee] = await Promise.all([c.token0(), c.token1(), c.fee()]);
-    const t0 = await E.getTokenInfo(chainId, a0), t1 = await E.getTokenInfo(chainId, a1);
+    const t0 = await tokenInfoOf(chainId, a0), t1 = await tokenInfoOf(chainId, a1);
     meta = { kind, t0: { address: low(t0.address), symbol: t0.symbol, decimals: t0.decimals }, t1: { address: low(t1.address), symbol: t1.symbol, decimals: t1.decimals }, fee: Number(fee) };
   } else {
     const c = new ethers.Contract(cfg.v4.pm, PM_KEYS_ABI, provider);
     const k = await c.poolKeys(spec.slice(0, 52));
-    const t0 = await E.getTokenInfo(chainId, k.currency0), t1 = await E.getTokenInfo(chainId, k.currency1);
+    const t0 = await tokenInfoOf(chainId, k.currency0), t1 = await tokenInfoOf(chainId, k.currency1);
     meta = { kind, t0: { address: low(t0.address), symbol: t0.symbol, decimals: t0.decimals }, t1: { address: low(t1.address), symbol: t1.symbol, decimals: t1.decimals }, fee: Number(k.fee), native: low(k.currency0) === low(ethers.ZeroAddress) };
   }
   st.d.pools[key] = meta;
@@ -189,15 +336,27 @@ async function poolMeta(chainId, kind, spec) {
 }
 
 // mint tx 回执里找池子 + 区间: V3 看池子的 Mint 事件 (owner=NPM, ticks 在 topics), V4 看 PoolManager 的 ModifyLiquidity (salt=tokenId)
-async function resolveFromMintTx(chainId, P) {
-  const cfg = E.EVM_CHAINS[chainId];
-  const provider = E.chainState(chainId).provider;
+async function resolveFromMintTx(chainId, P, W) {
+  const cfg = cfgOf(chainId);
+  // Ankr 链: mint tx 的日志已经存在流水里, 不用再拿回执
+  const t = W && W.txs[String(P.mtx).toLowerCase()];
+  if (t && t.r) {
+    if (P.k === 'v4') {
+      const hit = (t.m || []).find(x => x[1] === P.id);
+      if (hit) { P.spec = hit[0]; P.tl = hit[2]; P.tu = hit[3]; return true; }
+    } else if (t.v3 && t.pm) {
+      const incLi = Math.min(...Object.entries(t.v3).filter(([, v]) => v[0] === 'inc' && v[1] === P.id && (v[5] || 'v3') === P.k).map(([li]) => +li));
+      const cand = Object.entries(t.pm).map(([li, v]) => [+li, v]).filter(([li]) => li < incLi).sort((a, b) => b[0] - a[0])[0];
+      if (cand) { P.spec = low(cand[1][0]); P.tl = cand[1][1]; P.tu = cand[1][2]; return true; }
+    }
+  }
+  const provider = providerFor(chainId);
   const rc = await E.withRetry(() => provider.send('eth_getTransactionReceipt', [P.mtx]), 2, 600).catch(() => null);
   if (!rc || !rc.logs) return false;
-  if (P.k === 'v3') {
+  if (P.k !== 'v4') {
     // 同一 tx 里可能 mint 多个仓 (multicall): 用本 id 的 IncreaseLiquidity 之前最近的那条池子 Mint
     const idTopic = '0x' + BigInt(P.id).toString(16).padStart(64, '0');
-    const incIdx = rc.logs.findIndex(l => low(l.address) === low(cfg.v3.npm) && l.topics[0] === V3_INC && l.topics[1] === idTopic);
+    const incIdx = rc.logs.findIndex(l => low(l.address) === low(npmOf(cfg, P.k)) && l.topics[0] === V3_INC && l.topics[1] === idTopic);
     if (incIdx < 0) return false;
     for (let i = incIdx - 1; i >= 0; i--) {
       const l = rc.logs[i];
@@ -221,7 +380,7 @@ async function resolveFromMintTx(chainId, P) {
 
 // mint 块已知但 tx 未知 (仓位不在本钱包的 Transfer 流水里, 如扫描不全): 在该块找 NFT 铸造事件拿 tx
 async function findMintTx(chainId, contract, id, block) {
-  const provider = E.chainState(chainId).provider;
+  const provider = providerFor(chainId);
   const tid = '0x' + BigInt(id).toString(16).padStart(64, '0');
   const logs = await E.withRetry(() => provider.send('eth_getLogs', [{ address: contract, fromBlock: '0x' + block.toString(16), toBlock: '0x' + block.toString(16), topics: [TRANSFER_TOPIC, ZERO32, null, tid] }]), 2, 600).catch(() => []);
   return logs[0] ? logs[0].transactionHash : null;
@@ -229,7 +388,7 @@ async function findMintTx(chainId, contract, id, block) {
 
 // 钱包的仓位集合: NFT 流水 (mint/in/out/burn) ∪ 当前活跃仓 (positions 缓存, 防流水不全)
 async function ensurePositions(chainId, addr, W, livePositions, deadline) {
-  const cfg = E.EVM_CHAINS[chainId];
+  const cfg = cfgOf(chainId);
   const nftEvs = [];
   for (const [h, t] of Object.entries(W.txs)) for (const [li, n] of Object.entries(t.n || {})) nftEvs.push({ b: t.b, li: +li, h, k: n[0], id: n[1], dir: n[2] });
   nftEvs.sort((a, b) => a.b - b.b || a.li - b.li);
@@ -242,7 +401,7 @@ async function ensurePositions(chainId, addr, W, livePositions, deadline) {
     else if (e.dir === 'burn') { P.burnB = e.b; P.burnTx = e.h; }
   }
   for (const p of livePositions || []) {
-    const k = p.protocol === 'V4' ? 'v4' : 'v3';
+    const k = p.dex === 'pancake' ? 'pcs' : (p.protocol === 'V4' ? 'v4' : 'v3');
     const key = `${k}-${p.tokenId}`;
     const P = W.pos[key] || (W.pos[key] = { k, id: String(p.tokenId), evs: [], evTo: 0 });
     P.live = 1;
@@ -252,14 +411,15 @@ async function ensurePositions(chainId, addr, W, livePositions, deadline) {
   for (const P of Object.values(W.pos)) {
     if (Date.now() > deadline) break;
     try {
-      const contract = P.k === 'v3' ? cfg.v3.npm : cfg.v4.pm;
+      const contract = npmOf(cfg, P.k);
       if (!P.mb) {
+        if (extra[chainId]) continue;   // 外注册链 (bsc): mint 块只能来自流水里的 NFT 事件, 没有就等下轮
         P.mb = E.mintBlockFromScan(chainId, contract, P.id) || 0;
         if (!P.mb) { const m = await E.findMintEvent(chainId, contract, P.id); if (m) P.mb = m.block; }
         if (!P.mb) continue;
       }
       if (!P.mtx && !P.spec) P.mtx = await findMintTx(chainId, contract, P.id, P.mb);
-      if (!P.spec && P.mtx) await resolveFromMintTx(chainId, P);
+      if (!P.spec && P.mtx) await resolveFromMintTx(chainId, P, W);
       if (!P.spec) continue;
       await poolMeta(chainId, P.k, P.spec);
       if (!P.mts) P.mts = await blockTs(chainId, P.mb);
@@ -273,8 +433,8 @@ async function ensurePositions(chainId, addr, W, livePositions, deadline) {
 
 // V3 仓位事件: 一个钱包全部 tokenId 用 topic OR 列表一次扫 (从最早的未扫块起)
 async function scanV3Events(chainId, W, deadline) {
-  const cfg = E.EVM_CHAINS[chainId];
-  const latest = await E.chainState(chainId).provider.getBlockNumber();
+  const cfg = cfgOf(chainId);
+  const latest = await stateOf(chainId).provider.getBlockNumber();
   const need = Object.values(W.pos).filter(P => P.k === 'v3' && P.spec && P.mb && !P.done);
   if (!need.length) return true;
   const from = Math.min(...need.map(P => P.evTo ? P.evTo + 1 : P.mb));
@@ -308,8 +468,8 @@ async function scanV3Events(chainId, W, deadline) {
 //   —— 一个钱包几十到两千笔 tx, 每笔一次 getTransactionReceipt; 按池扫全链 (125 个池 × 分段) 首轮 12 分钟只扫完 5 个池, 弃用为主路径。
 //   盲区: 原生币池 (rh ETH/USDG, currency0=0x0) 只动 ETH 一侧的加/减仓/领费没有任何 ERC20 日志 → tx 不在流水里, 由 scanV4Events 按池补扫。
 async function fetchReceipts(chainId, W, deadline) {
-  const cfg = E.EVM_CHAINS[chainId];
-  const provider = E.chainState(chainId).provider;
+  const cfg = cfgOf(chainId);
+  const provider = stateOf(chainId).provider;
   const pmTopic = padAddr(cfg.v4.pm), poolMgr = low(cfg.v4.poolManager);
   const todo = Object.entries(W.txs).filter(([, t]) => !t.r);
   for (let i = 0; i < todo.length; i += 4) {
@@ -335,8 +495,8 @@ async function fetchReceipts(chainId, W, deadline) {
 // V4 仓位事件 (补扫): 只对原生币池按池扫 ModifyLiquidity (topics poolId+sender=PM), 只留 wanted salt 的事件
 async function scanV4Events(chainId, deadline) {
   const st = ledgerState(chainId);
-  const cfg = E.EVM_CHAINS[chainId];
-  const latest = await E.chainState(chainId).provider.getBlockNumber();
+  const cfg = cfgOf(chainId);
+  const latest = await stateOf(chainId).provider.getBlockNumber();
   // 收集全部钱包的 V4 仓 → 按池分组
   const byPool = new Map();
   for (const W of Object.values(st.d.wallets)) for (const P of Object.values(W.pos)) {
@@ -421,8 +581,33 @@ async function pxAt(chainId, spec, block) {
   if (c && c.f && Date.now() - c.f < PX_RETRY_MS) return null;
   const meta = st.d.pools[spec];
   if (!meta) return null;
-  const specObj = meta.kind === 'v4' ? { kind: 'v4', poolId: spec } : { kind: 'v3', poolAddress: spec };
-  const r = await E.entryPricesAtBlock(chainId, specObj, meta.t0, meta.t1, block, new Map()).catch(() => null);
+  let r = null;
+  if (isAnkr(chainId)) {
+    // 归档 eth_call: V3 pool.slot0() / V4 stateView.getSlot0(poolId) 在当块的 sqrtPriceX96 (Ankr 全档含 archive)
+    try {
+      const cfg = cfgOf(chainId);
+      const provider = providerFor(chainId);
+      const tag = '0x' + Number(block).toString(16);
+      let sqrt = null;
+      if (meta.kind === 'v4') {
+        const iface = new ethers.Interface(['function getSlot0(bytes32) view returns (uint160 sqrtPriceX96,int24 tick,uint24 protocolFee,uint24 lpFee)']);
+        const res = await E.withRetry(() => provider.send('eth_call', [{ to: cfg.v4.stateView, data: iface.encodeFunctionData('getSlot0', [spec]) }, tag]), 2, 700);
+        sqrt = iface.decodeFunctionResult('getSlot0', res)[0];
+      } else {
+        // slot0() 只取第一槽 sqrtPriceX96 (Pancake 的 feeProtocol 是 uint32, 套 Uniswap ABI 整体解码会越界)
+        const res = await E.withRetry(() => provider.send('eth_call', [{ to: spec, data: '0x3850c7bd' }, tag]), 2, 700);
+        sqrt = res && res.length >= 66 ? BigInt(res.slice(0, 66)) : 0n;
+      }
+      const ts = await blockTs(chainId, block);
+      if (sqrt > 0n && ts) {
+        const px = await E.entryTokenPrices(cfg, meta.t0, meta.t1, E.sqrtPriceX96ToPrice(sqrt, meta.t0.decimals, meta.t1.decimals), ts);
+        if (px) r = { ...px, sqrt, ts };
+      }
+    } catch {}
+  } else {
+    const specObj = meta.kind === 'v4' ? { kind: 'v4', poolId: spec } : { kind: 'v3', poolAddress: spec };
+    r = await E.entryPricesAtBlock(chainId, specObj, meta.t0, meta.t1, block, new Map()).catch(() => null);
+  }
   if (!r) { st.d.px[key] = { f: Date.now() }; return null; }
   st.d.px[key] = { p0: r.p0, p1: r.p1, sq: r.sqrt.toString(), ts: r.ts };
   if (!st.d.bts[block]) st.d.bts[block] = r.ts;
@@ -432,7 +617,7 @@ async function pxAt(chainId, spec, block) {
 // 某 token 在某块的美元价: 稳定币=1; WETH/原生=coingecko 小时价; 其他=参考池 (与稳定币/WETH 配对的池) 当块价; 再不行=当前价 (approx)
 function buildRefPools(chainId) {
   const st = ledgerState(chainId);
-  const cfg = E.EVM_CHAINS[chainId];
+  const cfg = cfgOf(chainId);
   const wn = low(cfg.wrappedNative);
   const ref = {};   // token -> { spec, side, score }
   for (const [spec, m] of Object.entries(st.d.pools)) {
@@ -446,11 +631,11 @@ function buildRefPools(chainId) {
   return ref;
 }
 async function priceAt(chainId, token, block, ref) {
-  const cfg = E.EVM_CHAINS[chainId];
+  const cfg = cfgOf(chainId);
   if (cfg.stables[token]) return { p: 1, approx: false };
   if (token === low(cfg.wrappedNative)) {
     const ts = await blockTs(chainId, block);
-    const p = ts ? await E.ethUsdAtTime(ts) : 0;
+    const p = ts ? await E.coinUsdAtTime(cfg.nativePriceId || 'ethereum', ts) : 0;   // ETH / BNB 小时价
     if (p > 0) return { p, approx: false };
   }
   const r = ref[token];
@@ -458,7 +643,7 @@ async function priceAt(chainId, token, block, ref) {
     const px = await pxAt(chainId, r.spec, block);
     if (px) return { p: r.side === 0 ? px.p0 : px.p1, approx: false };
   }
-  const cur = (E.chainState(chainId).lastUsdPrices || {})[token] || 0;
+  const cur = (stateOf(chainId).lastUsdPrices || {})[token] || 0;
   return { p: cur, approx: true };
 }
 
@@ -467,11 +652,11 @@ async function priceAt(chainId, token, block, ref) {
 // =============================================================
 async function computeWallet(chainId, addr, livePositions) {
   const st = ledgerState(chainId);
-  const cfg = E.EVM_CHAINS[chainId];
+  const cfg = cfgOf(chainId);
   const W = st.d.wallets[addr];
   if (!W || W.partial) return;
   const ref = buildRefPools(chainId);
-  const liveKeys = new Set((livePositions || []).map(p => `${p.protocol === 'V4' ? 'v4' : 'v3'}-${p.tokenId}`));
+  const liveKeys = new Set((livePositions || []).map(p => `${p.dex === 'pancake' ? 'pcs' : (p.protocol === 'V4' ? 'v4' : 'v3')}-${p.tokenId}`));
 
   // tx 汇总
   const txs = new Map();
@@ -489,10 +674,16 @@ async function computeWallet(chainId, addr, livePositions) {
     if (!P || low(P.spec || '') !== m[0]) continue;
     const arr = v4FromTx.get(key) || []; arr.push({ b: t.b, li: m[5], tx: h, d: m[4], tl: m[2], tu: m[3] }); v4FromTx.set(key, arr);
   }
+  // Ankr 链: V3 事件也从钱包交易日志里取 (加/减仓/领费都是钱包自己发的 tx)
+  const v3FromTx = new Map();
+  if (isAnkr(chainId)) for (const [h, t] of Object.entries(W.txs)) for (const [li, v] of Object.entries(t.v3 || {})) {
+    const key = `${v[5] || 'v3'}-${v[1]}`; if (!W.pos[key]) continue;
+    const arr = v3FromTx.get(key) || []; arr.push({ b: t.b, li: +li, tx: h, t: v[0], a0: v[2], a1: v[3], l: v[4] }); v3FromTx.set(key, arr);
+  }
   for (const P of Object.values(W.pos)) {
     if (!P.spec) continue;
     let evs;
-    if (P.k === 'v3') evs = P.evs;
+    if (P.k !== 'v4') evs = isAnkr(chainId) ? (v3FromTx.get(`${P.k}-${P.id}`) || []).sort((x, y) => x.b - y.b || x.li - y.li) : P.evs;
     else {
       const seenEv = new Set();
       evs = [];
@@ -511,7 +702,7 @@ async function computeWallet(chainId, addr, livePositions) {
 
   // token 精度
   const decOf = {};
-  const dec = async tok => { if (decOf[tok] == null) { const i = await E.getTokenInfo(chainId, tok); decOf[tok] = i?.decimals ?? 18; } return decOf[tok]; };
+  const dec = async tok => { if (decOf[tok] == null) { const k = (st.d.tok || {})[tok]; if (k && k.decimals != null) decOf[tok] = k.decimals; else { const i = await tokenInfoOf(chainId, tok); decOf[tok] = i?.decimals ?? 18; } } return decOf[tok]; };
   const hum = async (tok, raw) => Number(raw) / 10 ** (await dec(tok));
 
   // 持仓批次
@@ -542,7 +733,7 @@ async function computeWallet(chainId, addr, livePositions) {
   const evAmounts = async (P, ev) => {
     const meta = st.d.pools[P.spec]; if (!meta) return null;
     const px = await pxAt(chainId, P.spec, ev.b); if (!px) return null;
-    if (P.k === 'v3') {
+    if (P.k !== 'v4') {
       const a0 = Number(ev.a0) / 10 ** meta.t0.decimals, a1 = Number(ev.a1) / 10 ** meta.t1.decimals;
       return { kind: ev.t === 'inc' ? 'dep' : ev.t === 'dec' ? 'wd' : 'col', a0, a1, px, meta, liq: BigInt(ev.l || '0') };
     }
@@ -563,10 +754,10 @@ async function computeWallet(chainId, addr, livePositions) {
       if (!v) { c.inc = true; continue; }
       const mkt0 = v.a0 * v.px.p0, mkt1 = v.a1 * v.px.p1;
       if (v.kind === 'dep') { deps.push({ P, c, v, mkt: mkt0 + mkt1 }); c.liq += v.liq; }
-      else if (v.kind === 'wd') { wds.push({ P, c, v, mkt: mkt0 + mkt1 }); c.liq += (P.k === 'v3' ? -v.liq : v.liq); if (P.k === 'v3') { c.owed0 += v.a0; c.owed1 += v.a1; } }
+      else if (v.kind === 'wd') { wds.push({ P, c, v, mkt: mkt0 + mkt1 }); c.liq += (P.k !== 'v4' ? -v.liq : v.liq); if (P.k !== 'v4') { c.owed0 += v.a0; c.owed1 += v.a1; } }
       else {
         // V3 Collect = 手续费 + 之前减仓待提的本金; V4 delta=0 的 ModifyLiquidity 只是结算手续费 (金额从实收推)
-        if (P.k === 'v3') {
+        if (P.k !== 'v4') {
           const pr0 = Math.min(v.a0, c.owed0), pr1 = Math.min(v.a1, c.owed1);
           c.owed0 -= pr0; c.owed1 -= pr1;
           const f0 = v.a0 - pr0, f1 = v.a1 - pr1;
@@ -677,7 +868,7 @@ async function runQueue(chainId, livePositionsByWallet, opts = {}) {
   const deadline = Date.now() + (opts.budgetMs || (st.lastRun ? ROUND_BUDGET_MS : FIRST_BUDGET_MS));
   try {
     // 只扫设置页勾选的钱包 (默认沿用「钱包资金查询」的勾选); 别人的观察钱包不扫
-    const wallets = E.ledgerWallets ? E.ledgerWallets(chainId) : E.loadActiveWallets(chainId);
+    const wallets = walletsOf(chainId);
     const t0 = Date.now();
     const ready = new Set();   // 本轮流水+仓位事件都扫到链头的钱包 (半截数据不重放, 避免把没扫完的减仓/领费算成亏损)
     for (const w of wallets) {
@@ -685,21 +876,25 @@ async function runQueue(chainId, livePositionsByWallet, opts = {}) {
       const addr = low(w.address);
       const live = (livePositionsByWallet && livePositionsByWallet[addr]) || [];
       try {
-        const W = await scanWallet(chainId, addr, deadline);
+        const ankr = isAnkr(chainId);
+        const W = ankr ? await scanWalletAnkr(chainId, addr, deadline) : await scanWallet(chainId, addr, deadline);
         if (W.partial) { save(chainId); continue; }
-        if (W.stopped) { save(chainId); continue; }
+        if (W.stopped) { save(chainId); console.log(`[${chainId}] pnl-ledger ${w.name}: 流水未扫完 (${W.stopped}), 下轮续`); continue; }
         await ensurePositions(chainId, addr, W, live, deadline);
         const metaOk = Object.values(W.pos).every(P => P.spec || !P.mb);
-        const rcOk = await fetchReceipts(chainId, W, deadline);
-        const v3Ok = await scanV3Events(chainId, W, deadline);
+        // Ankr 链: 回执与 V3/V4 事件都已随交易日志入库, 不再单独扫
+        const rcOk = ankr ? true : await fetchReceipts(chainId, W, deadline);
+        const v3Ok = ankr ? true : await scanV3Events(chainId, W, deadline);
         if (metaOk && rcOk && v3Ok) ready.add(addr);
         else console.log(`[${chainId}] pnl-ledger ${w.name}: 本轮未就绪 (元数据 ${metaOk} / 回执 ${rcOk} / V3 ${v3Ok}), 下轮续`);
         save(chainId);
       } catch (e) { console.error(`[${chainId}] pnl-ledger ${w.name}:`, e.message?.slice(0, 100)); }
     }
-    let v4Ok = false;
-    try { v4Ok = await scanV4Events(chainId, deadline); save(chainId); }
-    catch (e) { console.error(`[${chainId}] pnl-ledger V4 事件:`, e.message?.slice(0, 100)); }
+    let v4Ok = isAnkr(chainId);
+    if (!v4Ok) {
+      try { v4Ok = await scanV4Events(chainId, deadline); save(chainId); }
+      catch (e) { console.error(`[${chainId}] pnl-ledger V4 事件:`, e.message?.slice(0, 100)); }
+    }
     for (const w of wallets) {
       const addr = low(w.address);
       const W = st.d.wallets[addr];
@@ -741,7 +936,7 @@ function walletReport(chainId, addr, liveWallet) {
   const status = walletStatus(chainId, addr);
   const out = { ...status, positions: [], lots: [] };
   const liveMap = new Map();
-  for (const p of (liveWallet?.positions || [])) liveMap.set(`${p.protocol === 'V4' ? 'v4' : 'v3'}-${p.tokenId}`, p);
+  for (const p of (liveWallet?.positions || [])) liveMap.set(`${p.dex === 'pancake' ? 'pcs' : (p.protocol === 'V4' ? 'v4' : 'v3')}-${p.tokenId}`, p);
   const seen = new Set();
   if (status.ledger && !status.partial && !status.pending) {
     const W = ledgerState(chainId).d.wallets[low(addr)];
@@ -764,7 +959,7 @@ function rowFromLedger(key, P, live) {
   const closeTs = active ? 0 : (c.closeTs || 0);
   const net = valueUSD + pending + c.fees + c.ret - c.cost;
   return {
-    key, protocol: P.k === 'v4' ? 'V4' : 'V3', tokenId: P.id, pair: live ? `${live.token0.symbol}/${live.token1.symbol}` : c.pair, feeLabel: live ? live.feeLabel : null, fee: c.fee,
+    key, protocol: P.k === 'v4' ? 'V4' : 'V3', dex: P.k === 'pcs' ? 'pancake' : undefined, tokenId: P.id, pair: live ? `${live.token0.symbol}/${live.token1.symbol}` : c.pair, feeLabel: live ? live.feeLabel : null, fee: c.fee,
     status: active ? 'active' : 'closed', note: active ? '' : c.note, inRange: live ? !!live.inRange : null,
     openTs: c.openTs, closeTs, source: 'ledger',
     costUSD: c.cost, costApprox: c.approx, incomplete: c.inc, depositValueUSD: c.dep, adds: c.n,
@@ -776,7 +971,7 @@ function rowFromLedger(key, P, live) {
 function rowFromLive(key, p) {
   const cost = p.costBasisUSD || 0;
   return {
-    key, protocol: p.protocol, tokenId: p.tokenId, pair: `${p.token0.symbol}/${p.token1.symbol}`, feeLabel: p.feeLabel, fee: p.fee,
+    key, protocol: p.protocol, dex: p.dex, tokenId: p.tokenId, pair: `${p.token0.symbol}/${p.token1.symbol}`, feeLabel: p.feeLabel, fee: p.fee,
     status: 'active', note: '', inRange: !!p.inRange, openTs: p.entryTs || p.createdAt || 0, closeTs: 0, source: p.costSource || 'none',
     costUSD: cost, costApprox: !!p.costApprox, incomplete: false, depositValueUSD: p.entryValueUSD || 0, adds: p.entryAdds || 0,
     valueUSD: p.positionValueUSD || 0, pendingFeesUSD: p.feesValueUSD || 0, collectedFeesUSD: p.collectedFeesUSD || 0, withdrawnUSD: p.withdrawnUSD || 0,
@@ -815,4 +1010,4 @@ function applyPnl(pos, src, priceOf) {
   pos.netProfitPct = pos.netProfitUSD / src.cost * 100;
 }
 
-module.exports = { init, enabled, runQueue, positionPnl, walletStatus, walletReport, applyPnl, ledgerState, ROUND_MS, _test: { computeWallet, scanWallet, ensurePositions, scanV3Events, scanV4Events } };
+module.exports = { init, registerChain, enabled, isAnkr, runQueue, positionPnl, walletStatus, walletReport, applyPnl, ledgerState, ROUND_MS, _test: { computeWallet, scanWallet, ensurePositions, scanV3Events, scanV4Events } };

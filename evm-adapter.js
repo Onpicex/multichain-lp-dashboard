@@ -37,6 +37,7 @@ const EVM_CHAINS = {
     nativePriceId: 'ethereum',            // coingecko simple/price id
     coingeckoPlatform: 'ethereum',        // coingecko token_price 平台名
     entryFromSubgraph: true,              // 建仓价值: 走子图 Mint/Burn/ModifyLiquidity.amountUSD (公共 RPC 封 getLogs, 后台异步补)
+    ledgerFromAnkr: 'eth',                // 钱包盈亏账本: 数据源 Ankr Advanced API (需 .env ANKR_KEY; 公共 RPC 封 getLogs 扫不了钱包流水)
   },
   base: {
     name: 'Base',
@@ -70,6 +71,7 @@ const EVM_CHAINS = {
     entryV4FromLogs: true,               // 建仓价值 V4: 子图唯一索引器 0xf92f430d 对 filter 查询常 BadResponse,
                                           //   改走链上 ModifyLiquidity 事件重放 (mainnet.base.org 支持 getLogs+archive getSlot0)
     entryRpc: 'https://mainnet.base.org', // 建仓回溯专用: getLogs 10k 块/段 + 历史 getSlot0 (publicnode 封 getLogs)
+    ledgerFromAnkr: 'base',               // 钱包盈亏账本: 数据源 Ankr Advanced API (base.org >2000 块 413, 扫不了钱包流水)
   },
   rh: {
     name: 'Robinhood Chain',
@@ -744,27 +746,29 @@ function saveEntryCache(st) {
 }
 
 // coingecko ETH 历史价: 小时桶缓存 + 串行队列 (免费档限流敏感); 拿不到返回 0, 不缓存下轮重试
-const ethHistCache = new Map();
+const coinHistCache = new Map();   // `${coinId}:${小时桶}` -> 美元价 (ETH / BNB 等原生币, 供账本与建仓回溯)
 let cgQueue = Promise.resolve();
-function ethUsdAtTime(tsMs) {
+function coinUsdAtTime(coinId, tsMs) {
   const bucket = Math.floor(tsMs / 3600000);
-  for (const b of [bucket, bucket - 1, bucket + 1]) if (ethHistCache.has(b)) return Promise.resolve(ethHistCache.get(b));
+  const k = b => `${coinId}:${b}`;
+  for (const b of [bucket, bucket - 1, bucket + 1]) if (coinHistCache.has(k(b))) return Promise.resolve(coinHistCache.get(k(b)));
   const run = cgQueue.then(async () => {
-    if (ethHistCache.has(bucket)) return ethHistCache.get(bucket);
+    if (coinHistCache.has(k(bucket))) return coinHistCache.get(k(bucket));
     try {
       const from = Math.floor(tsMs / 1000) - 7200, to = Math.floor(tsMs / 1000) + 7200;
-      const res = await fetch(`https://api.coingecko.com/api/v3/coins/ethereum/market_chart/range?vs_currency=usd&from=${from}&to=${to}`, { signal: AbortSignal.timeout(12000) });
+      const res = await fetch(`https://api.coingecko.com/api/v3/coins/${coinId}/market_chart/range?vs_currency=usd&from=${from}&to=${to}`, { signal: AbortSignal.timeout(12000) });
       if (!res.ok) return 0;
       const d = await res.json();
       let best = 0, bd = Infinity;
       for (const [t, p] of (d.prices || [])) { const dd = Math.abs(t - tsMs); if (dd < bd) { bd = dd; best = p; } }
-      if (best > 0) ethHistCache.set(bucket, best);
+      if (best > 0) coinHistCache.set(k(bucket), best);
       return best;
     } catch { return 0; }
   });
   cgQueue = run.then(() => sleep(1500), () => sleep(1500));
   return run;
 }
+function ethUsdAtTime(tsMs) { return coinUsdAtTime('ethereum', tsMs); }
 
 // 目标块附近最近一笔 Swap 的 sqrtPriceX96 (窗口逐级放大: 忙池首窗即命中, 冷池最远扫 ±250万块)
 async function poolPriceNearBlock(chainId, spec, targetBlock) {
@@ -871,7 +875,7 @@ async function entryTokenPrices(cfg, t0, t1, poolPriceNum, entryTs) {
   if (s0) return { p0: 1, p1: 1 / poolPriceNum };
   const wn = cfg.wrappedNative.toLowerCase();
   if (a0 === wn || a1 === wn) {
-    const eth = await ethUsdAtTime(entryTs);
+    const eth = await coinUsdAtTime(cfg.nativePriceId || 'ethereum', entryTs);   // 原生币: rh/eth/base=ETH, bsc=BNB
     if (!(eth > 0)) return null;
     return a0 === wn ? { p0: eth, p1: eth / poolPriceNum } : { p0: poolPriceNum * eth, p1: eth };
   }
@@ -2361,7 +2365,7 @@ function kickLedger(chainId) {
 }
 
 function mountEvmRoutes(app, adminGuard) {
-  ledger.init({ EVM_CHAINS, chainState, getTokenInfo, entryPricesAtBlock, getTokenAmounts, ethUsdAtTime, loadActiveWallets, withRetry, sleep, findMintEvent, mintBlockFromScan,
+  ledger.init({ EVM_CHAINS, chainState, getTokenInfo, entryPricesAtBlock, entryTokenPrices, sqrtPriceX96ToPrice, getTokenAmounts, ethUsdAtTime, coinUsdAtTime, loadActiveWallets, withRetry, sleep, findMintEvent, mintBlockFromScan,
     ledgerWallets: chainId => pnlSelected(chainId, loadActiveWallets(chainId)), ledgerEnabled: () => loadPnlCfgEvm().enabled });
   for (const chainId of Object.keys(EVM_CHAINS)) {
     const base = `/api/${chainId}`;
@@ -2548,6 +2552,6 @@ function mountEvmRoutes(app, adminGuard) {
 //   4. 加 Arc 钱包地址 -> 重启服务 -> 验证首轮抓取
 // =============================================================
 module.exports = { mountEvmRoutes, EVM_CHAINS, kickRefresh, liveByWallet, kickLedger,
-  _ledgerApi: { EVM_CHAINS, chainState, getTokenInfo, entryPricesAtBlock, getTokenAmounts, ethUsdAtTime, loadActiveWallets, withRetry, sleep, findMintEvent, mintBlockFromScan },
+  _ledgerApi: { EVM_CHAINS, chainState, getTokenInfo, entryPricesAtBlock, entryTokenPrices, sqrtPriceX96ToPrice, getTokenAmounts, ethUsdAtTime, coinUsdAtTime, loadActiveWallets, withRetry, sleep, findMintEvent, mintBlockFromScan },
   _entryTest: { getV3EntryData, getV4EntryData, getV3EntrySubgraph, getV4EntrySubgraph, getTokenInfo } };
 module.exports._collectTest = { fillLastCollect };   // 领费时间的独立验证入口 (tools/collect-check.js)  // 建仓回溯的独立验证入口
