@@ -304,7 +304,35 @@ async function scanV3Events(chainId, W, deadline) {
   return !r.stopped;
 }
 
-// V4 仓位事件: 按池共享扫描 (ModifyLiquidity topics poolId+sender=PM), 只留 wanted salt 的事件
+// V4 仓位事件 (主路径): 钱包每笔 tx 的回执里直接取 PoolManager ModifyLiquidity (sender=PM)
+//   —— 一个钱包几十到两千笔 tx, 每笔一次 getTransactionReceipt; 按池扫全链 (125 个池 × 分段) 首轮 12 分钟只扫完 5 个池, 弃用为主路径。
+//   盲区: 原生币池 (rh ETH/USDG, currency0=0x0) 只动 ETH 一侧的加/减仓/领费没有任何 ERC20 日志 → tx 不在流水里, 由 scanV4Events 按池补扫。
+async function fetchReceipts(chainId, W, deadline) {
+  const cfg = E.EVM_CHAINS[chainId];
+  const provider = E.chainState(chainId).provider;
+  const pmTopic = padAddr(cfg.v4.pm), poolMgr = low(cfg.v4.poolManager);
+  const todo = Object.entries(W.txs).filter(([, t]) => !t.r);
+  for (let i = 0; i < todo.length; i += 4) {
+    if (Date.now() > deadline) break;
+    await Promise.all(todo.slice(i, i + 4).map(async ([h, t]) => {
+      const rc = await E.withRetry(() => provider.send('eth_getTransactionReceipt', [h]), 2, 500).catch(() => null);
+      if (!rc || !rc.logs) return;
+      const m = [];
+      for (const l of rc.logs) {
+        if (low(l.address) !== poolMgr || l.topics[0] !== V4_MODIFY || low(l.topics[2]) !== pmTopic) continue;
+        const hex = l.data.slice(2);
+        // [poolId, salt(tokenId), tickLower, tickUpper, liquidityDelta, logIndex]
+        m.push([low(l.topics[1]), BigInt('0x' + hex.slice(192, 256)).toString(), hexI24(hex.slice(0, 64)), hexI24(hex.slice(64, 128)), hexInt(hex.slice(128, 192)).toString(), parseInt(l.logIndex, 16)]);
+      }
+      if (m.length) t.m = m; else delete t.m;
+      t.r = 1;
+    }));
+    if (i + 4 < todo.length) await E.sleep(60);
+  }
+  return Object.values(W.txs).every(t => t.r);
+}
+
+// V4 仓位事件 (补扫): 只对原生币池按池扫 ModifyLiquidity (topics poolId+sender=PM), 只留 wanted salt 的事件
 async function scanV4Events(chainId, deadline) {
   const st = ledgerState(chainId);
   const cfg = E.EVM_CHAINS[chainId];
@@ -313,6 +341,7 @@ async function scanV4Events(chainId, deadline) {
   const byPool = new Map();
   for (const W of Object.values(st.d.wallets)) for (const P of Object.values(W.pos)) {
     if (P.k !== 'v4' || !P.spec || !P.mb) continue;
+    if (!(st.d.pools[P.spec] && st.d.pools[P.spec].native)) continue;   // 非原生币池: 回执路径已覆盖
     const a = byPool.get(P.spec) || []; a.push(P); byPool.set(P.spec, a);
   }
   const pmTopic = padAddr(cfg.v4.pm);
@@ -452,9 +481,26 @@ async function computeWallet(chainId, addr, livePositions) {
     for (const [li, [tok, amt]] of Object.entries(t.e || {})) { tx.li = Math.min(tx.li, +li); tx.flows.set(tok, (tx.flows.get(tok) || 0n) + BigInt(amt)); }
     for (const [li, n] of Object.entries(t.n || {})) { tx.li = Math.min(tx.li, +li); tx.nft.push({ k: n[0], id: n[1], dir: n[2] }); }
   }
+  // V4 事件: 回执提取 (W.txs[h].m) ∪ 原生币池补扫 (st.d.v4), 按 (块, logIndex) 去重
+  const v4FromTx = new Map();
+  for (const [h, t] of Object.entries(W.txs)) for (const m of (t.m || [])) {
+    const key = `v4-${m[1]}`;
+    const P = W.pos[key];
+    if (!P || low(P.spec || '') !== m[0]) continue;
+    const arr = v4FromTx.get(key) || []; arr.push({ b: t.b, li: m[5], tx: h, d: m[4], tl: m[2], tu: m[3] }); v4FromTx.set(key, arr);
+  }
   for (const P of Object.values(W.pos)) {
     if (!P.spec) continue;
-    const evs = P.k === 'v3' ? P.evs : ((st.d.v4[P.spec] || { ev: {} }).ev[P.id] || []);
+    let evs;
+    if (P.k === 'v3') evs = P.evs;
+    else {
+      const seenEv = new Set();
+      evs = [];
+      for (const ev of [...(v4FromTx.get(`v4-${P.id}`) || []), ...((st.d.v4[P.spec] || { ev: {} }).ev[P.id] || [])]) {
+        const k = ev.b + ':' + ev.li; if (seenEv.has(k)) continue; seenEv.add(k); evs.push(ev);
+      }
+      evs.sort((x, y) => x.b - y.b || x.li - y.li);
+    }
     for (const ev of evs) {
       if (P.outB && ev.b > P.outB) continue;          // 转出后归新主人
       if (P.inB && ev.b < P.inB && !P.mtx) { /* 转入前的事件也算 (成本无流水对应, 会走 approx 补市值) */ }
@@ -642,8 +688,10 @@ async function runQueue(chainId, livePositionsByWallet, opts = {}) {
         if (W.stopped) { save(chainId); continue; }
         await ensurePositions(chainId, addr, W, live, deadline);
         const metaOk = Object.values(W.pos).every(P => P.spec || !P.mb);
+        const rcOk = await fetchReceipts(chainId, W, deadline);
         const v3Ok = await scanV3Events(chainId, W, deadline);
-        if (metaOk && v3Ok) ready.add(addr);
+        if (metaOk && rcOk && v3Ok) ready.add(addr);
+        else console.log(`[${chainId}] pnl-ledger ${w.name}: 本轮未就绪 (元数据 ${metaOk} / 回执 ${rcOk} / V3 ${v3Ok}), 下轮续`);
         save(chainId);
       } catch (e) { console.error(`[${chainId}] pnl-ledger ${w.name}:`, e.message?.slice(0, 100)); }
     }
@@ -655,7 +703,7 @@ async function runQueue(chainId, livePositionsByWallet, opts = {}) {
       const W = st.d.wallets[addr];
       if (!W || W.partial) continue;
       if (!ready.has(addr)) continue;
-      if (!v4Ok && Object.values(W.pos).some(P => P.k === 'v4')) { console.log(`[${chainId}] pnl-ledger ${w.name}: V4 事件未扫完, 本轮不重放`); continue; }
+      if (!v4Ok && Object.values(W.pos).some(P => P.k === 'v4' && st.d.pools[P.spec] && st.d.pools[P.spec].native)) { console.log(`[${chainId}] pnl-ledger ${w.name}: 原生币池 V4 事件未扫完, 本轮不重放`); continue; }
       try {
         await computeWallet(chainId, addr, (livePositionsByWallet && livePositionsByWallet[addr]) || []);
         const n = Object.values(W.pos).filter(P => P.c).length, cl = Object.values(W.pos).filter(P => P.c && P.c.status === 'closed').length;
