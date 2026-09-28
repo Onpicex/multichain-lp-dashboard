@@ -41,3 +41,9 @@ pcs-hist-cache-*.json
 pnl-ledger-*.json
 pnl-config.json
 coin-hist-cache.json
+
+# 2026-09-28 审计修复补: 原子写中间态 / 坏文件隔离副本 / 前端 UI 配置 / 渲染后的 nginx 令牌 map
+*.tmp
+*.corrupt-*
+ui-config.json
+lp-token.map

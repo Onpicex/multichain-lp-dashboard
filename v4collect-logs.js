@@ -15,6 +15,9 @@
 'use strict';
 
 const MODIFY_LIQUIDITY_TOPIC = '0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec';
+// 2026-09-28 审计修复: store.tokens 清理参数 —— 查询过的仓 (store.watch) 30 天没再被问到即遗忘; 非自有 tokenId 只留块高最新的 1000 条
+const WATCH_TTL_MS = 30 * 24 * 3600 * 1000;
+const OTHERS_KEEP = 1000;
 
 function withTimeout(p, ms) {
   let t;
@@ -31,12 +34,13 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
  * @param {Array<{tokenId:string|number|bigint, poolId:string}>} o.positions  要问的仓
  * @param {number} o.lookbackBlocks    最多回看多少块
  * @param {number} [o.blockStep=49999]
- * @param {{pools?:object, tokens?:object, blockTs?:object}} [o.store]  持久化状态 (原地更新): pools[poolId]={scannedTo,floor,done}, tokens[tid]=最新领费块高, blockTs[块高]=毫秒
+ * @param {{pools?:object, tokens?:object, blockTs?:object, watch?:object}} [o.store]  持久化状态 (原地更新): pools[poolId]={scannedTo,floor,done,floorAt}, tokens[tid]=最新领费块高, blockTs[块高]=毫秒, watch[tid]=该仓最近被查询的时间 (2026-09-28)
  * @param {function} [o.save]          每次进度推进后回调 (落盘)
- * @param {number} [o.budgetCalls=80]  每轮 getLogs 上限
+ * @param {number} [o.budgetCalls=60]  每轮 getLogs 上限 (2026-09-28 审计修复: 注释原写 80, 与代码默认 60 不一致)
  * @param {number} [o.budgetMs=40000]  每轮时间上限
  * @param {number} [o.callTimeoutMs=12000]
- * @param {number} [o.paceMs=120]      两次调用之间的间隔 (公共 key 连打会被限流)
+ * @param {number} [o.paceMs=350]      两次调用之间的间隔 (公共 key 连打会被限流; 2026-09-28 审计修复: 注释原写 120, 代码默认 350)
+ * @param {number} [o.now]             本轮时间戳 (毫秒), 缺省 Date.now()
  * @param {function} [o.log]
  * @returns {Promise<{results: Record<string, number>, calls: number, errors: number, budgetHit: boolean, throttled: boolean, unresolved: number}>}  results 值为毫秒时间戳
  */
@@ -103,6 +107,8 @@ async function scanV4CollectsViaLogs(o) {
   for (const [poolId, tids] of byPool) {
     if (stop()) break;
     const cur = store.pools[poolId] || (store.pools[poolId] = {});
+    // 2026-09-28 审计修复: done 是按当轮 globalFloor 定死的; lookback 加大后本轮 globalFloor 比已扫下沿 floor 更低 → 撤销 done 让阶段 B 继续补深
+    if (cur.done && Number.isFinite(cur.floor) && globalFloor <= cur.floor - 1) { cur.done = false; }
     if (cur.scannedTo && cur.scannedTo < head) {
       let from = cur.scannedTo + 1;
       while (from <= head && !stop()) {
@@ -115,7 +121,7 @@ async function scanV4CollectsViaLogs(o) {
       cur.scannedTo = head; cur.floor = head + 1; cur.done = false;
       if (stop()) break;
       const end = head, start = Math.max(globalFloor, end - blockStep + 1);
-      if (await fetchChunk(poolId, start, end)) { cur.floor = start; if (start <= globalFloor) cur.done = true; }
+      if (await fetchChunk(poolId, start, end)) { cur.floor = start; if (start <= globalFloor) { cur.done = true; cur.floorAt = globalFloor; } }   // 2026-09-28 审计修复: 记录定 done 时的 globalFloor
       save();
     }
   }
@@ -128,11 +134,11 @@ async function scanV4CollectsViaLogs(o) {
       if (stop()) break;
       const cur = store.pools[poolId];
       if (!needDeep(poolId, tids)) continue;
-      if (cur.floor - 1 < globalFloor) { cur.done = true; save(); continue; }
+      if (cur.floor - 1 < globalFloor) { cur.done = true; cur.floorAt = globalFloor; save(); continue; }   // 2026-09-28 审计修复: floorAt
       const end = cur.floor - 1, start = Math.max(globalFloor, end - blockStep + 1);
       if (!(await fetchChunk(poolId, start, end))) continue;
       cur.floor = start;
-      if (start <= globalFloor) cur.done = true;
+      if (start <= globalFloor) { cur.done = true; cur.floorAt = globalFloor; }   // 2026-09-28 审计修复: floorAt
       save();
       progressed = true;
     }
@@ -154,6 +160,18 @@ async function scanV4CollectsViaLogs(o) {
   if (Object.keys(store.blockTs).length > 5000) { // 防无限膨胀: 只留最近 2000 个块的时间戳
     const keys = Object.keys(store.blockTs).map(Number).sort((a, b) => b - a).slice(2000);
     for (const k of keys) delete store.blockTs[k];
+    save();
+  }
+  // 2026-09-28 审计修复: store.tokens 只长不清 (busy 池一段就有几十笔别人的领费) → 只永久保留「被查询过的仓」(store.watch, 30 天没再被问到即遗忘);
+  //   其它 tokenId 只留块高最新的 OTHERS_KEEP 条 (新仓在首次被问到之前的领费还能命中 —— 调用方传的是缓存过期的子集, 池游标又是共享的, 不能只留本轮这几个)
+  const nowTs = Number(o.now) || Date.now();
+  store.watch = store.watch || {};
+  for (const p of positions) store.watch[String(p.tokenId)] = nowTs;
+  for (const [tid, ts] of Object.entries(store.watch)) if (nowTs - ts > WATCH_TTL_MS) delete store.watch[tid];
+  const others = Object.keys(store.tokens).filter(t => !store.watch[t]);
+  if (others.length > OTHERS_KEEP) {
+    others.sort((a, b) => store.tokens[b] - store.tokens[a]);
+    for (const t of others.slice(OTHERS_KEEP)) delete store.tokens[t];
     save();
   }
   return { results, calls, errors, budgetHit, throttled, unresolved };

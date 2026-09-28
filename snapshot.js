@@ -22,7 +22,12 @@ const STALE_MS = 12 * 60 * 1000;   // 链缓存超过这个年龄: 记录上打 
 const KEYS = ['lp', 'idle', 'total', 'fees', 'cost', 'np', 'realized', 'collected', 'netIn'];
 
 function readJson(file, fallback) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } }
-function writeJson(file, data, pretty) { const tmp = file + '.tmp'; fs.writeFileSync(tmp, pretty ? JSON.stringify(data, null, 2) : JSON.stringify(data)); fs.renameSync(tmp, file); }
+function writeJson(file, data, pretty) {
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, pretty ? JSON.stringify(data, null, 2) : JSON.stringify(data));
+  try { fs.chmodSync(tmp, 0o600); } catch {}   // 2026-09-28 审计修复: 落盘 600 (快照含钱包地址与资产明细, 不给同机其他用户读)
+  fs.renameSync(tmp, file);
+}
 function validTz(tz) { try { new Intl.DateTimeFormat('en-CA', { timeZone: tz }); return true; } catch { return false; } }
 function loadCfg() {
   const c = { ...DEFAULT_CFG, ...readJson(CFG_FILE, {}) };
@@ -72,7 +77,8 @@ function fetchLocal(pathname, timeoutMs = 60 * 1000) {
 }
 
 // 一条链: 按范围汇总各钱包 { name, lp, idle, total, fees, cost, np, realized, collected, netIn, active, inRange }
-async function summarizeChain(chain, data, sel) {
+// prevChain = 上一条 entry 里该链的汇总 (chains[chain]); 某钱包 /pnl 失败时沿用它的 realized/collected (2026-09-28)
+async function summarizeChain(chain, data, sel, prevChain) {
   if (!data || !Array.isArray(data.wallets)) return null;
   const allow = new Set(sel.map(a => normAddr(chain, a)));
   if (!allow.size) return null;
@@ -101,6 +107,7 @@ async function summarizeChain(chain, data, sel) {
     }
   }
   // 已实现盈亏 / 累计已领费: 各钱包 /pnl 报告 (全在内存, 便宜)
+  const pnlStale = [];
   for (const addr of sel) {
     const k = normAddr(chain, addr);
     if (!wallets[k]) continue;
@@ -114,7 +121,18 @@ async function summarizeChain(chain, data, sel) {
       wallets[k].realized = any ? realized : 0;
       wallets[k].collected = collected;
       if (wallets[k].netIn == null && rep.funding && typeof rep.funding.netUSD === 'number' && !rep.funding.partial) wallets[k].netIn = rep.funding.netUSD;
-    } catch {}
+    } catch (e) {
+      // 2026-09-28 审计修复: /pnl 失败不再静默记 0 (已实现盈亏曲线会掉零): 沿用上一点该钱包的 realized/collected(/netIn) 并标 pnlStale。
+      //   cost/np 来自本轮 /positions 的活跃仓字段, 与 /pnl 无关, 保留本轮值不用旧的
+      const pw = prevChain && prevChain.wallets && prevChain.wallets[k];
+      if (pw) {
+        wallets[k].realized = Number(pw.realized) || 0;
+        wallets[k].collected = Number(pw.collected) || 0;
+        if (wallets[k].netIn == null && pw.netIn != null) wallets[k].netIn = pw.netIn;
+      }
+      pnlStale.push(k);
+      console.warn(`[snapshot] ${chain} ${k.slice(0, 10)} /pnl 失败 (${e.message}): ${pw ? '沿用上一点' : '无上一点, 记 0'}`);
+    }
   }
   const sum = { lp: 0, idle: 0, total: 0, fees: 0, cost: 0, np: 0, realized: 0, collected: 0, netIn: null, active: 0, inRange: 0, n: 0 };
   for (const e of Object.values(wallets)) {
@@ -125,7 +143,9 @@ async function summarizeChain(chain, data, sel) {
   }
   for (const k of ['lp', 'idle', 'total', 'fees', 'cost', 'np', 'realized', 'collected']) sum[k] = round2(sum[k]);
   if (sum.netIn != null) sum.netIn = round2(sum.netIn);
-  return { ...sum, dataTs: data.timestamp || 0, wallets };
+  const out = { ...sum, dataTs: data.timestamp || 0, wallets };
+  if (pnlStale.length) out.pnlStale = pnlStale;   // 2026-09-28 审计修复: 本链 /pnl 失败、沿用了上一点的钱包
+  return out;
 }
 
 let running = null, lastError = null, lastTs = 0;
@@ -137,11 +157,22 @@ async function takeSnapshot() {
 async function _take() {
   const cfg = loadCfg();
   const posData = {};   // 每链 /positions 只拉一次, 两个作用域共用
-  for (const ch of CHAINS) { try { posData[ch] = await fetchLocal(CHAIN_API[ch] + '/positions'); } catch { posData[ch] = null; } }
-  const own = await collect(cfg, posData, ch => Array.isArray(cfg.wallets[ch]) ? cfg.wallets[ch] : ownAddrs(ch));
+  for (const ch of CHAINS) {
+    try { posData[ch] = await fetchLocal(CHAIN_API[ch] + '/positions'); }
+    catch (e) { posData[ch] = null; console.warn(`[snapshot] ${ch} /positions 拉取失败: ${e.message}`); }
+  }
+  // 「上一条」只用来沿用失败链 / 失败钱包的数值: 自有取最近的 m5 (退而 hourly / days), 观察取最近的 obs.hourly (退而 obs.days)
+  const before = loadData();
+  const own = await collect(cfg, posData, ch => Array.isArray(cfg.wallets[ch]) ? cfg.wallets[ch] : ownAddrs(ch), lastEntry(before.m5, before.hourly, before.days));
+  // 观察钱包: 小时级 + 日级 (5 分钟级省掉), 字段一样 (余额也查; 开了账本的还有盈亏)
+  const obs = cfg.observe ? await collect(cfg, posData, ch => obsAddrs(ch), lastEntry(before.obs.hourly, [], before.obs.days)) : null;
+  if (!own && !obs) throw new Error('没有可记录的钱包 (没有标「自有」的钱包, 观察钱包也没数据)');
   const ts = Date.now();
   const lp = localParts(ts, cfg.tz);
+  // 2026-09-28 审计修复: 所有 await 结束后才 loadData→改→saveData (中间无 await), 与 DELETE /day/:date 的 load→save 不再交错,
+  //   不会把刚删掉的日子从旧底稿里写回 (原先 loadData 在 obs 那次 await 之前, 有丢更新窗口)
   const data = loadData();
+  let result = null;
   if (own) {
     const entry = { ts, date: lp.date, time: lp.hm, tz: cfg.tz, ...own };
     data.m5.push(entry);
@@ -149,40 +180,70 @@ async function _take() {
     const hk = lp.hour, hi = data.hourly.findIndex(e => e._h === hk), he = { ...entry, _h: hk };
     if (hi >= 0) data.hourly[hi] = he; else data.hourly.push(he);
     data.hourly = data.hourly.filter(e => ts - e.ts <= HOURLY_KEEP_MS);
-    data.days[lp.date] = { ...entry, mode: 'auto' };
+    if (dayWritable(data.days[lp.date], entry)) data.days[lp.date] = { ...entry, mode: 'auto' };
+    result = { ...entry, mode: 'auto' };
   }
-  // 观察钱包: 小时级 + 日级 (5 分钟级省掉), 字段一样 (余额也查; 开了账本的还有盈亏)
-  if (cfg.observe) {
-    const obs = await collect(cfg, posData, ch => obsAddrs(ch));
-    if (obs) {
-      const entry = { ts, date: lp.date, time: lp.hm, tz: cfg.tz, ...obs };
-      const hk = lp.hour, hi = data.obs.hourly.findIndex(e => e._h === hk), he = { ...entry, _h: hk };
-      if (hi >= 0) data.obs.hourly[hi] = he; else data.obs.hourly.push(he);
-      data.obs.hourly = data.obs.hourly.filter(e => ts - e.ts <= HOURLY_KEEP_MS);
-      data.obs.days[lp.date] = { ...entry, mode: 'auto' };
-    }
+  if (obs) {
+    const entry = { ts, date: lp.date, time: lp.hm, tz: cfg.tz, ...obs };
+    const hk = lp.hour, hi = data.obs.hourly.findIndex(e => e._h === hk), he = { ...entry, _h: hk };
+    if (hi >= 0) data.obs.hourly[hi] = he; else data.obs.hourly.push(he);
+    data.obs.hourly = data.obs.hourly.filter(e => ts - e.ts <= HOURLY_KEEP_MS);
+    if (dayWritable(data.obs.days[lp.date], entry)) data.obs.days[lp.date] = { ...entry, mode: 'auto' };
+    if (!result) result = { ...entry, mode: 'auto' };
   }
-  if (!own && !(cfg.observe && data.obs.days[lp.date] && data.obs.days[lp.date].ts === ts)) throw new Error('没有可记录的钱包 (没有标「自有」的钱包, 观察钱包也没数据)');
   saveData(data);
   lastError = null; lastTs = ts;
-  return own ? data.days[lp.date] : data.obs.days[lp.date];
+  return result;
 }
-// 按作用域汇总各链: selOf(chain) 给该链的钱包地址列表; 返回 { lp, idle, ..., chains } 或 null (一个钱包都没有)
-async function collect(cfg, posData, selOf) {
-  const chains = {}, failed = [], stale = [];
+// 2026-09-28 审计修复: 日切记录只让「完整」点覆盖 —— 本轮有 carried (沿用) 的点不覆盖当日已有的完整记录 (只进 m5/hourly);
+//   当日还没记录、或已有的那条本身也是 carried 时才写
+function dayWritable(existing, entry) {
+  if (!(entry.carried && entry.carried.length)) return true;
+  if (!existing) return true;
+  return !!(existing.carried && existing.carried.length);
+}
+// 该作用域最近的一条 entry (按 ts 最大): 先 5 分钟级, 再小时级, 再日级 (只认新版带 chains 的记录)
+function lastEntry(m5, hourly, days) {
+  const pick = arr => (Array.isArray(arr) && arr.length) ? arr.reduce((a, b) => (((b && b.ts) || 0) > ((a && a.ts) || 0) ? b : a)) : null;
+  return pick(m5) || pick(hourly) || pick(Object.values(days || {}).filter(e => e && e.chains)) || null;
+}
+// 按作用域汇总各链: selOf(chain) 给该链的钱包地址列表; prev = 该作用域上一条 entry (沿用用, 可 null)
+// 返回 { lp, idle, ..., chains, failed?, stale?, carried?, pnlStale? } 或 null (一个钱包都没有)
+async function collect(cfg, posData, selOf, prev) {
+  const chains = {}, failed = [], stale = [], carried = [];
   const tot = { lp: 0, idle: 0, total: 0, fees: 0, cost: 0, np: 0, realized: 0, collected: 0, netIn: null, active: 0, inRange: 0, n: 0 };
+  const prevChains = (prev && prev.chains && typeof prev.chains === 'object') ? prev.chains : {};
+  const addTot = s => {
+    for (const k of ['lp', 'idle', 'total', 'fees', 'cost', 'np', 'realized', 'collected', 'active', 'inRange', 'n']) tot[k] += Number(s[k]) || 0;
+    if (s.netIn != null) tot.netIn = (tot.netIn || 0) + s.netIn;
+  };
   for (const ch of CHAINS) {
     const sel = selOf(ch);
     if (!sel.length) continue;
     const d = posData[ch];
-    if (!d) { failed.push(ch); continue; }
-    const s = await summarizeChain(ch, d, sel);
+    // 2026-09-28 审计修复: 整链拉取失败 (null / 非 2xx) 或本作用域有钱包本轮抓取失败 (载荷 failedWallets / 钱包对象 _stale)
+    //   => 该链沿用上一条 entry 的数值并记 carried (原先整链失败直接不计, 总资产曲线瞬间掉一条链; 部分失败则把沿用的旧仓位当新数据记)
+    const broken = d ? failedInSel(ch, d, sel) : [];
+    if (!d) failed.push(ch);   // failed 标保留: 链整体不可达
+    if (!d || broken.length) {
+      const pc = prevChains[ch];
+      if (pc) {
+        const { stale: _omit, ...copy } = pc;   // 上一条的 stale 分钟数不再适用
+        const s = { ...copy, carried: true, carriedFrom: pc.carriedFrom || (prev && prev.ts) || 0 };
+        if (broken.length) s.failedWallets = broken;
+        chains[ch] = s; carried.push(ch); addTot(s);
+        continue;
+      }
+      if (!d) continue;   // 整链失败且无上一条可沿用: 只能不计 (与原先一致)
+      // 部分钱包失败且无上一条: 只好按载荷尽力汇总 (失败钱包带的是上轮仓位), 仍记 carried 提示不新鲜
+    }
+    const s = await summarizeChain(ch, d, sel, prevChains[ch]);
     if (!s || !s.n) continue;
+    if (broken.length) { s.carried = true; s.failedWallets = broken; carried.push(ch); }
     const ageMin = Math.round((Date.now() - (s.dataTs || 0)) / 60000);
     if (ageMin * 60000 > STALE_MS) { s.stale = ageMin; stale.push(ch); }
     chains[ch] = s;
-    for (const k of ['lp', 'idle', 'total', 'fees', 'cost', 'np', 'realized', 'collected', 'active', 'inRange', 'n']) tot[k] += s[k];
-    if (s.netIn != null) tot.netIn = (tot.netIn || 0) + s.netIn;
+    addTot(s);
   }
   if (!Object.keys(chains).length) return null;
   const entry = {};
@@ -190,7 +251,20 @@ async function collect(cfg, posData, selOf) {
   entry.active = tot.active; entry.inRange = tot.inRange; entry.n = tot.n; entry.chains = chains;
   if (failed.length) entry.failed = failed;
   if (stale.length) entry.stale = stale;
+  if (carried.length) entry.carried = carried;
+  // 2026-09-28 审计修复: 某钱包 /pnl 失败沿用了上一点 => 顶层 pnlStale: ["<chain>:<addr>", ...] (m5 精简版也带, 前端打标)
+  const pnlStale = [];
+  for (const [ch, s] of Object.entries(chains)) for (const a of (s.pnlStale || [])) pnlStale.push(`${ch}:${a}`);
+  if (pnlStale.length) entry.pnlStale = pnlStale;
   return entry;
+}
+// 载荷里「本轮抓取失败」且落在本作用域的钱包: 顶层 failedWallets (EVM 小写 / SOL base58) 或钱包对象 _stale: true
+function failedInSel(chain, d, sel) {
+  const allow = new Set(sel.map(a => normAddr(chain, a)));
+  const bad = new Set();
+  for (const a of (Array.isArray(d.failedWallets) ? d.failedWallets : [])) { const k = normAddr(chain, a); if (allow.has(k)) bad.add(k); }
+  for (const w of (Array.isArray(d.wallets) ? d.wallets : [])) { if (w && w._stale === true) { const k = normAddr(chain, w.address || ''); if (allow.has(k)) bad.add(k); } }
+  return [...bad];
 }
 
 let ticking = false;
@@ -200,7 +274,7 @@ async function tick() {
     const cfg = loadCfg();
     if (!cfg.enabled) return;
     const e = await takeSnapshot();
-    console.log(`[snapshot] ${e.date} ${e.time}: total $${e.total} (lp $${e.lp} + idle $${e.idle}), np $${e.np}, realized $${e.realized}, chains=${Object.keys(e.chains || {}).join(',')}${e.stale ? ' stale=' + e.stale.join(',') : ''}`);
+    console.log(`[snapshot] ${e.date} ${e.time}: total $${e.total} (lp $${e.lp} + idle $${e.idle}), np $${e.np}, realized $${e.realized}, chains=${Object.keys(e.chains || {}).join(',')}${e.stale ? ' stale=' + e.stale.join(',') : ''}${e.failed ? ' failed=' + e.failed.join(',') : ''}${e.carried ? ' carried=' + e.carried.join(',') : ''}${e.pnlStale ? ' pnlStale=' + e.pnlStale.length : ''}`);   // 2026-09-28 审计修复: 日志带 failed/carried/pnlStale
   } catch (e) { lastError = e.message; console.error('[snapshot] 记录失败:', e.message); }
   finally { ticking = false; }
 }
@@ -229,7 +303,7 @@ function mountSnapshot(app, adminGuard) {
     if (body.tz !== undefined) { if (!validTz(body.tz)) return res.status(400).json({ error: '无效时区' }); next.tz = body.tz; }
     const src = (body.wallets && typeof body.wallets === 'object') ? body.wallets : cur.wallets;
     for (const [ch, arr] of Object.entries(src)) { if (!CHAINS.includes(ch)) continue; if (Array.isArray(arr)) next.wallets[ch] = arr.slice(0, 60).map(a => String(a).slice(0, 64)); }
-    try { writeJson(CFG_FILE, next, true); } catch (e) { return res.status(500).json({ error: '写入失败: ' + e.message }); }
+    try { writeJson(CFG_FILE, next, true); } catch (e) { console.error('[snapshot] 配置写入失败:', e.message); return res.status(500).json({ error: '写入失败, 请查看服务日志' }); }   // 2026-09-28 审计修复: 不回显文件路径
     console.log(`[snapshot] config saved: enabled=${next.enabled}, overrides=${Object.keys(next.wallets).join(',') || '(none, 跟随自有)'}`);
     res.json(statusPayload());
   });
@@ -238,6 +312,7 @@ function mountSnapshot(app, adminGuard) {
     const data = loadData();
     const keys = Object.keys(data.days).sort();
     const days = keys.map(k => data.days[k]);
+    // 2026-09-28 审计修复: m5 只剥 chains, 顶层 failed/stale/carried/pnlStale 原样带出 (days/hourly 整条带, 含 chains[ch].carried/failedWallets/pnlStale)
     const m5 = data.m5.map(e => { const { chains, ...rest } = e; return rest; });
     // 观察作用域: 日级全部 + 小时级只带最近 7 天 (钱包多, 省流量)
     const okeys = Object.keys(data.obs.days).sort();
@@ -260,4 +335,4 @@ function mountSnapshot(app, adminGuard) {
   console.log('Snapshot mounted (/api/snapshot/*), 每 5 分钟自动记录自有钱包资金与盈亏');
 }
 
-module.exports = { mountSnapshot, _test: { takeSnapshot, summarizeChain, localParts, loadCfg, loadData, tick, statusPayload } };
+module.exports = { mountSnapshot, _test: { takeSnapshot, summarizeChain, collect, dayWritable, lastEntry, failedInSel, localParts, loadCfg, loadData, tick, statusPayload } };

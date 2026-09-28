@@ -5,17 +5,20 @@
 //   - Helius /v0/addresses/<wallet>/transactions 一次拉回解析好的交易: 钱包各 token 余额变动 (accountData.tokenBalanceChanges)、
 //     原生 SOL 变动、涉及的程序与账户列表 (instructions[].programId/accounts/data)、swap 事件
 //   - 仓位识别: 三家协议的开仓指令 (Anchor 8 字节 discriminator = sha256("global:<name>")[0..8]):
-//       Meteora DLMM initializePosition*: position = accounts[1]
+//       Meteora DLMM initializePosition / initializePosition2: position = accounts[1]; initializePositionPda / initializePositionByOperator: accounts = [payer, base, position, ...] → accounts[2] (2026-09-28 审计修复)
 //       Raydium CLMM openPosition*: personalPosition PDA = ["position", nftMint(accounts[2])]
 //       Orca Whirlpool openPosition*: position PDA = ["position", positionMint(accounts[3])] (= accounts[2])
 //     之后 加/减/领费/关仓 指令的账户列表里含该 position 即归属该仓
 //   - 成本: 钱包换币 (SWAP) 建立加权平均成本批次; 开仓/加仓 tx 的净流出按成本扣 (稳定币=面值)
 //   - 提回/手续费: 减仓/领费 tx 的净流入; 非稳定币按「时间最近的价格观测 (±3 天)」折算, 再不行按现价 (approx)
+//     (2026-09-28 审计修复: 同 tx 的观测优先; 观测离交易 > 6h 也标 approx)
 //     价格观测三来源 (同时刻按优先级): ① 本钱包双边存/取 + 仓位 tick 区间反推的池价 (Orca/Raydium, 精确中间价)
 //     ② 本钱包换币腿成交价 (含池费, 覆盖 zap 里的换币和 Meteora) ③ 纯换币 tx 的钱包净流向隐含价
 //     解析层把每条 LP 指令自己的 SPL 转账挂在指令下 (xf), zap tx 里才能把换币腿和入金腿分开; 开仓指令解出 tick 区间 (tk)
 //   - zap 找零 (入金 tx 顺带的稳定币流入) 从成本、持币基线、按币拆分三处一起扣, 否则 IL 会虚报找零那么多
 //     Raydium 的 decreaseLiquidity 把手续费和本金一起转出, 无法拆分 → 全计提回, feesUnknown
+//     (2026-09-28 审计修复) Orca collectFees*/collectReward*、Meteora claimFee*/claimReward* 指令名下的 xf 就是手续费/奖励 → 平仓 tx 里直接计 fees, 其余流入计提回
+//   - 同 tx 多仓: 按每条 LP 指令自己的 xf 归属流水, xf 解释不了的剩余才均分 (2026-09-28 审计修复, 旧版整 tx 1/N 均分)
 //   - 无常损失/净利润的现价来自 sol-adapter 每轮定价 (注入时给)
 // 结果持久化 pnl-ledger-sol.json; 只扫设置页勾选的钱包 (未单独勾选沿用「钱包资金查询」的勾选)
 // =============================================================
@@ -39,6 +42,9 @@ const FILE = path.join(__dirname, 'pnl-ledger-sol.json');
 const RAW_LIMIT = 4000;              // 交易数上限, 超过=高频钱包放弃
 const ROUND_MS = 30 * 60 * 1000;
 const SOL_NOISE = 0.15;              // LP 操作 tx 里 |ΔSOL| 小于此 = 租金/手续费噪声, 不计流水 (SOL 不是池子币时)
+                                     // 2026-09-28 审计修复: 只在该 tx 的 LP 指令 xf 里不含 WSOL 时才按它过滤; xf 有 WSOL = SOL 是真实资金腿, 小额也计
+const APPROX_OBS_MS = 6 * 3600 * 1000;   // 2026-09-28 审计修复: 价格观测离交易时刻超过 6h 即标 approx (旧版 ±3 天内都当精确价)
+const METEORA_POS_AT2 = new Set(['initializePositionPda', 'initializePositionByOperator']);   // 2026-09-28 审计修复: 这两个开仓指令账户序 [payer, base, position, ...], position 在 a[2]
 
 // 指令名 → 操作类型 (dep 入金 / wd 减仓 / col 领费 / close 关仓 / open 开仓)
 const IX = {
@@ -191,26 +197,38 @@ async function scanWallet(wallet, deadline) {
   if (W.partial) return W;
   let before = null, added = 0, pages = 0;
   // 首扫: 从最新翻到底 (done=false 时从 oldest 继续); 增量: 从最新翻到碰见已知签名
-  if (!W.done && W.oldest) before = W.oldest;
+  // 2026-09-28 审计修复: 增量扫描被预算/RPC/翻页上限打断时, 把当前分页游标落盘 W.resume; 下轮先从 resume 续扫到碰见已知签名 (补缺口),
+  //   再从最新往下; 从最新往下只有「整页全部已知」才算追平. 旧版中断后下轮从最新起步, 碰到上轮刚扫的签名就停 → 中间一段永久缺口
+  let mode = !W.done ? 'first' : (W.resume ? 'resume' : 'top');
+  if (mode === 'first' && W.oldest) before = W.oldest;
+  else if (mode === 'resume') before = W.resume;
+  const halt = (why) => { if (mode !== 'first' && before) W.resume = before; W.stopped = why; save(); return W; };   // 首扫的断点是 W.oldest, 不用 resume
   while (true) {
-    if (Date.now() > deadline) { W.stopped = 'budget'; save(); return W; }
+    if (Date.now() > deadline) return halt('budget');
     const page = await heliusPage(wallet, before);
-    if (!page) { W.stopped = 'rpc'; save(); return W; }
-    if (page.length === 0) { W.done = true; break; }
-    let hitKnown = false;
+    if (!page) return halt('rpc');
+    if (page.length === 0) {
+      if (mode === 'resume') { delete W.resume; mode = 'top'; before = null; continue; }   // 续扫翻到底 = 缺口补完
+      if (mode === 'first') W.done = true;
+      break;
+    }
+    let known = 0, fresh = 0;
     for (const t of page) {
       if (!t.signature) continue;
-      if (t.transactionError) continue;
-      if (W.txs[t.signature]) { hitKnown = true; continue; }
-      W.txs[t.signature] = parseTx(wallet, t); added++;
+      if (t.transactionError) continue;   // 失败 tx 不入库, 也不参与「整页已知」判定
+      if (W.txs[t.signature]) { known++; continue; }
+      W.txs[t.signature] = parseTx(wallet, t); added++; fresh++;
     }
     before = page[page.length - 1].signature;
     if (!W.oldest || (W.txs[before] && W.txs[before].ts <= (W.txs[W.oldest]?.ts ?? Infinity))) W.oldest = before;
     pages++;
-    if (Object.keys(W.txs).length > RAW_LIMIT) { W.partial = true; W.txs = {}; W.pos = {}; save(); return W; }
-    if (W.done && hitKnown) break;          // 增量: 碰到已知的就够了
-    if (page.length < 100) { W.done = true; break; }
-    if (pages > 60) break;
+    if (Object.keys(W.txs).length > RAW_LIMIT) { W.partial = true; W.txs = {}; W.pos = {}; delete W.resume; save(); return W; }
+    if (mode === 'first') { if (page.length < 100) { W.done = true; break; } }
+    else if (mode === 'resume') {
+      if (known > 0 || page.length < 100) { delete W.resume; mode = 'top'; before = null; }   // 续到已知区 (或到底) = 缺口补完, 转去从最新往下
+      else W.resume = before;
+    } else if ((known > 0 && fresh === 0) || page.length < 100) break;   // 整页全部已知 (或到底) = 追平
+    if (pages > 60) { if (mode === 'first') break; return halt('pages'); }   // 首扫维持原行为 (下轮从 oldest 续); 增量记 resume
     await sleep(150);
   }
   W.stopped = null; W.updatedAt = Date.now();
@@ -222,7 +240,9 @@ async function scanWallet(wallet, deadline) {
 function positionKeysOf(ix) {
   // 开仓指令 → 该仓的标识账户 (Meteora position / Raydium personalPosition PDA / Orca position PDA)
   const a = ix.acc;
-  if (ix.p === 'Meteora') return a[1] ? [a[1]] : [];
+  // 2026-09-28 审计修复: Meteora initializePositionPda / initializePositionByOperator 账户序 [payer, base, position, lbPair, owner, ...] → position = a[2];
+  //   initializePosition / initializePosition2 是 [payer, position, lbPair, owner, ...] → a[1]. 旧版一律取 a[1], 把 base 当成了仓位
+  if (ix.p === 'Meteora') { const i = METEORA_POS_AT2.has(ix.n) ? 2 : 1; return a[i] ? [a[i]] : []; }
   if (ix.p === 'Raydium') { const k = a[2] ? pda('position', a[2], PROG_ID.Raydium) : null; return k ? [k] : []; }
   if (ix.p === 'Orca') { const k = a[3] ? pda('position', a[3], PROG_ID.Orca) : null; return k ? [k] : (a[2] ? [a[2]] : []); }
   return [];
@@ -234,7 +254,7 @@ function positionKeysOf(ix) {
 //          主要用途是 zap tx (换币+开仓合一, 净流向不是价格, pr 1 不看它) 和 Meteora (没有 pr 0)
 function buildPriceObs(order, P, keys) {
   const obs = {};
-  const add = (m, ts, p, pr) => { if (p > 0 && Number.isFinite(p)) (obs[m] = obs[m] || []).push({ ts, p, pr }); };
+  const add = (m, ts, p, pr, sg) => { if (p > 0 && Number.isFinite(p)) (obs[m] = obs[m] || []).push({ ts, p, pr, s: sg }); };   // 2026-09-28 审计修复: 记下来源 tx 签名 s, 供「同 tx 观测优先」
   const dec = m => { const x = state().d.tok[m]; return x && x.decimals != null ? x.decimals : null; };
   for (const t of order) {
     for (const ix of (t.lp || [])) {
@@ -248,7 +268,7 @@ function buildPriceObs(order, P, keys) {
       if (kind === 'swap') {
         if (Math.sign(q1) === Math.sign(q2)) continue;
         const [sq, mm, mq] = STABLES[m1] ? [q1, m2, q2] : [q2, m1, q1];
-        if (Math.abs(sq) >= 5) add(mm, t.ts, Math.abs(sq / mq), 2);
+        if (Math.abs(sq) >= 5) add(mm, t.ts, Math.abs(sq / mq), 2, t.sig);
       } else if (kind === 'open' || kind === 'dep' || kind === 'wd' || kind === 'flow') {
         if (ix.p === 'Meteora' || (ix.p === 'Raydium' && kind === 'wd')) continue;   // DLMM 是 bin; Raydium 减仓把手续费混进本金, 数量比失真
         if (Math.sign(q1) !== Math.sign(q2)) continue;   // 双边同向 (都存或都取) 才是仓位数量比
@@ -257,13 +277,13 @@ function buildPriceObs(order, P, keys) {
         const aFirst = Buffer.compare(b58decode(m1) || Buffer.alloc(0), b58decode(m2) || Buffer.alloc(0)) < 0;   // 池子 A/B (token0/1) 按 mint 字节序
         const [mA, qA, dA, mB, qB, dB] = aFirst ? [m1, Math.abs(q1), d1, m2, Math.abs(q2), d2] : [m2, Math.abs(q2), d2, m1, Math.abs(q1), d1];
         const pAB = poolPriceFromAmounts(P[k].tk[0], P[k].tk[1], qA, qB, dA, dB); if (!pAB) continue;
-        if (STABLES[mB]) add(mA, t.ts, pAB, 0); else add(mB, t.ts, 1 / pAB, 0);
+        if (STABLES[mB]) add(mA, t.ts, pAB, 0, t.sig); else add(mB, t.ts, 1 / pAB, 0, t.sig);
       }
     }
     if (t._pos || !(t.swap || t.type === 'SWAP')) continue;
     let usd = 0; for (const [m, v] of Object.entries(t.fl)) if (STABLES[m]) usd += v;
     if (!usd || Math.abs(usd) < 5) continue;
-    for (const [m, q] of Object.entries(t.fl)) if (!STABLES[m] && q && Math.sign(usd) !== Math.sign(q)) add(m, t.ts, Math.abs(usd / q), 1);
+    for (const [m, q] of Object.entries(t.fl)) if (!STABLES[m] && q && Math.sign(usd) !== Math.sign(q)) add(m, t.ts, Math.abs(usd / q), 1, t.sig);
   }
   return obs;
 }
@@ -278,17 +298,25 @@ function poolPriceFromAmounts(lo, hi, qA, qB, dA, dB) {
   if (s - sa < (sb - sa) * 1e-6 || sb - s < (sb - sa) * 1e-6) return null;   // 贴边 = 实际是单边, 不可信
   return s * s * Math.pow(10, dA - dB);
 }
-function impliedPriceNear(obs, mint, ts) {
+function impliedPriceNear(obs, mint, ts, sig) {
   // 时间最近的观测 (±3 天); 同一时刻 (同一 tx) 按优先级 pr 小者胜
+  // 2026-09-28 审计修复: 同 tx (签名相同) 的观测最优先 (同一秒别的 tx 不抢); 返回 { p, d } (d = 与交易的时间差 ms), 调用方据此判 approx
+  const arr = obs[mint] || [];
   let best = null, bd = 3 * 86400000, bp = 9;
-  for (const o of (obs[mint] || [])) { const d = Math.abs(o.ts - ts); if (d < bd || (d === bd && o.pr < bp)) { bd = d; bp = o.pr; best = o.p; } }
-  return best;
+  if (sig) {
+    for (const o of arr) if (o.s === sig && o.pr < bp) { bp = o.pr; best = o.p; }
+    if (best != null) return { p: best, d: 0 };
+    bp = 9;
+  }
+  for (const o of arr) { const d = Math.abs(o.ts - ts); if (d < bd || (d === bd && o.pr < bp)) { bd = d; bp = o.pr; best = o.p; } }
+  return best == null ? null : { p: best, d: bd };
 }
-function priceAt(obs, mint, ts, cur) {
+function priceAt(obs, mint, ts, cur, sig) {
   if (STABLES[mint]) return { p: 1, approx: false };
-  const ip = impliedPriceNear(obs, mint, ts);
+  const ip = impliedPriceNear(obs, mint, ts, sig);
   const c = cur[mint] || 0;
-  if (ip && (!(c > 0) || (ip <= c * 100 && ip >= c / 100))) return { p: ip, approx: false };   // 隐含价与现价差 100 倍以上不可信
+  // 2026-09-28 审计修复: 观测离交易 > 6h 标 approx (旧版 3 天内的观测一律当精确价)
+  if (ip && (!(c > 0) || (ip.p <= c * 100 && ip.p >= c / 100))) return { p: ip.p, approx: ip.d > APPROX_OBS_MS };   // 隐含价与现价差 100 倍以上不可信
   return { p: c, approx: true };
 }
 function computeWallet(wallet, livePositions) {
@@ -298,8 +326,10 @@ function computeWallet(wallet, livePositions) {
   const order = Object.entries(W.txs).map(([sig, t]) => ({ sig, ...t })).sort((a, b) => a.ts - b.ts || a.slot - b.slot);
   // 1. 仓位集合: 开仓指令 + 当前活跃仓 (live)
   const P = W.pos;
+  const staleBase = new Set();   // 2026-09-28 审计修复: 旧版把 Meteora initializePositionPda/ByOperator 的 a[1] (base 签名账户, 不是仓位) 当仓位键落了盘, 下面清掉 (否则开仓 tx 被它分走)
   for (const t of order) for (const ix of (t.lp || [])) {
     if (IX[ix.p][ix.n] !== 'open') continue;
+    if (ix.p === 'Meteora' && METEORA_POS_AT2.has(ix.n) && ix.acc[1]) staleBase.add(ix.acc[1]);
     for (const k of positionKeysOf(ix)) { P[k] = P[k] || { p: ix.p, openTs: t.ts, evs: 0 }; if (!P[k].openTs) P[k].openTs = t.ts; if (ix.tk && !P[k].tk) P[k].tk = ix.tk; }
   }
   const liveKeys = new Set();
@@ -309,23 +339,42 @@ function computeWallet(wallet, livePositions) {
     P[k] = P[k] || { p: p.platform || 'Meteora', openTs: p.createdAt || 0, evs: 0 };
     if (!P[k].tk && P[k].p !== 'Meteora' && Number.isFinite(p.tickLower) && Number.isFinite(p.tickUpper) && p.tickLower < p.tickUpper) P[k].tk = [p.tickLower, p.tickUpper];   // 开仓不在扫描窗内的活跃仓, 区间取链上
   }
+  for (const k of staleBase) if (P[k] && !liveKeys.has(k)) delete P[k];
   const keys = Object.keys(P);
   for (const t of order) { const src = W.txs[t.sig]; src._pos = (t.lp || []).some(ix => keys.some(k => ix.acc.includes(k))) ? 1 : 0; t._pos = src._pos; }
   const obs = buildPriceObs(order, P, keys);
   // 2. 时间线重放
   const lots = {};
-  const consume = (mint, q, ts) => {
+  const consume = (mint, q, ts, sig) => {   // 2026-09-28 审计修复: 带上 tx 签名 (同 tx 观测优先)
     if (STABLES[mint]) return { cost: q, approx: false };
     const L = lots[mint];
     if (L && L.q > 0) {
       if (L.q >= q * 0.999999) { const c = L.c * Math.min(1, q / L.q); L.q -= q; L.c -= c; if (L.q < 1e-12) { L.q = 0; L.c = 0; } return { cost: c, approx: !!L.ax }; }
-      const c = L.c, ex = q - L.q; L.q = 0; L.c = 0; const pr = priceAt(obs, mint, ts, cur); return { cost: c + ex * pr.p, approx: true };
+      const c = L.c, ex = q - L.q; L.q = 0; L.c = 0; const pr = priceAt(obs, mint, ts, cur, sig); return { cost: c + ex * pr.p, approx: true };
     }
-    const pr = priceAt(obs, mint, ts, cur); return { cost: q * pr.p, approx: true };
+    const pr = priceAt(obs, mint, ts, cur, sig); return { cost: q * pr.p, approx: true };
   };
   const addLot = (mint, q, c, ax) => { if (STABLES[mint] || !(q > 0)) return; const L = lots[mint] || (lots[mint] = { q: 0, c: 0, ax: false }); L.q += q; L.c += c; if (ax) L.ax = true; };
   const C = {};
   const cOf = k => C[k] || (C[k] = { cost: 0, ret: 0, fees: 0, a: {}, cb: {}, n: 0, approx: false, feesUnknown: false, lastTs: 0, closed: false, mints: {} });
+  // 2026-09-28 审计修复: 本 tx 每条仓位指令 (非 swap/aux) 名下的 xf 按仓归集 —— xfBy[k][mint] = 净额, colIn[k][mint] = 领费/奖励指令的流入,
+  //   wdNoXf = 有减仓指令却没挂到任何转账的仓 (多半经包装程序中转, 它的 xf 不可信); 一条指令含多个仓时按仓数均分
+  const ixFlows = (t, ops) => {
+    const xfBy = new Map(), colIn = new Map(), wdNoXf = new Set();
+    const bump = (map, k, m, q) => { const o = map.get(k) || map.set(k, {}).get(k); o[m] = (o[m] || 0) + q; };
+    for (const ix of (t.lp || [])) {
+      const kind = IX[ix.p][ix.n] || 'flow';
+      if (kind === 'aux' || kind === 'swap') continue;
+      const ks = [...ops.keys()].filter(k => ix.acc.includes(k) && P[k].p === ix.p);
+      if (!ks.length) continue;
+      if (!ix.xf || !ix.xf.length) { if (kind === 'wd') for (const k of ks) wdNoXf.add(k); continue; }
+      for (const k of ks) for (const [m, q] of ix.xf) {
+        bump(xfBy, k, m, q / ks.length);
+        if (kind === 'col' && q > 0) bump(colIn, k, m, q / ks.length);
+      }
+    }
+    return { xfBy, colIn, wdNoXf };
+  };
   for (const t of order) {
     // 本 tx 涉及的仓位 + 操作类型
     const ops = new Map();   // key -> Set(kind)
@@ -338,57 +387,93 @@ function computeWallet(wallet, livePositions) {
     const fl = { ...t.fl };
     const solAmt = t.sol + (fl[WSOL] || 0);
     delete fl[WSOL];
-    if (Math.abs(solAmt) >= SOL_NOISE || (!t.lp && Math.abs(solAmt) > 0.001)) fl[WSOL] = solAmt;
+    // 2026-09-28 审计修复: 本 tx 的 LP 指令 xf 里有 WSOL = SOL 是真实资金腿 (SOL 对池存取、zap 换币), 小额也计; 只有 xf 不含 WSOL 时才按 SOL_NOISE 当租金/手续费噪声滤掉
+    const lpWsol = (t.lp || []).some(ix => (ix.xf || []).some(([m]) => m === WSOL));
+    if ((lpWsol && Math.abs(solAmt) > 1e-9) || Math.abs(solAmt) >= SOL_NOISE || (!t.lp && Math.abs(solAmt) > 0.001)) fl[WSOL] = solAmt;
     const outs = Object.entries(fl).filter(([, v]) => v < 0).map(([m, v]) => [m, -v]);
     const ins = Object.entries(fl).filter(([, v]) => v > 0);
     if (ops.size) {
-      const kinds = new Set(); for (const set of ops.values()) for (const k of set) kinds.add(k);
-      const share = 1 / ops.size;
-      let outCost = 0, ax = false; const outCostBy = {};
-      for (const [m, q] of outs) { const r = consume(m, q, t.ts); outCost += r.cost; outCostBy[m] = r.cost; if (r.approx) ax = true; }
-      let inVal = 0, inAx = false; const inValBy = {};
-      for (const [m, q] of ins) { const pr = priceAt(obs, m, t.ts, cur); inValBy[m] = q * pr.p; inVal += inValBy[m]; if (pr.approx) inAx = true; }
+      const { xfBy, colIn, wdNoXf } = ixFlows(t, ops);
+      // 2026-09-28 审计修复 (同 tx 多仓): 旧版整 tx 钱包净流水按 1/N 均分 (一平一开的调仓 tx 会把 A 的提回分一半给 B, 同币种还会相抵成 0);
+      //   现按每条 LP 指令自己的 xf 归属; xf 解释不了的剩余 (原生 SOL 租金、非 LP 程序的换币、没解出 xf 的指令) 才均分 —— 给没有 xf 的仓, 都有 xf 时给全部仓.
+      //   单仓 tx 维持原口径: 整 tx 钱包净流水 (含原生 SOL, zap 的换币腿自然相抵)
+      let perPos = null;
+      if (ops.size > 1) {
+        const all = [...ops.keys()];
+        perPos = new Map(all.map(k => [k, { ...(xfBy.get(k) || {}) }]));
+        const withXf = all.filter(k => xfBy.has(k)), noXf = all.filter(k => !xfBy.has(k));
+        const tgt = noXf.length ? noXf : all;
+        const mints = new Set([...Object.keys(fl), ...withXf.flatMap(k => Object.keys(xfBy.get(k)))]);
+        for (const m of mints) {
+          const w = fl[m] || 0; let sx = 0, sa = 0;
+          for (const k of withXf) { const v = xfBy.get(k)[m] || 0; sx += v; sa += Math.abs(v); }
+          const r = w - sx;
+          if (Math.abs(r) <= 1e-9 + 1e-6 * Math.max(Math.abs(w), sa)) continue;   // 浮点残差
+          for (const k of tgt) perPos.get(k)[m] = (perPos.get(k)[m] || 0) + r / tgt.length;
+        }
+      }
       for (const [k, set0] of ops) {
         const c = cOf(k);
+        const pf = perPos && perPos.get(k);
+        const o = pf ? Object.entries(pf).filter(([, v]) => v < -1e-12).map(([m, v]) => [m, -v]) : outs;
+        const i = pf ? Object.entries(pf).filter(([, v]) => v > 1e-12) : ins;
+        let outCost = 0, ax = false; const outCostBy = {};
+        for (const [m, q] of o) { const r = consume(m, q, t.ts, t.sig); outCost += r.cost; outCostBy[m] = r.cost; if (r.approx) ax = true; }
+        let inAx = false; const px = {};
+        for (const [m] of i) { const pr = priceAt(obs, m, t.ts, cur, t.sig); px[m] = pr.p; if (pr.approx) inAx = true; }
+        const val = arr => arr.reduce((sum, [m, q]) => sum + q * (px[m] || 0), 0);
         c.evs++; if (t.ts > c.lastTs) c.lastTs = t.ts;
-        for (const [m] of outs) c.mints[m] = 1; for (const [m] of ins) c.mints[m] = 1;
+        for (const [m] of o) c.mints[m] = 1; for (const [m] of i) c.mints[m] = 1;
         // 有名字的操作优先; 只有 flow (没对上名字 / rebalance) 时按净流向判: 只出=入金, 只进=减仓(或 COLLECT_FEES 类型=领费), 有进有出=调仓
         const named = new Set([...set0].filter(x => x !== 'flow'));
-        const set = named.size ? named : new Set(outs.length && !ins.length ? ['dep'] : (ins.length && !outs.length ? [t.type === 'COLLECT_FEES' ? 'col' : 'wd'] : (outs.length && ins.length ? ['dep', 'wd'] : [])));
-        if (set.has('open') || set.has('dep')) {
-          c.cost += outCost * share; c.n++; if (ax) c.approx = true;
-          for (const [m, q] of outs) { c.a[m] = (c.a[m] || 0) + q * share; const cb = c.cb[m] || (c.cb[m] = { q: 0, cost: 0 }); cb.q += q * share; cb.cost += (outCostBy[m] || 0) * share; }
-          if (!set.has('wd') && !set.has('close')) {   // 入金 tx 顺带的流入 (zap 找零): 成本、持币基线 a、按币拆分 cb 三处一起扣 (只扣成本会让 IL 虚报找零那么多)
-            c.cost -= inVal * share;
-            for (const [m, q] of ins) { if (!(Math.abs(inValBy[m]) > 0)) continue; /* 仓位 NFT (+1, 无价) 之类不算找零 */ c.a[m] = (c.a[m] || 0) - q * share; const cb = c.cb[m] || (c.cb[m] = { q: 0, cost: 0 }); cb.q -= q * share; cb.cost -= inValBy[m] * share; }
+        const set = named.size ? named : new Set(o.length && !i.length ? ['dep'] : (i.length && !o.length ? [t.type === 'COLLECT_FEES' ? 'col' : 'wd'] : (o.length && i.length ? ['dep', 'wd'] : [])));
+        const isDep = set.has('open') || set.has('dep'), isOut = set.has('wd') || set.has('close'), hasCol = set.has('col');
+        // 2026-09-28 审计修复 (平仓领费拆分): Orca collectFees*/collectReward*、Meteora claimFee*/claimReward* 指令名下的 xf 就是手续费/奖励 → 直接计 fees,
+        //   同 tx 的 decrease/remove 等其余流入计 ret. 旧版 tx 里只要有减仓/关仓就全计 ret + feesUnknown (平仓几乎都显示「不含已领」).
+        //   Raydium decreaseLiquidity 把费和本金一起转出 → 仍 unknown; 本仓的减仓指令没有 xf (经包装程序中转, 转账都挂到最后一条 LP 指令下) → 不拆, 仍 unknown
+        let feeIns = [], restIns = i, split = false;
+        if (hasCol) {
+          if (!isDep && !isOut) { feeIns = i; restIns = []; }   // 只领费 (原口径): 流入全是手续费/奖励
+          else if (P[k].p !== 'Raydium' && colIn.has(k) && !wdNoXf.has(k)) {
+            const have = Object.fromEntries(i);
+            feeIns = Object.entries(colIn.get(k)).map(([m, q]) => [m, Math.min(q, have[m] || 0)]).filter(([, q]) => q > 0);   // 与本仓净流入取小 (同 tx 复投会把领到的费又存回去)
+            const fm = Object.fromEntries(feeIns);
+            restIns = i.map(([m, q]) => [m, q - (fm[m] || 0)]).filter(([, q]) => q > 1e-12);
+            split = true;
           }
         }
-        if (set.has('wd') || set.has('col') || set.has('close')) {
-          const onlyCol = set.has('col') && !set.has('wd') && !set.has('close') && !set.has('dep');
-          if (onlyCol) { c.fees += inVal * share; }
-          else {
-            c.ret += inVal * share;
-            if (P[k].p === 'Raydium' || set.has('col')) c.feesUnknown = true;   // 本金与手续费一起转出, 拆不开
-            for (const [m, q] of ins) c.a[m] = (c.a[m] || 0) - q * share;
+        if (isDep) {
+          c.cost += outCost; c.n++; if (ax) c.approx = true;
+          for (const [m, q] of o) { c.a[m] = (c.a[m] || 0) + q; const cb = c.cb[m] || (c.cb[m] = { q: 0, cost: 0 }); cb.q += q; cb.cost += outCostBy[m] || 0; }
+          if (!isOut) {   // 入金 tx 顺带的流入 (zap 找零): 成本、持币基线 a、按币拆分 cb 三处一起扣 (只扣成本会让 IL 虚报找零那么多); 2026-09-28: 领费部分 feeIns 不当找零
+            for (const [m, q] of restIns) { const v = q * (px[m] || 0); if (!(Math.abs(v) > 0)) continue; /* 仓位 NFT (+1, 无价) 之类不算找零 */ c.cost -= v; c.a[m] = (c.a[m] || 0) - q; const cb = c.cb[m] || (c.cb[m] = { q: 0, cost: 0 }); cb.q -= q; cb.cost -= v; }
           }
+        }
+        if (isOut || hasCol) {
+          c.fees += val(feeIns);
+          if (isOut) {
+            c.ret += val(restIns);
+            if (P[k].p === 'Raydium' || (hasCol && !split)) c.feesUnknown = true;   // 本金与手续费一起转出, 拆不开
+            for (const [m, q] of restIns) c.a[m] = (c.a[m] || 0) - q;   // 持币基线只扣本金 (手续费不是存进去的币)
+          } else if (isDep && !split) c.feesUnknown = true;   // 2026-09-28 审计修复: 领费+入金 (复投) 拆不开: 流入已在上面按找零扣了成本, 不再重复计 ret (旧版成本、提回各记一次)
           if (inAx) c.approx = true;
-          for (const [m, q] of ins) addLot(m, q * share, q * share * priceAt(obs, m, t.ts, cur).p, true);
+          for (const [m, q] of i) addLot(m, q, q * (px[m] || 0), true);
         }
         if (set.has('close')) { c.closed = true; c.closeTs = t.ts; }
       }
       continue;
     }
-    // 普通换币 / 转账
+    // 普通换币 / 转账 (2026-09-28 审计修复: 定价同样带 tx 签名, 同 tx 观测优先)
     if (outs.length && ins.length) {
       let outCost = 0, ax = false;
-      for (const [m, q] of outs) { const r = consume(m, q, t.ts); outCost += r.cost; if (r.approx) ax = true; }
+      for (const [m, q] of outs) { const r = consume(m, q, t.ts, t.sig); outCost += r.cost; if (r.approx) ax = true; }
       let inVal = 0; const vals = [];
-      for (const [m, q] of ins) { const pr = priceAt(obs, m, t.ts, cur); vals.push([m, q, q * pr.p]); inVal += q * pr.p; }
+      for (const [m, q] of ins) { const pr = priceAt(obs, m, t.ts, cur, t.sig); vals.push([m, q, q * pr.p]); inVal += q * pr.p; }
       for (const [m, q, v] of vals) addLot(m, q, inVal > 0 ? outCost * v / inVal : outCost / ins.length, ax);
     } else if (ins.length) {
-      for (const [m, q] of ins) { const pr = priceAt(obs, m, t.ts, cur); addLot(m, q, q * pr.p, !STABLES[m]); }
+      for (const [m, q] of ins) { const pr = priceAt(obs, m, t.ts, cur, t.sig); addLot(m, q, q * pr.p, !STABLES[m]); }
     } else {
-      for (const [m, q] of outs) consume(m, q, t.ts);
+      for (const [m, q] of outs) consume(m, q, t.ts, t.sig);
     }
   }
   // 3. 收官
@@ -401,7 +486,9 @@ function computeWallet(wallet, livePositions) {
     const nm = m => (sym[m] && sym[m].symbol) || STABLES[m] || (m === WSOL ? 'SOL' : m.slice(0, 4) + '…');
     const live = liveKeys.has(k);
     let status = live ? 'active' : (c.closed ? 'closed' : (c.ret > 0 || c.evs > 1 ? 'closed' : 'active'));
-    p.c = { cost: c.cost, ret: c.ret, fees: c.fees, a: c.a, cb: c.cb, n: c.n, approx: c.approx, feesUnknown: c.feesUnknown, openTs: p.openTs || 0, closeTs: status === 'closed' ? (c.closeTs || c.lastTs) : 0, status, note: !live && !c.closed && status === 'closed' ? 'empty' : '', pair: top.length === 2 ? `${nm(top[0])}/${nm(top[1])}` : (top[0] ? nm(top[0]) : '') , mints: mints };
+    // 2026-09-28 审计修复: 不在活跃缓存、却既没提回也没领过费 = 退出 tx 没被捕获 (或刚开仓还没进缓存) → note 'unseen' (报告里净利润置空, 不记 −成本 的假亏)
+    const unseen = !live && !(c.ret > 0) && !(c.fees > 0);
+    p.c = { cost: c.cost, ret: c.ret, fees: c.fees, a: c.a, cb: c.cb, n: c.n, approx: c.approx, feesUnknown: c.feesUnknown, openTs: p.openTs || 0, closeTs: status === 'closed' ? (c.closeTs || c.lastTs) : 0, status, note: unseen ? 'unseen' : (!live && !c.closed && status === 'closed' ? 'empty' : ''), pair: top.length === 2 ? `${nm(top[0])}/${nm(top[1])}` : (top[0] ? nm(top[0]) : '') , mints: mints };
   }
   W.lots = Object.fromEntries(Object.entries(lots).filter(([, L]) => L.q > 1e-9).map(([m, L]) => [m, { q: L.q, c: L.c, ax: L.ax }]));
   W.computedAt = Date.now();
@@ -468,11 +555,16 @@ function walletReport(wallet, liveWallet, useLedger = true) {   // useLedger=fal
       if (live) { out.positions.push(rowLive(k, live)); continue; }
       const c = P.c;
       const net = c.ret + c.fees - c.cost;
+      // 2026-09-28 审计修复: 不在当前活跃缓存的仓, 状态沿用账本 c.status (刚开仓 / 缓存暂缺时是 active), 不再一律写死 closed;
+      //   没提回也没领过费 → unseen, 净利润置空 (同 EVM rowFromLedger); 账本判 active 但缓存里没有 = 现值未知, 净利润同样置空
+      const status = c.status === 'active' ? 'active' : 'closed';
+      const unseen = !(c.ret > 0) && !(c.fees > 0);
+      const noNet = unseen || status === 'active';
       out.positions.push({
         key: k, protocol: PROTO[P.p] || P.p, platform: P.p, tokenId: k.slice(0, 8), pair: c.pair, feeLabel: null,
-        status: 'closed', note: c.note, inRange: null, openTs: c.openTs, closeTs: c.closeTs, source: 'ledger',
+        status, note: status === 'active' ? '' : (unseen ? 'unseen' : c.note), inRange: null, openTs: c.openTs, closeTs: status === 'active' ? 0 : c.closeTs, source: 'ledger',
         costUSD: c.cost, costApprox: c.approx, costBy: c.cb || null, valueUSD: 0, pendingFeesUSD: 0, collectedFeesUSD: c.fees, withdrawnUSD: c.ret,
-        hodlValueUSD: null, ilUSD: null, netProfitUSD: c.cost > 0 ? net : null, netProfitPct: c.cost > 0 ? net / c.cost * 100 : null, feesUnknown: c.feesUnknown,
+        hodlValueUSD: null, ilUSD: null, netProfitUSD: c.cost > 0 && !noNet ? net : null, netProfitPct: c.cost > 0 && !noNet ? net / c.cost * 100 : null, feesUnknown: c.feesUnknown,
         tokens: (c.mints || []).map(m => ({ address: m, symbol: (sym[m] && sym[m].symbol) || STABLES[m] || (m === WSOL ? 'SOL' : m.slice(0, 4) + '…') })),
       });
     }
@@ -482,4 +574,4 @@ function walletReport(wallet, liveWallet, useLedger = true) {   // useLedger=fal
   return out;
 }
 
-module.exports = { init, enabled, runQueue, positionPnl, walletStatus, walletReport, ROUND_MS, _state: state, _test: { parseTx, computeWallet, buildPriceObs, poolPriceFromAmounts } };
+module.exports = { init, enabled, runQueue, positionPnl, walletStatus, walletReport, ROUND_MS, _state: state, _test: { parseTx, computeWallet, buildPriceObs, poolPriceFromAmounts, scanWallet, positionKeysOf, impliedPriceNear, priceAt } };   // 2026-09-28 审计修复: 多导出几个给独立脚本验证

@@ -109,9 +109,13 @@ function ledgerState(chainId) {
   }
   return state[chainId];
 }
+const BTS_MAX = 20000;   // 块时间戳缓存上限: 超过就裁掉最旧 (块号最小) 的一半, 只是缓存, 缺了按需重取
 function save(chainId) {
   const st = ledgerState(chainId);
   try {
+    // 2026-09-28 审计修复: bts 无上限增长 (每个涉及块一条) → 超 20000 条裁掉最旧一半
+    const bks = Object.keys(st.d.bts || {});
+    if (bks.length > BTS_MAX) { bks.sort((a, b) => Number(a) - Number(b)); for (const k of bks.slice(0, Math.floor(bks.length / 2))) delete st.d.bts[k]; }
     const tmp = st.file + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(st.d));
     fs.renameSync(tmp, st.file);
@@ -259,6 +263,7 @@ async function scanWalletAnkr(chainId, addr, deadline) {
     token = r.nextPageToken || null; pages++;
     if (raw > RAW_LIMIT) { W.partial = true; W.txs = {}; W.pos = {}; W.updatedAt = Date.now(); console.log(`[${chainId}] pnl-ledger ${addr.slice(0, 10)}: Transfer 超上限, 高频钱包放弃`); return W; }
   } while (token && pages < 200);
+  if (token) { W.stopped = 'budget'; return W; }   // 2026-09-28 审计修复: 页数触顶还有下一页 = 本段没翻完, 不推进游标 (原来照常推进会留永久缺口)
   // B. 钱包发的交易 + 日志
   token = null; pages = 0;
   do {
@@ -305,6 +310,7 @@ async function scanWalletAnkr(chainId, addr, deadline) {
     }
     token = r.nextPageToken || null; pages++;
   } while (token && pages < 500);
+  if (token) { W.stopped = 'budget'; return W; }   // 2026-09-28 审计修复: 同上, B 段触顶不推进游标
   for (const t of Object.values(W.txs)) if (t.b <= to && !t.r) t.r = 1;         // 只在 A 段出现的 tx (第三方打款) 没有仓位操作
   W.scannedTo = to; W.stopped = null; W.updatedAt = Date.now();
   return W;
@@ -396,10 +402,17 @@ async function ensurePositions(chainId, addr, W, livePositions, deadline) {
     const key = `${e.k}-${e.id}`;
     const P = W.pos[key] || (W.pos[key] = { k: e.k, id: e.id, evs: [], evTo: 0 });
     if (e.dir === 'mint') { P.mb = e.b; P.mtx = e.h; }
-    else if (e.dir === 'in') { P.inB = e.b; P.outB = 0; P.burnB = 0; if (!P.mb) { P.mb = e.b; P.mtx = P.mtx || e.h; } }
+    // 2026-09-28 审计修复: 转入 (in) 不再把转账块/转账 tx 冒充 mint 块/mint tx —— 转账回执里没有池子 Mint/ModifyLiquidity, spec 永远解不出,
+    //   一个转入的已关闭仓就让整个钱包永远「未就绪」; 留空让下面 mintBlockFromScan/findMintEvent/findMintTx 去拿真 mint
+    else if (e.dir === 'in') {
+      P.inB = e.b; P.outB = 0; P.burnB = 0;
+      if (!P.spec && P.mb === e.b) { P.mb = 0; delete P.mtx; delete P.mts; }   // 旧版落盘的「转账块冒充 mint 块」作废, 下面重找真 mint
+    }
     else if (e.dir === 'out') { P.outB = e.b; }
     else if (e.dir === 'burn') { P.burnB = e.b; P.burnTx = e.h; }
   }
+  // 2026-09-28 审计修复: live 标记每轮重置 (原来置 1 后永不清, 已关闭仓一直被当活跃); 只在拿到了看板活跃仓数据 (数组) 时重置, 主流程缓存未就绪 (undefined) 时沿用上轮
+  if (Array.isArray(livePositions)) for (const P of Object.values(W.pos)) P.live = 0;
   for (const p of livePositions || []) {
     const k = p.dex === 'pancake' ? 'pcs' : (p.protocol === 'V4' ? 'v4' : 'v3');
     const key = `${k}-${p.tokenId}`;
@@ -412,17 +425,17 @@ async function ensurePositions(chainId, addr, W, livePositions, deadline) {
     if (Date.now() > deadline) break;
     try {
       const contract = npmOf(cfg, P.k);
-      if (!P.mb) {
-        if (extra[chainId]) continue;   // 外注册链 (bsc): mint 块只能来自流水里的 NFT 事件, 没有就等下轮
+      if (!P.mb && !extra[chainId]) {   // 外注册链 (bsc): mint 块只能来自流水里的 NFT 事件, 没有就等下轮
         P.mb = E.mintBlockFromScan(chainId, contract, P.id) || 0;
         if (!P.mb) { const m = await E.findMintEvent(chainId, contract, P.id); if (m) P.mb = m.block; }
-        if (!P.mb) continue;
       }
-      if (!P.mtx && !P.spec) P.mtx = await findMintTx(chainId, contract, P.id, P.mb);
+      // 2026-09-28 审计修复: 转入仓找不到真 mint (bsc 不扫链 / 倒扫失败) 但看板活跃仓给了池子 → 用转入块顶替继续补元数据, 不再整仓跳过
+      if (!P.mb && !(P.inB && P.spec)) continue;
+      if (P.mb && !P.mtx && !P.spec) P.mtx = await findMintTx(chainId, contract, P.id, P.mb);
       if (!P.spec && P.mtx) await resolveFromMintTx(chainId, P, W);
       if (!P.spec) continue;
       await poolMeta(chainId, P.k, P.spec);
-      if (!P.mts) P.mts = await blockTs(chainId, P.mb);
+      if (!P.mts) P.mts = await blockTs(chainId, P.mb || P.inB);
       if (P.burnB && !P.burnTs) P.burnTs = await blockTs(chainId, P.burnB);
       if (P.outB && !P.outTs) P.outTs = await blockTs(chainId, P.outB);
     } catch (e) {
@@ -546,12 +559,13 @@ async function scanV4Events(chainId, deadline) {
         const from = Math.min(...early.map(P => P.mb));
         const r = await scanAdaptive(chainId, filter, from, pool.from - 1, deadline);
         if (r.scannedTo >= pool.from - 1) {
-          for (const P of newIds) pool.wanted[P.id] = 1;
-          ingest(r.logs, r.scannedTo);
+          // 2026-09-28 审计修复: 补扫成功先不置 wanted (原来这里把全部 newIds 置 wanted, 下面区间内重扫一旦失败, 下轮 newIds 就不含它们,
+          //   [旧 from, to] 里的事件永远漏掉); 用 onlyIds 收本批 id 的事件, wanted 留给区间内重扫成功后再置
+          ingest(r.logs, r.scannedTo, new Set(newIds.map(P => P.id)));
           pool.from = from;
         } else { complete = false; continue; }
       }
-      const inside = newIds.filter(P => P.mb >= pool.from && P.mb <= pool.to);
+      const inside = newIds.filter(P => !pool.wanted[P.id] && P.mb >= pool.from && P.mb <= pool.to);   // 含刚补扫过的 early 仓: [旧 from, to] 段还没为它们扫过
       if (inside.length) {
         const from = Math.min(...inside.map(P => P.mb));
         const only = new Set(inside.map(P => P.id));
@@ -638,8 +652,31 @@ async function usdFromPool(chainId, meta, sqrt, block, ts) {
   }
   return null;
 }
+// 2026-09-28 审计修复: 取价异常日志 (原来 pxAt 的 catch 是空的, E.poolPriceNearBlock 没注入的 TypeError 让整链历史价全灭却一行日志都没有)
+//   同 (链 + 错误消息) 每小时最多一条; 非 RPC 类错误 (TypeError / ReferenceError = 代码问题) 一定打, 且带出错位置
+const PX_ERR_LOG_MS = 3600 * 1000;
+const pxErrLast = {};
+function logPxErr(chainId, e, where) {
+  const msg = String((e && e.message) || e || 'unknown').slice(0, 120);
+  const progErr = e instanceof TypeError || e instanceof ReferenceError;
+  const k = chainId + '|' + msg;
+  const now = Date.now();
+  if (pxErrLast[k] && now - pxErrLast[k] < PX_ERR_LOG_MS) return progErr;
+  pxErrLast[k] = now;
+  const at = progErr ? ' @ ' + String((e && e.stack) || '').split('\n')[1]?.trim().slice(0, 100) : '';
+  console.error(`[${chainId}] pnl-ledger 取价异常${progErr ? ' (代码错误, 非 RPC)' : ''}: ${where} ${msg}${at}`);
+  return progErr;
+}
+// 池子两侧都不是稳定币/原生币 → usdFromPool 结构性不可定价 (不是限流/RPC 抖动), 单独归类
+function poolStructural(cfg, meta) {
+  const a0 = meta.t0.address, a1 = meta.t1.address, wn = low(cfg.wrappedNative);
+  return !cfg.stables[a0] && !cfg.stables[a1] && a0 !== wn && a1 !== wn;
+}
+const STRUCT_RETRY_MS = 24 * 3600 * 1000;
+const structLogged = new Set();
 // 某池某块的两侧美元价 (持久缓存 st.d.px): { p0, p1, sq, ts }
 //   缓存三态: 定价完成 {p0,p1,sq,ts} / 池价到手但美元没换成 {sq,ts} (ETH 价暂缺, 下轮只补美元, 不占冷却) / 池价拿不到 {f} (空池/边界价, 6h 后再试)
+//   2026-09-28 加第四态 {f, structural:true}: 池子两侧都不是稳定币/原生币, 结构性不可定价, 24h 冷却, 不计 pxMiss/transient
 async function pxAt(chainId, spec, block) {
   const st = ledgerState(chainId);
   const key = `${spec}:${block}`;
@@ -647,11 +684,21 @@ async function pxAt(chainId, spec, block) {
   if (c && c.p0 != null) { if (sqrtSane(c.sq)) return c; delete st.d.px[key]; c = null; }   // 旧缓存里的边界值作废重取
   const meta = st.d.pools[spec];
   if (!meta) return null;
+  // 2026-09-28 审计修复: 结构性不可定价的池 (无稳定币/原生币一侧) 不再当「暂时性缺价」无限重试: 标 structural, 24h 冷却, 日志一次
+  if (poolStructural(cfgOf(chainId), meta)) {
+    if (c && c.f && c.structural && Date.now() - c.f < STRUCT_RETRY_MS) return null;
+    if (!structLogged.has(spec)) { structLogged.add(spec); console.log(`[${chainId}] pnl-ledger 池 ${meta.t0.symbol}/${meta.t1.symbol} (${spec.slice(0, 10)}) 两侧都不是稳定币/原生币, 无法独立定价, 涉及事件标未定价`); }
+    st.d.px[key] = { f: Date.now(), structural: true };
+    return null;
+  }
   let sqrt = null, ts = null;
   if (c && c.sq && sqrtSane(c.sq)) { sqrt = BigInt(c.sq); ts = c.ts; }
   else {
-    if (c && c.f && Date.now() - c.f < PX_RETRY_MS) return null;
-    try { sqrt = await sqrtAtBlock(chainId, spec, meta, block); if (sqrt && sqrt > 0n) ts = st.d.bts[block] || await blockTs(chainId, block); } catch {}
+    if (c && c.f && Date.now() - c.f < (c.structural ? STRUCT_RETRY_MS : PX_RETRY_MS)) return null;
+    let progErr = false;
+    try { sqrt = await sqrtAtBlock(chainId, spec, meta, block); if (sqrt && sqrt > 0n) ts = st.d.bts[block] || await blockTs(chainId, block); }
+    catch (e) { progErr = logPxErr(chainId, e, `${spec.slice(0, 10)}@${block}`); }   // 2026-09-28 审计修复: 不再静默吞掉
+    if (progErr) return null;   // 代码错误不是这块的问题, 不写 6h 冷却 (否则修好重启后还要白等 6h)
     if (!sqrt || !sqrtSane(sqrt) || !ts) { st.d.px[key] = { f: Date.now() }; return null; }   // 空池/边界价当没取到
     if (!st.d.bts[block]) st.d.bts[block] = ts;
   }
@@ -679,24 +726,34 @@ function buildRefPools(chainId) {
   for (const arr of Object.values(ref)) arr.sort((a, b) => b.score - a.score);
   return ref;
 }
-// 历史价合理性: 与当前价 (上轮定价) 偏离超过 100 倍 → 当无效 (死池/流动性极薄的池 slot0 是随便什么数)
+// 历史价合理性: 与当前价 (上轮定价) 偏离超过 20 倍 → 当无效 (死池/流动性极薄的池 slot0 是随便什么数)
+//   2026-09-28 审计修复: 带宽 100 倍收紧到 20 倍 (1e40 那种离谱值 100 倍也拦得住, 但十几倍的死池残价拦不住)
+const SANE_BAND = 20;
 function priceSane(chainId, token, p) {
   if (!(p > 0)) return false;
   const st = ledgerState(chainId);
   const cur = ((st.d.cur || {})[token] || {}).p || (stateOf(chainId).lastUsdPrices || {})[token] || 0;
-  return !(cur > 0) || (p <= cur * 100 && p >= cur / 100);
+  return !(cur > 0) || (p <= cur * SANE_BAND && p >= cur / SANE_BAND);
 }
-// 账本涉及的 token 现价 (coingecko 按合约地址批量, 6h 缓存): 给 priceSane 当参考 —— 上轮定价只覆盖活跃仓的 token,
+// 账本涉及的 token 现价 (6h 缓存): 给 priceSane 当参考 —— 上轮定价只覆盖活跃仓的 token,
 // 已关闭仓的币 (如某钱包的 cbBTC) 没参考价, 死池的离谱历史价就拦不住 (2026-09-28 base 手续费 1e40 的真因)
-async function refreshCurPrices(chainId, tokens) {
+//   2026-09-28 审计修复: 原来 bsc (extra) 直接 return、rh/arc (coingeckoPlatform 空) 传空仓位列表 → 这两类链参考价结构性为空, priceSane 形同虚设:
+//   bsc 走 registerChain 注入的 getUSDPrices(addrsLower) (server.js 提供); rh/arc 把本钱包活跃仓喂给 E.getUSDPrices(chainId, addrs, positions) 让它按池内价推导
+async function refreshCurPrices(chainId, tokens, livePositions) {
   const st = ledgerState(chainId);
   st.d.cur = st.d.cur || {};
   const cfg = cfgOf(chainId);
-  const need = [...tokens].filter(t => t && !cfg.stables[t] && !(st.d.cur[t] && Date.now() - st.d.cur[t].ts < 6 * 3600 * 1000));
-  if (!need.length || !E.getUSDPrices || extra[chainId]) return;
+  // 2026-09-28 审计修复: 只把合法合约地址交给参考价钩子 (零地址=原生币按 wrappedNative 取; 非地址键会让 coingecko 整批 400)
+  const wnL = low(cfg.wrappedNative || '');
+  const need = [...new Set([...tokens].map(t => (t === '0x0000000000000000000000000000000000000000' && wnL) ? wnL : t))]
+    .filter(t => /^0x[0-9a-f]{40}$/.test(t || '') && !cfg.stables[t] && !(st.d.cur[t] && Date.now() - st.d.cur[t].ts < 6 * 3600 * 1000));
+  if (!need.length) return;
   try {
-    const m = await E.getUSDPrices(chainId, need, []);
+    let m = null;
+    if (extra[chainId]) { if (typeof extra[chainId].getUSDPrices === 'function') m = await extra[chainId].getUSDPrices(need); }
+    else if (E.getUSDPrices) m = await E.getUSDPrices(chainId, need, Array.isArray(livePositions) ? livePositions : []);
     for (const t of need) { const p = m && m[t]; if (p > 0) st.d.cur[t] = { p, ts: Date.now() }; }
+    if (wnL && st.d.cur[wnL]) st.d.cur['0x0000000000000000000000000000000000000000'] = st.d.cur[wnL];   // 2026-09-28 审计修复: 零地址 (原生币) 共用 wrappedNative 参考价
   } catch (e) { console.error(`[${chainId}] pnl-ledger 现价参考拉取失败:`, e.message?.slice(0, 80)); }
 }
 async function priceAt(chainId, token, block, ref) {
@@ -734,7 +791,7 @@ async function computeWallet(chainId, addr, livePositions) {
     const toks = new Set();
     for (const t of Object.values(W.txs)) for (const [, [tok]] of Object.entries(t.e || {})) toks.add(low(tok));
     for (const P of Object.values(W.pos)) { const m = P.spec && st.d.pools[P.spec]; if (m) { toks.add(m.t0.address); toks.add(m.t1.address); } }
-    await refreshCurPrices(chainId, toks);
+    await refreshCurPrices(chainId, toks, livePositions);   // 2026-09-28 审计修复: 活跃仓一并传入, rh/arc 靠池内价推导参考价
   }
 
   // tx 汇总
@@ -742,7 +799,8 @@ async function computeWallet(chainId, addr, livePositions) {
   const getTx = (h, b) => { let t = txs.get(h); if (!t) { t = { h, b, li: Infinity, flows: new Map(), nft: [], pev: [] }; txs.set(h, t); } return t; };
   for (const [h, t] of Object.entries(W.txs)) {
     const tx = getTx(h, t.b);
-    for (const [li, [tok, amt]] of Object.entries(t.e || {})) { tx.li = Math.min(tx.li, +li); tx.flows.set(tok, (tx.flows.get(tok) || 0n) + BigInt(amt)); }
+    // 2026-09-28 审计修复: e 里的原生币条目键是 'v' (非数字), +'v' = NaN 会把 tx.li 污染成 NaN 让排序失序; 非数字键不参与 logIndex 取最小
+    for (const [li, [tok, amt]] of Object.entries(t.e || {})) { const n = +li; if (Number.isFinite(n)) tx.li = Math.min(tx.li, n); tx.flows.set(tok, (tx.flows.get(tok) || 0n) + BigInt(amt)); }
     for (const [li, n] of Object.entries(t.n || {})) { tx.li = Math.min(tx.li, +li); tx.nft.push({ k: n[0], id: n[1], dir: n[2] }); }
   }
   // V4 事件: 回执提取 (W.txs[h].m) ∪ 原生币池补扫 (st.d.v4), 按 (块, logIndex) 去重
@@ -808,16 +866,18 @@ async function computeWallet(chainId, addr, livePositions) {
 
   // 仓位累计
   const C = {};
-  const cOf = P => C[`${P.k}-${P.id}`] || (C[`${P.k}-${P.id}`] = { cost: 0, dep: 0, ret: 0, fees: 0, a: {}, cb: {}, openTs: 0, lastTs: 0, n: 0, approx: false, inc: false, owed0: 0, owed1: 0, liq: 0n });
+  const cOf = P => C[`${P.k}-${P.id}`] || (C[`${P.k}-${P.id}`] = { cost: 0, dep: 0, ret: 0, fees: 0, a: {}, cb: {}, openTs: 0, lastTs: 0, n: 0, approx: false, inc: false, feesUnknown: false, owed0: 0, owed1: 0, liq: 0n });
 
   // 仓位事件 → 数量 (人类单位) + 当块池价
+  //   2026-09-28 审计修复: V3/pcs 的数量 (a0/a1/liquidity) 来自事件本身, 不依赖池价 → 缺价时也返回 (px=null), 由调用方只跳过美元部分; V4 数量要靠 sqrtPrice 反推, 缺价仍返回 null
   const evAmounts = async (P, ev) => {
     const meta = st.d.pools[P.spec]; if (!meta) return null;
-    const px = await pxAt(chainId, P.spec, ev.b); if (!px) return null;
+    const px = await pxAt(chainId, P.spec, ev.b);
     if (P.k !== 'v4') {
       const a0 = Number(ev.a0) / 10 ** meta.t0.decimals, a1 = Number(ev.a1) / 10 ** meta.t1.decimals;
-      return { kind: ev.t === 'inc' ? 'dep' : ev.t === 'dec' ? 'wd' : 'col', a0, a1, px, meta, liq: BigInt(ev.l || '0') };
+      return { kind: ev.t === 'inc' ? 'dep' : ev.t === 'dec' ? 'wd' : 'col', a0, a1, px: px || null, meta, liq: BigInt(ev.l || '0') };
     }
+    if (!px) return null;
     const d = BigInt(ev.d);
     if (d === 0n) return { kind: 'col', a0: 0, a1: 0, px, meta, liq: 0n };
     const mag = d > 0n ? d : -d;
@@ -835,7 +895,20 @@ async function computeWallet(chainId, addr, livePositions) {
       const miss0 = st.pxMiss || 0;
       const v = await evAmounts(P, ev);
       if (!v) { c.inc = true; if ((st.pxMiss || 0) > miss0) { priceMiss++; txMiss = true; } continue; }
-      if (!priceSane(chainId, v.meta.t0.address, v.px.p0) || !priceSane(chainId, v.meta.t1.address, v.px.p1)) { c.inc = true; continue; }   // 该块池价离谱: 本笔不入账, 标未定价
+      if (!v.px || !priceSane(chainId, v.meta.t0.address, v.px.p0) || !priceSane(chainId, v.meta.t1.address, v.px.p1)) {
+        // 该块池价缺失/离谱: 美元部分不入账, 标未定价
+        c.inc = true;
+        if (!v.px && (st.pxMiss || 0) > miss0) { priceMiss++; txMiss = true; }
+        // 2026-09-28 审计修复: V3/pcs 的「量」不依赖价 —— liquidity / 待提本金 owed / 持币基线 a 照常更新 (原来整笔丢弃, 后面的 Collect 就把待提本金全当手续费, 剩余 liquidity 也不准)
+        if (P.k !== 'v4') {
+          const t0a = v.meta.t0.address, t1a = v.meta.t1.address;
+          if (v.kind === 'dep') { c.liq += v.liq; c.n++; c.a[t0a] = (c.a[t0a] || 0) + v.a0; c.a[t1a] = (c.a[t1a] || 0) + v.a1; if (!c.openTs) c.openTs = ts; }
+          else if (v.kind === 'wd') { c.liq -= v.liq; c.owed0 += v.a0; c.owed1 += v.a1; c.a[t0a] = (c.a[t0a] || 0) - v.a0; c.a[t1a] = (c.a[t1a] || 0) - v.a1; }
+          else { c.owed0 -= Math.min(v.a0, c.owed0); c.owed1 -= Math.min(v.a1, c.owed1); }
+          if (ts > c.lastTs) c.lastTs = ts;
+        }
+        continue;
+      }
       const mkt0 = v.a0 * v.px.p0, mkt1 = v.a1 * v.px.p1;
       if (v.kind === 'dep') { deps.push({ P, c, v, mkt: mkt0 + mkt1 }); c.liq += v.liq; }
       else if (v.kind === 'wd') { wds.push({ P, c, v, mkt: mkt0 + mkt1 }); c.liq += (P.k !== 'v4' ? -v.liq : v.liq); if (P.k !== 'v4') { c.owed0 += v.a0; c.owed1 += v.a1; } }
@@ -908,7 +981,13 @@ async function computeWallet(chainId, addr, livePositions) {
         const v4Wd = wds.filter(w => w.P.k === 'v4').reduce((s, w) => s + w.mkt, 0);
         const seen = new Set();
         const targets = v4.filter(x => { const k = `${x.P.k}-${x.P.id}`; if (seen.has(k)) return false; seen.add(k); return true; });
-        for (const t of targets) {
+        // 2026-09-28 审计修复: 不依赖现价的护栏 —— 单笔 V4「手续费」超过本金市值 (本笔提回本金 与 这些仓累计入金市值 取大) 的 30%, 只可能是实收被死池离谱价放大
+        //   (2026-09-28 base 1e40 的形态), 本笔不计手续费, 涉及仓标 inc + feesUnknown; 本金市值为 0 (入金全没定价) 同样拿不准, 不硬编
+        const principal = Math.max(v4Wd, targets.reduce((s, t) => s + (t.c.dep || 0), 0));
+        if (v4Fee > 0 && !(v4Fee <= principal * 0.3)) {
+          for (const t of targets) { t.c.inc = true; t.c.feesUnknown = true; }
+          console.log(`[${chainId}] pnl-ledger ${addr.slice(0, 10)}: tx ${tx.h.slice(0, 10)} V4 手续费 ${v4Fee.toFixed(2)} > 本金市值 ${principal.toFixed(2)} 的 30%, 本笔不计 (feesUnknown)`);
+        } else for (const t of targets) {
           const wdOf = wds.filter(w => w.P === t.P).reduce((s, w) => s + w.mkt, 0);
           const share = v4Wd > 0 ? wdOf / v4Wd : 1 / targets.length;
           t.c.fees += v4Fee * share;
@@ -944,9 +1023,10 @@ async function computeWallet(chainId, addr, livePositions) {
       status = 'closed'; closeTs = c.lastTs; note = c.liq > 0n ? 'unseen' : 'empty';
     }
     for (const k of Object.keys(c.a)) if (Math.abs(c.a[k]) < 1e-12) c.a[k] = 0;
+    if (P.inB) c.approx = true;   // 2026-09-28 审计修复: 转入的仓, 开仓成本没有本钱包的流水对应 (按当时市值补), 一律标 approx
     P.c = {
       cost: c.cost, dep: c.dep, ret: c.ret, fees: c.fees, a: c.a, cb: c.cb, n: c.n,
-      openTs: c.openTs || P.mts || 0, closeTs, status, note, approx: c.approx, inc: c.inc,
+      openTs: c.openTs || P.mts || 0, closeTs, status, note, approx: c.approx, inc: c.inc, feesUnknown: !!c.feesUnknown,
       pair: meta ? `${meta.t0.symbol}/${meta.t1.symbol}` : '', fee: meta ? meta.fee : 0, t0: meta ? meta.t0 : null, t1: meta ? meta.t1 : null,
     };
   }
@@ -974,14 +1054,16 @@ async function runQueue(chainId, livePositionsByWallet, opts = {}) {
     for (const w of wallets) {
       if (Date.now() > deadline) { console.log(`[${chainId}] pnl-ledger 本轮预算用完, 其余钱包下轮续`); break; }
       const addr = low(w.address);
-      const live = (livePositionsByWallet && livePositionsByWallet[addr]) || [];
+      // 2026-09-28 审计修复: 主流程缓存里没这个钱包 (未就绪) 时传 undefined 而不是 [], 让 ensurePositions/computeWallet 沿用上轮 live 标记, 不把全部活跃仓算成已关闭
+      const live = livePositionsByWallet ? livePositionsByWallet[addr] : undefined;
       try {
         const ankr = isAnkr(chainId);
         const W = ankr ? await scanWalletAnkr(chainId, addr, deadline) : await scanWallet(chainId, addr, deadline);
         if (W.partial) { save(chainId); continue; }
         if (W.stopped) { save(chainId); console.log(`[${chainId}] pnl-ledger ${w.name}: 流水未扫完 (${W.stopped}), 下轮续`); continue; }
         await ensurePositions(chainId, addr, W, live, deadline);
-        const metaOk = Object.values(W.pos).every(P => P.spec || !P.mb);
+        // 2026-09-28 审计修复: 转入的仓 (inB) 解不出池子不再卡住整个钱包 (它自己 P.c=null 不出报告, 解出来那轮再算)
+        const metaOk = Object.values(W.pos).every(P => P.spec || !P.mb || P.inB);
         // Ankr 链: 回执与 V3/V4 事件都已随交易日志入库, 不再单独扫
         const rcOk = ankr ? true : await fetchReceipts(chainId, W, deadline);
         const v3Ok = ankr ? true : await scanV3Events(chainId, W, deadline);
@@ -1002,7 +1084,7 @@ async function runQueue(chainId, livePositionsByWallet, opts = {}) {
       if (!ready.has(addr)) continue;
       if (!v4Ok && Object.values(W.pos).some(P => P.k === 'v4' && st.d.pools[P.spec] && st.d.pools[P.spec].native)) { console.log(`[${chainId}] pnl-ledger ${w.name}: 原生币池 V4 事件未扫完, 本轮不重放`); continue; }
       try {
-        await computeWallet(chainId, addr, (livePositionsByWallet && livePositionsByWallet[addr]) || []);
+        await computeWallet(chainId, addr, livePositionsByWallet ? livePositionsByWallet[addr] : undefined);   // 2026-09-28 审计修复: 未就绪传 undefined (同上)
         const n = Object.values(W.pos).filter(P => P.c).length, cl = Object.values(W.pos).filter(P => P.c && P.c.status === 'closed').length;
         console.log(`[${chainId}] pnl-ledger ${w.name}: ${Object.keys(W.txs).length} tx, ${n} 仓 (已关闭 ${cl})${W.stopped ? ' · 流水未扫完下轮续' : ''}`);
         save(chainId);   // 每个钱包算完就落盘: 重放一个大钱包要几分钟, 中途重启不丢已算好的 (2026-09-27 v3 轮被重启打断, 两个钱包白算)
@@ -1056,22 +1138,27 @@ function walletReport(chainId, addr, liveWallet, useLedger = true) {
 }
 function rowFromLedger(key, P, live) {
   const c = P.c;
-  const active = c.status === 'active' && !!live;
+  // 2026-09-28 审计修复: 看板活跃仓里有它就是 active —— 账本上轮算出的 closed (如算的那轮主流程缓存为空) 不能把活跃仓压成已关闭
+  const active = !!live;
   const valueUSD = live ? (live.positionValueUSD || 0) : 0;
   const pending = live ? (live.feesValueUSD || 0) : 0;
   const closeTs = active ? 0 : (c.closeTs || 0);
   // 提回没捕获到: 净利润算不出, 不给误导数字. 含旧版结果里的 'notlive' 标 (账本没再跑的观察钱包还留着旧字段), 以及
   // 「已关闭但一分钱都没提回/没领过费」的仓 (退出 tx 没进账本, 否则至少有一笔提回) — 这类仓算 −成本 会把已实现盈亏拖出几十万的假亏
-  const unseen = !active && (c.note === 'unseen' || c.note === 'notlive' || (c.note !== 'transferred' && !(c.ret > 0) && !(c.fees > 0)));
+  // 2026-09-28 审计修复: 转出 (transferred) 的仓不再算净利润 —— 仓位归了接收方 (接收方账本按市值补成本重算一遍), 记 −成本 是全额假亏 + 与接收方双计;
+  //   报告里保留成本/已提回/已领费, 只把 netProfitUSD 置 null (不进已实现); unseen 判断也不再对 transferred 特判
+  const transferred = !active && c.note === 'transferred';
+  const unseen = !active && (c.note === 'unseen' || c.note === 'notlive' || (!(c.ret > 0) && !(c.fees > 0)));
+  const noNet = unseen || transferred;
   const net = valueUSD + pending + c.fees + c.ret - c.cost;
   return {
     key, protocol: P.k === 'v4' ? 'V4' : 'V3', dex: P.k === 'pcs' ? 'pancake' : undefined, tokenId: P.id, pair: live ? `${live.token0.symbol}/${live.token1.symbol}` : c.pair, feeLabel: live ? live.feeLabel : null, fee: c.fee,
-    status: active ? 'active' : 'closed', note: active ? '' : (unseen ? 'unseen' : c.note), inRange: live ? !!live.inRange : null,
+    status: active ? 'active' : 'closed', note: active ? '' : (transferred ? 'transferred' : (unseen ? 'unseen' : c.note)), inRange: live ? !!live.inRange : null,
     openTs: c.openTs, closeTs, source: 'ledger',
     costUSD: c.cost, costApprox: c.approx, incomplete: c.inc, depositValueUSD: c.dep, adds: c.n, costBy: c.cb || null,
-    valueUSD, pendingFeesUSD: pending, collectedFeesUSD: c.fees, withdrawnUSD: c.ret,
+    valueUSD, pendingFeesUSD: pending, collectedFeesUSD: c.fees, withdrawnUSD: c.ret, feesUnknown: !!c.feesUnknown,
     hodlValueUSD: live ? (live.hodlValueUSD ?? null) : null, ilUSD: live ? (live.ilUSD ?? null) : null,
-    netProfitUSD: c.cost > 0 && !unseen ? net : null, netProfitPct: c.cost > 0 && !unseen ? net / c.cost * 100 : null,
+    netProfitUSD: c.cost > 0 && !noNet ? net : null, netProfitPct: c.cost > 0 && !noNet ? net / c.cost * 100 : null,
     tokens: live ? [live.token0, live.token1].map(t => ({ address: t.address, symbol: t.symbol })) : [c.t0, c.t1].filter(Boolean).map(t => ({ address: t.address, symbol: t.symbol })),
   };
 }

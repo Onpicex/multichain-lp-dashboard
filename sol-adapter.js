@@ -17,13 +17,40 @@ const CACHE_FILE = path.join(__dirname, 'positions-cache-sol.json');
 const CACHE_TTL = 5 * 60 * 1000; // 5 min，与 BSC 一致 (2026-09-05 调快)
 
 const RAY_CLMM_PROGRAM = 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK';
+const FEE_OVERFLOW = 1n << 127n;   // 2026-09-28 审计修复: 未领费原始值 ≥ 2^127 视为 u128 回绕/垃圾 → feesUnknown (取代 >1e12 一刀归零)
+
+// 2026-09-28 审计修复: 四个 JSON 落盘统一 tmp+renameSync 原子写 (写一半崩溃不会留下空/半截文件)
+function writeJsonAtomic(file, obj, indent) {
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, indent ? JSON.stringify(obj, null, indent) : JSON.stringify(obj));
+  fs.renameSync(tmp, file);
+}
+// 2026-09-28 审计修复: 读 JSON 解析失败 → 坏文件改名 .corrupt-<ts> 留证, 内存用空值, 不写回 (文件不存在直接给空值)
+function readJsonSafe(file, fallback) {
+  let raw;
+  try { raw = fs.readFileSync(file, 'utf8'); } catch { return fallback; }
+  try { return JSON.parse(raw); } catch (e) {
+    const bad = `${file}.corrupt-${Date.now()}`;
+    try { fs.renameSync(file, bad); } catch {}
+    console.error(`[SOL] ${path.basename(file)} 解析失败 (${String(e?.message || e).slice(0, 80)}), 已改名 ${path.basename(bad)}, 本次按空值处理且不写回`);
+    return fallback;
+  }
+}
+// 2026-09-28 审计修复 (XSS 上游): 外部来源 symbol (Jupiter / Raydium API / 落盘缓存读回) 统一白名单清洗; 越界/为空回退 mint 短写
+const SYM_RE = /^[\w.$\-\/+ ]{1,24}$/;
+function cleanSym(s, mint) {
+  const t = typeof s === 'string' ? s.trim() : '';
+  if (t && SYM_RE.test(t)) return t;
+  return String(mint || '').slice(0, 4) + '…';
+}
 
 // --- wallets ---
 function loadWallets() {
-  try { return JSON.parse(fs.readFileSync(WALLETS_FILE, 'utf8')); } catch { return []; }
+  const w = readJsonSafe(WALLETS_FILE, []);   // 2026-09-28 审计修复: 坏文件改名不写回, 内存空表
+  return Array.isArray(w) ? w : [];
 }
 function saveWallets(w) {
-  fs.writeFileSync(WALLETS_FILE, JSON.stringify(w, null, 2));
+  writeJsonAtomic(WALLETS_FILE, w, 2);   // 2026-09-28 审计修复: 原子写
 }
 let WALLETS = loadWallets();
 // 启用中的钱包 (enabled 缺省=启用; false=停用: 不抓仓位/不查余额, 只保留在列表里)
@@ -32,15 +59,26 @@ function activeWallets() { return WALLETS.filter(isWalletOn); }
 
 // --- cache ---
 let cache = { data: null, timestamp: 0 };
-try {
-  const c = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
+{
+  const c = readJsonSafe(CACHE_FILE, null);   // 2026-09-28 审计修复: 坏文件改名不写回
   if (c && c.data) cache = c;
-} catch {}
-function saveCache() {
-  try { fs.writeFileSync(CACHE_FILE, JSON.stringify(cache)); } catch {}
 }
+function saveCache() {
+  try { writeJsonAtomic(CACHE_FILE, cache); } catch (e) { console.error('[SOL] save cache failed:', String(e?.message || e).slice(0, 80)); }   // 2026-09-28 审计修复: 原子写
+}
+// 2026-09-28 审计修复 (XSS 上游): 缓存读回 / 写盘前 symbol 统一清洗 (仓位两腿 + 闲置余额明细)
+function sanitizeCacheSymbols(data) {
+  if (!data) return;
+  for (const w of (data.wallets || [])) for (const p of (w.positions || [])) {
+    if (p.token0) p.token0.symbol = cleanSym(p.token0.symbol, p.token0addr || p.token0.address);
+    if (p.token1) p.token1.symbol = cleanSym(p.token1.symbol, p.token1addr || p.token1.address);
+  }
+  for (const w of Object.values(data.idle?.byWallet || {})) for (const t of (w.tokens || [])) t.symbol = t.native ? 'SOL' : cleanSym(t.symbol, t.address);
+}
+sanitizeCacheSymbols(cache.data);
 
 // --- Jupiter price API (free lite tier) ---
+// 2026-09-28 审计修复: 只返回拿到正价的 mint (缺价不再按 $0 写入), HTTP 非 2xx 打日志; 缺价回退上轮价由调用方按 mint 处理
 async function getPrices(mints) {
   const out = {};
   const uniq = [...new Set(mints)].filter(Boolean);
@@ -50,9 +88,9 @@ async function getPrices(mints) {
       const r = await fetch(`https://lite-api.jup.ag/price/v3?ids=${batch.join(',')}`);
       if (r.ok) {
         const j = await r.json();
-        for (const [mint, info] of Object.entries(j)) out[mint] = info?.usdPrice || 0;
-      }
-    } catch (e) { console.error('SOL price fetch failed:', e.message); }
+        for (const [mint, info] of Object.entries(j || {})) { const px = Number(info?.usdPrice); if (px > 0) out[mint] = px; }
+      } else console.error(`SOL price fetch HTTP ${r.status} (${batch.length} mints)`);
+    } catch (e) { console.error('SOL price fetch failed:', String(e?.message || e).slice(0, 120)); }
   }
   return out;
 }
@@ -63,27 +101,46 @@ const pnlLedger = require('./pnl-ledger');    // 只用它的 applyPnl (盈亏�
 let lastPricesSol = {};                        // 上轮定价 (mint -> USD), 供账本给已关闭仓/无换币记录的币估值
 const TOKEN_META_FILE = path.join(__dirname, 'token-meta-sol.json');
 let tokenMeta = {};
-try { tokenMeta = JSON.parse(fs.readFileSync(TOKEN_META_FILE, 'utf8')); } catch {}
+{
+  // 2026-09-28 审计修复: 坏文件改名不写回; 读回的 symbol 清洗 (XSS 上游); 历史上误落盘的 "AbCd…" 兜底条目剔掉让它重查 Jupiter
+  const m = readJsonSafe(TOKEN_META_FILE, {});
+  if (m && typeof m === 'object' && !Array.isArray(m)) {
+    for (const [mint, v] of Object.entries(m)) {
+      if (!v || typeof v !== 'object') continue;
+      if (v.decimals == null && /…$/.test(String(v.symbol || ''))) continue;   // 旧版兜底条目 (短写 + 无 decimals)
+      tokenMeta[mint] = { ...v, symbol: cleanSym(v.symbol, mint) };
+    }
+  }
+}
+const SYM_FALLBACK_RETRY_MS = 10 * 60 * 1000;   // 2026-09-28 审计修复: 查不到的 symbol 兜底只放内存 (_fallbackAt), 10 分钟后重查
 const KNOWN_TOKENS = {
   'So11111111111111111111111111111111111111112': 'SOL',
   'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 'USDC',
   'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': 'USDT',
 };
 async function getTokenSymbols(mints) {
-  const need = [...new Set(mints)].filter(m => m && !tokenMeta[m] && !KNOWN_TOKENS[m]);
+  const now = Date.now();
+  // 2026-09-28 审计修复: 兜底条目 (_fallbackAt) 满 10 分钟视为未知, 重查
+  const need = [...new Set(mints)].filter(m => m && !KNOWN_TOKENS[m] && (!tokenMeta[m] || (tokenMeta[m]._fallbackAt && now - tokenMeta[m]._fallbackAt >= SYM_FALLBACK_RETRY_MS)));
   if (need.length) {
+    let gotNew = false;
     for (const mint of need) {
       try {
         const r = await fetch(`https://lite-api.jup.ag/tokens/v2/search?query=${mint}`);
         if (r.ok) {
           const arr = await r.json();
           const hit = Array.isArray(arr) ? arr.find(t => t.id === mint) : null;
-          if (hit) tokenMeta[mint] = { symbol: hit.symbol, decimals: hit.decimals };
+          if (hit) { tokenMeta[mint] = { symbol: cleanSym(hit.symbol, mint), decimals: hit.decimals }; gotNew = true; }   // 2026-09-28 审计修复 (XSS 上游): Jupiter symbol 白名单清洗
         }
       } catch {}
-      if (!tokenMeta[mint]) tokenMeta[mint] = { symbol: mint.slice(0, 4) + '…', decimals: null };
+      // 2026-09-28 审计修复: 查不到只在内存放兜底 (带 _fallbackAt), 不落盘, 不再把 "AbCd…" 永久写进 token-meta-sol.json
+      if (!tokenMeta[mint] || tokenMeta[mint]._fallbackAt) tokenMeta[mint] = { symbol: mint.slice(0, 4) + '…', decimals: null, _fallbackAt: now };
     }
-    try { fs.writeFileSync(TOKEN_META_FILE, JSON.stringify(tokenMeta)); } catch {}
+    if (gotNew) {
+      const persist = {};
+      for (const [m, v] of Object.entries(tokenMeta)) if (!v._fallbackAt) persist[m] = v;
+      try { writeJsonAtomic(TOKEN_META_FILE, persist); } catch (e) { console.error('[SOL] save token meta failed:', String(e?.message || e).slice(0, 80)); }   // 2026-09-28 审计修复: 原子写, 只落真实条目
+    }
   }
   const out = {};
   for (const m of [...new Set(mints)]) {
@@ -107,7 +164,7 @@ async function fetchMeteoraPositions(wallet) {
   try {
     map = await DLMM.getAllLbPairPositionsByUser(conn, new PublicKey(wallet.address));
   } catch (e) {
-    console.error(`Meteora fetch failed for ${wallet.name}:`, e.message.slice(0, 120));
+    console.error(`Meteora fetch failed for ${wallet.name}:`, String(e?.message || e).slice(0, 120));   // 2026-09-28 审计修复: e.message 可能为空
     return null;   // null = 抓取失败(如429), 上层重试; 空数组才是真没仓位
   }
   for (const [pairAddr, info] of map) {
@@ -141,8 +198,9 @@ async function fetchMeteoraPositions(wallet) {
           token0addr: mintX,
           token1addr: mintY,
           fee: 0,
+          // 2026-09-28 审计修复: 基础费率 = baseFactor × binStep × 10^baseFeePowerFactor / 1e8 (SDK getBaseFee, FEE_PRECISION 1e9 含 ×10), 百分比 ×100 → /1e6; 旧式多乘 100 且漏 baseFeePowerFactor (EMBER/USDC 显示 50.00%, 真值 0.50%)
           feeLabel: (info.lbPair.parameters?.baseFactor != null)
-            ? ((info.lbPair.parameters.baseFactor * binStep) / 1e6 * 100).toFixed(2) + '%'
+            ? (info.lbPair.parameters.baseFactor * binStep * 10 ** (Number(info.lbPair.parameters.baseFeePowerFactor) || 0) / 1e6).toFixed(2) + '%'
             : `bin ${binStep}`,
           tickLower: d.lowerBinId,
           tickUpper: d.upperBinId,
@@ -170,7 +228,7 @@ async function fetchMeteoraPositions(wallet) {
         });
       }
     } catch (e) {
-      console.error(`Meteora pair ${pairAddr} parse error:`, e.message.slice(0, 120));
+      console.error(`Meteora pair ${pairAddr} parse error:`, String(e?.message || e).slice(0, 120));   // 2026-09-28 审计修复
     }
   }
   return positions;
@@ -202,18 +260,24 @@ async function fetchRaydiumPositions(wallet) {
     for (const p of posList) {
       try {
         const poolIdStr = p.poolId.toBase58();
-        // 官方 API：symbol/decimals/feeRate/APR
-        const r = await fetch(`https://api-v3.raydium.io/pools/info/ids?ids=${poolIdStr}`);
-        const j = await r.json();
-        const pool = j?.data?.[0];
-        if (!pool) { console.error(`Raydium pool info missing: ${poolIdStr}`); continue; }
-
-        const decA = pool.mintA.decimals, decB = pool.mintB.decimals;
+        // 2026-09-28 审计修复: 链上池子状态 (PoolInfoLayout) 做主源 —— mintA/mintB/mintDecimalsA/B/tick/sqrtPrice 全在里面; 官方 API 只补 symbol/feeRate/APR, 挂了/非 2xx 不丢仓
+        const rpcData = await raydium.clmm.getRpcClmmPoolInfo({ poolId: p.poolId });
+        const b58 = k => (k && typeof k.toBase58 === 'function') ? k.toBase58() : String(k);
+        const mintA = b58(rpcData.mintA), mintB = b58(rpcData.mintB);
+        let pool = null;
+        try {
+          const r = await fetch(`https://api-v3.raydium.io/pools/info/ids?ids=${poolIdStr}`);
+          if (r.ok) { const j = await r.json(); pool = j?.data?.[0] || null; }
+          else console.error(`Raydium API HTTP ${r.status} for ${poolIdStr}`);
+        } catch (e) { console.error(`Raydium API failed for ${poolIdStr}:`, String(e?.message || e).slice(0, 100)); }
+        if (!pool) console.error(`Raydium pool info missing: ${poolIdStr} (symbol/feeRate 缺, 仓位照发)`);
+        const decA = Number.isInteger(rpcData.mintDecimalsA) ? rpcData.mintDecimalsA : pool?.mintA?.decimals;
+        const decB = Number.isInteger(rpcData.mintDecimalsB) ? rpcData.mintDecimalsB : pool?.mintB?.decimals;
+        if (!Number.isInteger(decA) || !Number.isInteger(decB)) throw new Error(`decimals unknown for pool ${poolIdStr}`);
+        // API 的 symbol 按 mint 地址对号 (XSS 上游: 白名单清洗); 缺则留空, 由 Jupiter 元数据 / mint 短写补
+        const apiSym = addr => { const m = [pool?.mintA, pool?.mintB].find(x => x && x.address === addr); return m?.symbol ? cleanSym(m.symbol, addr) : ''; };
         const lowerPrice = Math.pow(1.0001, p.tickLower) * Math.pow(10, decA - decB);
         const upperPrice = Math.pow(1.0001, p.tickUpper) * Math.pow(10, decA - decB);
-
-        // 链上池子状态：精确 tick / sqrtPrice / feeGrowth
-        const rpcData = await raydium.clmm.getRpcClmmPoolInfo({ poolId: p.poolId });
         const currentTick = rpcData.tickCurrent;
         const inRange = currentTick >= p.tickLower && currentTick < p.tickUpper;
         const currentPrice = Math.pow(1.0001, currentTick) * Math.pow(10, decA - decB);
@@ -232,7 +296,7 @@ async function fetchRaydiumPositions(wallet) {
         const amount1 = Number(a1) / 10 ** decB;
 
         // 未领手续费：tick array 状态 + GetPositionFees
-        let feesOwed0 = 0, feesOwed1 = 0;
+        let feesOwed0 = 0, feesOwed1 = 0, feesUnknown = false;
         try {
           const taLowerAddr = getPdaTickArrayAddress(progPk, p.poolId, taStart(p.tickLower, rpcData.tickSpacing)).publicKey;
           const taUpperAddr = getPdaTickArrayAddress(progPk, p.poolId, taStart(p.tickUpper, rpcData.tickSpacing)).publicKey;
@@ -243,25 +307,27 @@ async function fetchRaydiumPositions(wallet) {
             const offL = Math.floor((p.tickLower - taStart(p.tickLower, rpcData.tickSpacing)) / rpcData.tickSpacing);
             const offU = Math.floor((p.tickUpper - taStart(p.tickUpper, rpcData.tickSpacing)) / rpcData.tickSpacing);
             const fees = PositionUtils.GetPositionFees(rpcData, p, taL.ticks[offL], taU.ticks[offU]);
-            feesOwed0 = Number(fees.tokenFeeAmountA.toString()) / 10 ** decA;
-            feesOwed1 = Number(fees.tokenFeeAmountB.toString()) / 10 ** decB;
-            if (feesOwed0 < 0 || feesOwed0 > 1e12) feesOwed0 = 0;
-            if (feesOwed1 < 0 || feesOwed1 > 1e12) feesOwed1 = 0;
-          }
+            // 2026-09-28 审计修复: 原始值 ≥ 2^127 (u128 回绕/垃圾) 才算溢出 → feesUnknown; 不再把 >1e12 一刀归零 (1e-9 美元级 meme 会被误杀)
+            const rawA = BigInt(fees.tokenFeeAmountA.toString()), rawB = BigInt(fees.tokenFeeAmountB.toString());
+            if (rawA < 0n || rawB < 0n || rawA >= FEE_OVERFLOW || rawB >= FEE_OVERFLOW) feesUnknown = true;
+            else { feesOwed0 = Number(rawA) / 10 ** decA; feesOwed1 = Number(rawB) / 10 ** decB; }
+          } else feesUnknown = true;   // 2026-09-28 审计修复: tick array 缺失, 未领费读不到 → 打标而非当 0
         } catch (e) {
-          console.error(`Raydium fee calc ${poolIdStr}:`, e.message.slice(0, 100));
+          feesUnknown = true;   // 2026-09-28 审计修复: 未领费读取失败 → feesUnknown (前端显示「—」)
+          console.error(`Raydium fee calc ${poolIdStr}:`, String(e?.message || e).slice(0, 100));
         }
 
         positions.push({
           tokenId: p.nftMint.toBase58().slice(0, 8),
           positionKey: p.nftMint.toBase58(),
           _activityKey: getPdaPersonalPositionAddress(progPk, p.nftMint).publicKey.toBase58(),
-          token0: { symbol: pool.mintA.symbol, address: pool.mintA.address, decimals: decA },
-          token1: { symbol: pool.mintB.symbol, address: pool.mintB.address, decimals: decB },
-          token0addr: pool.mintA.address,
-          token1addr: pool.mintB.address,
-          fee: (pool.feeRate || 0) * 1e6,
-          feeLabel: pool.feeRate ? (pool.feeRate * 100).toFixed(2) + '%' : '',
+          // 2026-09-28 审计修复: mint/decimals 以链上为准; symbol 来自 API (已清洗), 缺则留空由主循环补
+          token0: { symbol: apiSym(mintA), address: mintA, decimals: decA },
+          token1: { symbol: apiSym(mintB), address: mintB, decimals: decB },
+          token0addr: mintA,
+          token1addr: mintB,
+          fee: (pool?.feeRate || 0) * 1e6,
+          feeLabel: pool?.feeRate ? (pool.feeRate * 100).toFixed(2) + '%' : '',
           tickLower: p.tickLower,
           tickUpper: p.tickUpper,
           currentTick,
@@ -282,14 +348,15 @@ async function fetchRaydiumPositions(wallet) {
           platform: 'Raydium',
           createdAt: 0,
           lastCollectAt: 0,
-          _aprApi: pool.day?.apr || 0,
+          _aprApi: pool?.day?.apr || 0,
+          ...(feesUnknown ? { feesUnknown: true } : {}),   // 2026-09-28 审计修复
         });
       } catch (e) {
-        console.error(`Raydium position error:`, e.message.slice(0, 120));
+        console.error(`Raydium position error:`, String(e?.message || e).slice(0, 120));   // 2026-09-28 审计修复
       }
     }
   } catch (e) {
-    console.error(`Raydium fetch failed for ${wallet.name}:`, e.message.slice(0, 120));
+    console.error(`Raydium fetch failed for ${wallet.name}:`, String(e?.message || e).slice(0, 120));   // 2026-09-28 审计修复
     return null;   // null = 抓取失败(如429), 上层重试; 空数组才是真没仓位
   }
   return positions;
@@ -425,7 +492,7 @@ async function fetchOrcaPositions(wallet) {
         else { a0 = L * (sb - sp) / (sp * sb); a1 = L * (sp - sa); }
 
         // 未领手续费 = feeOwed + L × (feeGrowthInside − checkpoint) >> 64
-        let fA = r.owedA, fB = r.owedB;
+        let fA = r.owedA, fB = r.owedB, feesUnknown = false;
         if (r.liquidity > 0n) {
           try {
             const taL = acct[orcaTickArrayPda(r.whirlpool, orcaArrayStart(r.tickLower, p.tickSpacing))];
@@ -441,12 +508,14 @@ async function fetchOrcaPositions(wallet) {
             fA += (r.liquidity * wrapSub(inside(p.fgA, lo.foA, hi.foA), r.cpA)) >> 64n;
             fB += (r.liquidity * wrapSub(inside(p.fgB, lo.foB, hi.foB), r.cpB)) >> 64n;
           } catch (e) {
-            console.error(`Orca fee calc ${r.whirlpool}:`, e.message.slice(0, 100));
+            feesUnknown = true;   // 2026-09-28 审计修复: 未领费读取失败 → feesUnknown (前端显示「—」)
+            console.error(`Orca fee calc ${r.whirlpool}:`, String(e?.message || e).slice(0, 100));
           }
         }
-        let feesOwed0 = Number(fA) / 10 ** decA, feesOwed1 = Number(fB) / 10 ** decB;
-        if (feesOwed0 < 0 || feesOwed0 > 1e12) feesOwed0 = 0;
-        if (feesOwed1 < 0 || feesOwed1 > 1e12) feesOwed1 = 0;
+        // 2026-09-28 审计修复: 原始值 ≥ 2^127 才算溢出 → feesUnknown, 否则照算; 不再 >1e12 一刀归零
+        let feesOwed0 = 0, feesOwed1 = 0;
+        if (fA < 0n || fB < 0n || fA >= FEE_OVERFLOW || fB >= FEE_OVERFLOW) feesUnknown = true;
+        else { feesOwed0 = Number(fA) / 10 ** decA; feesOwed1 = Number(fB) / 10 ** decB; }
 
         positions.push({
           tokenId: r.mint.slice(0, 8),
@@ -479,13 +548,14 @@ async function fetchOrcaPositions(wallet) {
           platform: 'Orca',
           createdAt: 0,
           lastCollectAt: 0,
+          ...(feesUnknown ? { feesUnknown: true } : {}),   // 2026-09-28 审计修复
         });
       } catch (e) {
-        console.error(`Orca position error:`, e.message.slice(0, 120));
+        console.error(`Orca position error:`, String(e?.message || e).slice(0, 120));   // 2026-09-28 审计修复
       }
     }
   } catch (e) {
-    console.error(`Orca fetch failed for ${wallet.name}:`, e.message.slice(0, 120));
+    console.error(`Orca fetch failed for ${wallet.name}:`, String(e?.message || e).slice(0, 120));   // 2026-09-28 审计修复
     return null;   // null = 抓取失败(如429), 上层重试; 空数组才是真没仓位
   }
   return positions;
@@ -494,15 +564,20 @@ async function fetchOrcaPositions(wallet) {
 // --- 仓位创建时间：查该账户最早一笔签名的 blockTime（永不变，持久缓存） ---
 const CREATED_CACHE_FILE = path.join(__dirname, 'created-cache-sol.json');
 let createdCache = {};
-try { createdCache = JSON.parse(fs.readFileSync(CREATED_CACHE_FILE, 'utf8')); } catch {}
+{ const c = readJsonSafe(CREATED_CACHE_FILE, {}); if (c && typeof c === 'object' && !Array.isArray(c)) createdCache = c; }   // 2026-09-28 审计修复: 坏文件改名不写回
+const CREATED_MAX_PAGES = 20;   // 2026-09-28 审计修复: 签名翻页上限 5→20 页 (×1000); 仍触顶则 createdAtApprox
+// 返回 { ts, approx }: approx=true 表示翻满 20 页仍未见底, ts 是能看到的最早签名 (真实创建更早); 缓存值 数字=精确, {ts,approx}=近似
 async function getCreatedAt(pubkeyStr) {
-  if (createdCache[pubkeyStr]) return createdCache[pubkeyStr];
+  const hit = createdCache[pubkeyStr];
+  if (typeof hit === 'number' && hit > 0) return { ts: hit, approx: false };
+  if (hit && typeof hit === 'object' && hit.ts > 0) return { ts: hit.ts, approx: !!hit.approx };
   // 主 RPC 失败(429等)时切备胎重试一次 —— createdAt 拿不到会导致日化无法计算
   for (const c of [conn, new Connection(SOL_RPC_FALLBACK, 'confirmed')]) {
     try {
       const pk = new PublicKey(pubkeyStr);
-      let before = undefined, oldest = null;
-      for (let page = 0; page < 5; page++) {
+      let before = undefined, oldest = null, capped = false;
+      for (let page = 0; ; page++) {
+        if (page >= CREATED_MAX_PAGES) { capped = true; break; }   // 上一页仍满 1000 条才会走到这里
         // 注意: 必须 finalized —— solanavibestation 等节点 confirmed 档签名索引返回空数组
         const sigs = await c.getSignaturesForAddress(pk, { limit: 1000, before }, 'finalized');
         if (!sigs.length) break;
@@ -511,17 +586,19 @@ async function getCreatedAt(pubkeyStr) {
         before = oldest.signature;
       }
       if (oldest?.blockTime) {
-        createdCache[pubkeyStr] = oldest.blockTime * 1000;
-        try { fs.writeFileSync(CREATED_CACHE_FILE, JSON.stringify(createdCache)); } catch {}
-        return createdCache[pubkeyStr];
+        const ts = oldest.blockTime * 1000;
+        createdCache[pubkeyStr] = capped ? { ts, approx: true } : ts;
+        try { writeJsonAtomic(CREATED_CACHE_FILE, createdCache); } catch (e) { console.error('[SOL] save created cache failed:', String(e?.message || e).slice(0, 80)); }   // 2026-09-28 审计修复: 原子写
+        if (capped) console.log(`[SOL] createdAt ${pubkeyStr.slice(0, 8)}: ${CREATED_MAX_PAGES}×1000 签名仍未见底, 记为近似值 (createdAtApprox)`);
+        return { ts, approx: capped };
       }
-      return 0;   // 查询成功但无签名(理论不该发生), 不必换备胎
+      return { ts: 0, approx: false };   // 查询成功但无签名(理论不该发生), 不必换备胎
     } catch (e) {
-      console.error(`[SOL] createdAt lookup failed ${pubkeyStr.slice(0, 8)}:`, e.message.slice(0, 80));
+      console.error(`[SOL] createdAt lookup failed ${pubkeyStr.slice(0, 8)}:`, String(e?.message || e).slice(0, 80));   // 2026-09-28 审计修复
       await new Promise(r => setTimeout(r, 1000));
     }
   }
-  return 0;
+  return { ts: 0, approx: false };
 }
 
 // 最近一次链上操作时间（领取/加减仓都会更新）——不缓存，每次刷新都查最新
@@ -532,7 +609,7 @@ async function getLastActivityAt(pubkeyStr) {
       if (sigs[0]?.blockTime) return sigs[0].blockTime * 1000;
       return 0;
     } catch (e) {
-      console.error(`[SOL] lastActivity lookup failed ${pubkeyStr.slice(0, 8)}:`, e.message.slice(0, 80));
+      console.error(`[SOL] lastActivity lookup failed ${pubkeyStr.slice(0, 8)}:`, String(e?.message || e).slice(0, 80));   // 2026-09-28 审计修复
       await new Promise(r => setTimeout(r, 1000));
     }
   }
@@ -578,13 +655,15 @@ async function fetchIdleSol(walletsSel) {
       }
       raw.push({ w, lamports, toks });
     } catch (e) {
-      console.error(`[SOL] idle balance failed ${w.name}:`, e.message.slice(0, 80));
+      console.error(`[SOL] idle balance failed ${w.name}:`, String(e?.message || e).slice(0, 80));   // 2026-09-28 审计修复
       raw.push({ w, failed: true });
     }
     await new Promise(r2 => setTimeout(r2, 600));
   }
   const mintArr = [...allMints];
   const [symbols, prices] = await Promise.all([getTokenSymbols(mintArr), getPrices(mintArr)]);
+  // 2026-09-28 审计修复: Jupiter 整批无价 → 抛错让调用方沿用上轮闲置快照, 不发布全 $0
+  if (!Object.keys(prices).length) throw new Error('Jupiter 报价整批为空');
   const solPrice = prices[WSOL_MINT] || 0;
 
   const byWallet = {}; let totalUSD = 0;
@@ -604,7 +683,7 @@ async function fetchIdleSol(walletsSel) {
       const price = t.mint === WSOL_MINT ? solPrice : (prices[t.mint] || 0);
       const v = t.amount * price;
       if (v < 1) continue;
-      items.push({ symbol: symbols[t.mint]?.symbol || t.mint.slice(0, 4) + '…', address: t.mint, amount: t.amount, priceUSD: price, valueUSD: v });
+      items.push({ symbol: cleanSym(symbols[t.mint]?.symbol, t.mint), address: t.mint, amount: t.amount, priceUSD: price, valueUSD: v });   // 2026-09-28 审计修复 (XSS 上游)
     }
     items.sort((x, y) => y.valueUSD - x.valueUSD);
     const wTotal = items.reduce((s, t) => s + t.valueUSD, 0);
@@ -638,6 +717,7 @@ async function fetchAllSol(force = false) {
 
 async function _fetchAllSol() {
   let walletResults = [];
+  const failedWallets = [];   // 2026-09-28 审计修复: 本轮抓取失败、沿用上轮数据的钱包 (原样 base58 地址), 进载荷顶层
   for (const w of activeWallets()) {
     // 抓取失败(429限流等)时重试最多3轮, 每轮间隔递增, 避免把有仓钱包误判为空仓
     let met = null, ray = null, orc = null;
@@ -661,43 +741,74 @@ async function _fetchAllSol() {
       conn = new Connection(SOL_RPC, 'confirmed');   // 用完备胎切回主 RPC
       raydiumInstances = {};
     }
-    if (met === null || ray === null || orc === null) console.error(`[SOL] ${w.name} 3轮重试仍失败, 本轮跳过 (下轮自动刷新会再试)`);
-    walletResults.push({ address: w.address, name: w.name, positions: [...(met || []), ...(ray || []), ...(orc || [])], totalUSD: 0 });
+    const wr = { address: w.address, name: w.name, positions: [...(met || []), ...(ray || []), ...(orc || [])], totalUSD: 0 };
+    if (met === null || ray === null || orc === null) {
+      // 2026-09-28 审计修复: 抓取失败不再发布成「无仓位」—— 失败的协议沿用上轮缓存里该钱包该协议的仓位 (逐仓打 _stale), 钱包打 _stale 并进 failedWallets
+      const failedPlatforms = [met === null && 'Meteora', ray === null && 'Raydium', orc === null && 'Orca'].filter(Boolean);
+      const prev = (cache.data?.wallets || []).find(x => x.address === w.address);
+      const carried = (prev?.positions || []).filter(p => failedPlatforms.includes(p.platform)).map(p => ({ ...p, _stale: true }));
+      wr.positions.push(...carried);
+      wr._stale = true;
+      failedWallets.push(w.address);
+      console.error(`[SOL] ${w.name} 3轮重试仍失败 (${failedPlatforms.join('/')}), 沿用上轮 ${carried.length} 个仓位 (下轮自动刷新会再试)`);
+    }
+    walletResults.push(wr);
     // 钱包间歇 1.5s, 防公共 RPC 429 (15+ 钱包连扫会被打限流, 空仓漏报)
     await new Promise(r => setTimeout(r, 1500));
   }
   // 本轮起跑后被停用/删除的钱包不发布 (SOL 一轮约 2 分钟, 期间用户可能点了停用)
   walletResults = walletResults.filter(wr => activeWallets().some(w => w.address === wr.address));
 
-  // 补 symbol（Meteora/Orca 只有 mint 地址）+ 价格
+  // 补 symbol（Meteora/Orca 只有 mint 地址）+ 价格 (沿用仓的 mint 也一起问, 让 lastPricesSol 持续覆盖它们)
   const allMints = [];
   for (const wr of walletResults) for (const p of wr.positions) allMints.push(p.token0addr, p.token1addr);
-  const [symbols, prices] = await Promise.all([getTokenSymbols(allMints), getPrices(allMints)]);
+  const [symbols, freshPrices] = await Promise.all([getTokenSymbols(allMints), getPrices(allMints)]);
+  // 2026-09-28 审计修复: 某 mint 本轮无价而上轮有 → 回退上轮价 (仓位打 priceStale); 整批为空不覆盖 lastPricesSol; stats.priceMiss = 缺价 token 数
+  const prices = { ...freshPrices };
+  const uniqMints = [...new Set(allMints)];
+  const batchEmpty = uniqMints.length > 0 && Object.keys(freshPrices).length === 0;
+  const staleMints = new Set(); let priceMiss = 0;
+  for (const m of uniqMints) {
+    if (freshPrices[m] > 0) continue;
+    priceMiss++;
+    if (lastPricesSol[m] > 0) { prices[m] = lastPricesSol[m]; staleMints.add(m); }
+  }
+  if (batchEmpty) console.error(`[SOL] Jupiter 报价整批为空, ${staleMints.size}/${uniqMints.length} 个 mint 沿用上轮价`);
+  else if (priceMiss) console.log(`[SOL] ${priceMiss} 个 mint 本轮缺价 (${staleMints.size} 个沿用上轮价)`);
 
   let grandTotalUSD = 0, totalActive = 0, totalInRange = 0, totalOutOfRange = 0, totalFees = 0, walletsWithActiveLP = 0;
 
   for (const wr of walletResults) {
     let walletTotal = 0, hasActive = false;
     for (const pos of wr.positions) {
-      if (!pos.token0.symbol) pos.token0.symbol = symbols[pos.token0addr]?.symbol || pos.token0addr.slice(0, 4);
-      if (!pos.token1.symbol) pos.token1.symbol = symbols[pos.token1addr]?.symbol || pos.token1addr.slice(0, 4);
+      // 2026-09-28 审计修复: 沿用上轮的仓位 (_stale) 保留上轮算好的全部字段 (它已按上轮方向归一、含上轮定价/盈亏/日化), 不用本轮价格重算, 只参与合计
+      if (!pos._stale) {
+      if (!pos.token0.symbol) pos.token0.symbol = cleanSym(symbols[pos.token0addr]?.symbol, pos.token0addr);   // 2026-09-28 审计修复 (XSS 上游)
+      if (!pos.token1.symbol) pos.token1.symbol = cleanSym(symbols[pos.token1addr]?.symbol, pos.token1addr);
       const price0 = prices[pos.token0addr] || 0;
       const price1 = prices[pos.token1addr] || 0;
+      if (staleMints.has(pos.token0addr) || staleMints.has(pos.token1addr)) pos.priceStale = true;   // 2026-09-28 审计修复: 本轮价格缺失、沿用上轮价
       pos.token0USD = price0;
       pos.token1USD = price1;
       pos.positionValueUSD = pos.amount0 * price0 + pos.amount1 * price1;
       pos.feesValueUSD = pos.feesOwed0 * price0 + pos.feesOwed1 * price1;
       pos.totalValueUSD = pos.positionValueUSD + pos.feesValueUSD;
       // 盈亏字段 (sol-ledger 命中才有): 开仓成本 / 持币对照→无常损失 / 已领费 / 已提回 / 净利润
-      {
-        const lg = solLedger.positionPnl(wr.address, pos._activityKey || pos.positionKey);
-        if (lg) pnlLedger.applyPnl(pos, { cost: lg.cost, approx: lg.approx, source: 'ledger', am: lg.a, costBy: lg.cb, withdrawnUSD: lg.ret, collectedUSD: lg.fees > 0 ? lg.fees : undefined, feesUnknown: lg.feesUnknown }, a => prices[a] || 0);
-      }
+      // 2026-09-28 审计修复: 已领费先定口径再进 applyPnl 与累计日化, 三处同一个值: 账本 (按领取时价) > 已有数值 > Meteora 链上累计已领 (_claimed*, 按现价折算);
+      //   原先 Raydium/Orca 只认 _claimed* 吃不到账本值, 且 applyPnl 跑在折算之前 (净利润漏掉链上已领费)
+      const lg = solLedger.positionPnl(wr.address, pos._activityKey || pos.positionKey);
+      const claimedUSD = (pos._claimed0 || 0) * price0 + (pos._claimed1 || 0) * price1;
+      const collectedUSD = (lg && lg.fees > 0) ? lg.fees : (Number.isFinite(pos.collectedFeesUSD) ? pos.collectedFeesUSD : claimedUSD);
+      // feesUnknown: 账本的「已领费拆不开」与本轮「未领费读取失败」任一为真都保留 (applyPnl 会整体覆写该字段)
+      if (lg) pnlLedger.applyPnl(pos, { cost: lg.cost, approx: lg.approx, source: 'ledger', am: lg.a, costBy: lg.cb, withdrawnUSD: lg.ret, collectedUSD, feesUnknown: !!(lg.feesUnknown || pos.feesUnknown) }, a => prices[a] || 0);
+      pos.collectedFeesUSD = collectedUSD;
 
       // === 日化（与 BSC 同口径） ===
       // createdAt = 仓位账户最早签名的 blockTime（Meteora position PDA / Raydium·Orca NFT mint）
       if (pos.liquidityActive && pos.positionValueUSD >= 10) {
-        pos.createdAt = await getCreatedAt(pos.positionKey);
+        const cr = await getCreatedAt(pos.positionKey);
+        pos.createdAt = cr.ts;
+        if (cr.approx) pos.createdAtApprox = true;   // 2026-09-28 审计修复: 签名翻满 20 页仍未见底, 建仓时间为近似值
         // lastCollectAt = 仓位账户最近一笔操作（领取/加减仓都会产生签名）
         const lastAct = await getLastActivityAt(pos._activityKey || pos.positionKey);
         if (lastAct > pos.createdAt + 60000) pos.lastCollectAt = lastAct; // 距创建>1分钟才视为后续操作
@@ -705,8 +816,7 @@ async function _fetchAllSol() {
       if (pos.createdAt > 0 && pos.positionValueUSD >= 10) {
         const totalDays = (Date.now() - pos.createdAt) / 86400000;
         if (totalDays > 0) {
-          // 1. 累计日化：已领 + 未领（从创建起算）
-          const collectedUSD = (pos._claimed0 || 0) * price0 + (pos._claimed1 || 0) * price1;
+          // 1. 累计日化：已领 + 未领（从创建起算）; 已领用上面定好口径的 collectedUSD
           const totalFeesUSD = collectedUSD + pos.feesValueUSD;
           if (totalFeesUSD > 0) {
             pos.dailyRateCumulative = (totalFeesUSD / pos.positionValueUSD) / totalDays * 100;
@@ -714,13 +824,13 @@ async function _fetchAllSol() {
           pos.totalDays = totalDays >= 1 ? Math.floor(totalDays) : 0;
           pos.totalHours = Math.floor(totalDays * 24);
           pos.hasCollected = collectedUSD > 0 || !!pos.lastCollectAt;
-          if (!(pos.collectedFeesUSD > 0)) pos.collectedFeesUSD = collectedUSD;   // 账本已给已领费 (按领取时价) 则以账本为准
         }
 
         // 2. 当前日化：未领手续费 / 本金 / 距上次操作（无操作则距创建）
         const currentStart = pos.lastCollectAt || pos.createdAt;
         const holdMs = Date.now() - currentStart;
         const holdDays = holdMs / 86400000;
+        if (holdMs < 3600000) pos.rateUnstable = true;   // 2026-09-28 审计修复: 计时起点距今 <1h, 日化照算但打标 (样本太短, 前端提示)
         if (holdDays > 0 && pos.feesValueUSD > 0) {
           pos.dailyRateCurrent = (pos.feesValueUSD / pos.positionValueUSD) / holdDays * 100;
           pos.holdDays = holdDays >= 1 ? Math.floor(holdDays) : 0;
@@ -728,9 +838,10 @@ async function _fetchAllSol() {
           pos.holdMinutes = Math.floor((holdMs % 3600000) / 60000);
         }
       }
+      }   // end !_stale
 
-      walletTotal += pos.totalValueUSD;
-      totalFees += pos.feesValueUSD;
+      walletTotal += pos.totalValueUSD || 0;
+      totalFees += pos.feesValueUSD || 0;
       if (pos.liquidityActive) {
         totalActive++; hasActive = true;
         if (pos.inRange) totalInRange++; else totalOutOfRange++;
@@ -749,7 +860,7 @@ async function _fetchAllSol() {
     });
   }
 
-  const wallets = walletResults.filter(wr => wr.positions.length > 0);
+  const wallets = walletResults.filter(wr => wr.positions.length > 0 || wr._stale);   // 2026-09-28 审计修复: 失败沿用的钱包 (_stale) 不剔, 前端能看到「数据未更新」
   wallets.sort((a, b) => {
     const nA = parseInt((a.name.match(/\d+/) || ['0'])[0]);
     const nB = parseInt((b.name.match(/\d+/) || ['0'])[0]);
@@ -780,17 +891,26 @@ async function _fetchAllSol() {
     idle,
     timestamp: Date.now(),
     chain: 'sol',
-    stats: { totalActive, totalInRange, totalOutOfRange, totalFees, walletsWithActiveLP, totalWallets: activeWallets().length },
+    failedWallets,   // 2026-09-28 审计修复: 本轮抓取失败、沿用上轮数据的钱包地址
+    stats: { totalActive, totalInRange, totalOutOfRange, totalFees, walletsWithActiveLP, totalWallets: activeWallets().length, priceMiss },   // 2026-09-28 审计修复: priceMiss
   };
-  lastPricesSol = prices;
+  // 2026-09-28 审计修复: Jupiter 整批为空 (或本轮根本没有 mint 要问) 不覆盖上轮价, 避免把 lastPricesSol 清成空表污染账本估值
+  if (uniqMints.length && !batchEmpty) lastPricesSol = prices;
+  sanitizeCacheSymbols(result);   // 2026-09-28 审计修复 (XSS 上游): 写缓存前再过一遍
   cache = { data: result, timestamp: Date.now() };
   saveCache();
-  console.log(`[SOL] Fetch complete. ${wallets.length} wallets, ${totalActive} active, total $${grandTotalUSD.toFixed(2)}`);
+  console.log(`[SOL] Fetch complete. ${wallets.length} wallets, ${totalActive} active, total $${grandTotalUSD.toFixed(2)}${failedWallets.length ? `, ${failedWallets.length} wallets stale` : ''}${priceMiss ? `, ${priceMiss} mints price-miss` : ''}`);
   return result;
 }
 
+// 2026-09-28 审计修复: 翻转名单加 WSOL —— 仅当 token0=WSOL 且 token1 不是稳定币 (SOL/USDC 等稳定币池方向不变, 现有 USDC/USDT 池显示不受影响); 沿用上轮已归一的仓不再翻
+function shouldFlipSol(pos) {
+  if (pos._normalized) return false;
+  if (STABLE_MINTS.has(pos.token0addr)) return true;
+  return pos.token0addr === WSOL_MINT && !STABLE_MINTS.has(pos.token1addr);
+}
 function normalizeSolPosition(pos) {
-  if (STABLE_MINTS.has(pos.token0addr)) {
+  if (shouldFlipSol(pos)) {
     return {
       ...pos,
       token0: pos.token1, token1: pos.token0,
@@ -865,7 +985,7 @@ function mountSolRoutes(app, adminGuard) {
       res.json(await fetchAllSol(req.query.refresh === 'true'));
     } catch (e) {
       console.error('[SOL] API error:', e);
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: '刷新失败，请稍后重试' });   // 2026-09-28 审计修复: 不把含 RPC URL/key 的错误文本回给前端
     }
   });
 

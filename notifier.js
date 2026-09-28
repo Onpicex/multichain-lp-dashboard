@@ -85,18 +85,23 @@ async function sendTg(text) {
   }
 }
 
-async function sendTgChunked(lines) {
+// 2026-09-28 审计修复: 分段发送改为「每段成功即回调提交」onChunkSent(chunk), 调用方按段落实翻转; 某段失败立即停并返回 false
+//   (原先只返回整体成败, 第 2 段失败会让第 1 段已送达的事件下轮重复推送)
+async function sendTgChunked(events, onChunkSent) {
   let buf = [];
   let len = 0;
-  for (const line of lines) {
-    if (len + line.length + 2 > TG_MAX && buf.length) {
-      if (!await sendTg(buf.join('\n\n'))) return false;
-      buf = []; len = 0;
-    }
-    buf.push(line); len += line.length + 2;
+  const flush = async () => {
+    if (!buf.length) return true;
+    const ok = await sendTg(buf.map(e => e.text).join('\n\n'));
+    if (ok && onChunkSent) onChunkSent(buf);
+    buf = []; len = 0;
+    return ok;
+  };
+  for (const ev of events) {
+    if (len + ev.text.length + 2 > TG_MAX && buf.length) { if (!await flush()) return false; }
+    buf.push(ev); len += ev.text.length + 2;
   }
-  if (buf.length) return sendTg(buf.join('\n\n'));
-  return true;
+  return flush();
 }
 
 let checking = false;
@@ -114,8 +119,7 @@ async function _checkInner() {
   st.lastRun = Date.now();
   if (!cfg.enabled) { writeJson(STATE_FILE, st); return; }
 
-  const lines = [];        // 待发送的消息段
-  const flips = [];        // 发送成功后才落盘的翻转 [{rec, out}]
+  const events = [];       // 待发送的事件 [{ text, rec, out }]; 哪段发送成功, 哪段的翻转才落实 (2026-09-28 按段提交)
 
   for (const [chain, apiBase] of Object.entries(CHAIN_API)) {
     const sel = (cfg.wallets && Array.isArray(cfg.wallets[chain])) ? cfg.wallets[chain] : ownAddrs(chain);   // 未单独设置 = 自有钱包
@@ -137,14 +141,25 @@ async function _checkInner() {
       continue;
     }
 
+    // 2026-09-28 审计修复: 载荷顶层 failedWallets (本轮抓取失败, 仓位沿用上轮) 与钱包对象 _stale 一起识别
+    const failedSet = new Set((Array.isArray(data.failedWallets) ? data.failedWallets : []).map(a => normAddr(chain, a)));
+    // 2026-09-28 审计修复: 去抖按这份缓存的 timestamp 计数 —— 链 10min 刷一次、巡检 5min 一次, 同一份缓存看两遍不能算两次确认
+    const obsTs = data.timestamp || 0;
     const seen = new Set();
+    const observed = new Set();          // 2026-09-28 审计修复: 本轮真正拿到仓位列表的钱包; 「消失仓位」清理只对它们做
     for (const w of data.wallets) {
       const addr = normAddr(chain, w.address || '');
       if (!selSet.has(addr)) continue;
+      const pos = Array.isArray(w.positions) ? w.positions : [];
+      const staleW = w._stale === true || failedSet.has(addr);
+      // 2026-09-28 审计修复: 抓取失败 (_stale / failedWallets) 或仓位列表为空的钱包: 不跑状态机、不清 key。
+      //   否则中断期间 key 被清, 恢复后出区间的仓位被当「首见」静默基线, 永远不报; 沿用的旧仓位再计一次去抖也会假确认
+      if (staleW || !pos.length) { if (staleW) console.log(`[notify] ${chain} ${addr.slice(0, 10)} 本轮抓取失败 (沿用上轮), 跳过`); continue; }
+      observed.add(addr);
       const bkey = `${chain}:${addr}`;
       const isBaseline = !st.base[bkey];
 
-      for (const p of (w.positions || [])) {
+      for (const p of pos) {
         if (!p.liquidityActive || typeof p.inRange !== 'boolean') continue;
         // dex 前缀只在 Pancake 仓上出现 (Uniswap 仓 key 不变, 已有基线/状态不受影响); 防 Pancake 与 Uniswap V3 tokenId 撞号
         const key = `${chain}:${addr}:${p.dex ? p.dex + '-' : ''}${p.protocol || ''}:${p.tokenId}`;
@@ -152,38 +167,38 @@ async function _checkInner() {
         const out = !p.inRange;
         const rec = st.keys[key];
         if (!rec || isBaseline) { st.keys[key] = { out, ts: 0 }; continue; }  // 首见静默基线
-        if (out === rec.out) { delete rec.pend; delete rec.n; continue; }     // 状态未变, 清抖动计数
-        // 观测到翻转 → 去抖
-        if (rec.pend === out) rec.n = (rec.n || 1) + 1;
-        else { rec.pend = out; rec.n = 1; }
+        if (out === rec.out) { delete rec.pend; delete rec.n; delete rec.pts; continue; }     // 状态未变, 清抖动计数
+        // 观测到翻转 → 去抖: 同向且缓存 timestamp 变了才 +1 (timestamp 缺失时退回每轮计数); 已到 CONFIRM 但上轮没发出去的, 这里继续进 events 重试
+        if (rec.pend === out) { if (!obsTs || rec.pts !== obsTs) { rec.n = (rec.n || 1) + 1; rec.pts = obsTs; } }
+        else { rec.pend = out; rec.n = 1; rec.pts = obsTs; }
         if (rec.n >= CONFIRM) {
           if (out || cfg.notifyRecover !== false) {
-            lines.push(fmtEvent(chain, w.name || addr, p, out));
-            flips.push({ rec, out });
+            events.push({ text: fmtEvent(chain, w.name || addr, p, out), rec, out });
           } else {
             // 回区间但用户关了恢复通知: 静默翻转
-            rec.out = out; delete rec.pend; delete rec.n;
+            rec.out = out; delete rec.pend; delete rec.n; delete rec.pts;
           }
         }
       }
       if (isBaseline) st.base[bkey] = 1;
     }
-    // 已消失的仓位(平仓/转出)静默清理 — 只清本链已勾选钱包的
+    // 已消失的仓位(平仓/转出)静默清理 — 只清本链已勾选、且本轮真正观测到了仓位列表的钱包的 (2026-09-28)
     for (const k of Object.keys(st.keys)) {
       if (!k.startsWith(chain + ':')) continue;
       const a = k.split(':')[1];
-      if (selSet.has(a) && !seen.has(k)) delete st.keys[k];
+      if (selSet.has(a) && observed.has(a) && !seen.has(k)) delete st.keys[k];
     }
   }
 
-  if (lines.length) {
-    const ok = await sendTgChunked(lines);
-    if (ok) {
-      for (const { rec, out } of flips) { rec.out = out; delete rec.pend; delete rec.n; rec.ts = Date.now(); }
-      console.log(`[notify] 已通知 ${lines.length} 条区间事件`);
-    } else {
-      console.log(`[notify] 发送失败, ${lines.length} 条事件保留待下轮重试`);
-    }
+  if (events.length) {
+    // 2026-09-28 审计修复: 按段提交 —— 每段发送成功立刻落实该段的翻转; 第 2 段失败只让第 2 段下轮重试, 第 1 段不再重复推送
+    let sent = 0;
+    const ok = await sendTgChunked(events, chunk => {
+      for (const { rec, out } of chunk) { rec.out = out; delete rec.pend; delete rec.n; delete rec.pts; rec.ts = Date.now(); }
+      sent += chunk.length;
+    });
+    if (ok) console.log(`[notify] 已通知 ${sent} 条区间事件`);
+    else console.log(`[notify] 发送失败: 已送达 ${sent} 条, ${events.length - sent} 条事件保留待下轮重试`);
   }
   writeJson(STATE_FILE, st);
 }
@@ -249,4 +264,4 @@ function mountNotifier(app, adminGuard) {
   console.log(`Notifier mounted (/api/notify/*), channel=${TG_TOKEN && TG_CHAT ? 'sentinel-tg' : 'UNCONFIGURED'}`);
 }
 
-module.exports = { mountNotifier, _test: { check, loadCfg, loadState, fmtEvent, sendTg } };
+module.exports = { mountNotifier, _test: { check, loadCfg, loadState, fmtEvent, sendTg, sendTgChunked } };

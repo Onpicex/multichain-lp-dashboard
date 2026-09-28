@@ -1,0 +1,8 @@
+# /etc/nginx/lp-token.map —— LP 仪表盘登录 cookie 的 nginx 闸门 (vhost-lp-dashboard.conf 在 http 级 include 它)
+# 2026-09-28 审计修复: 令牌从 vhost 文件搬到这个独立文件 (服务器上 root:root 0600), 仓库只保留本占位版。
+# 服务器上不要手改: 用 tools/rotate-lp-token.sh 生成/轮换 —— 它同时写应用侧 .lpauth-token, 两处值必须一致。
+# 键 = cookie lpauth 的值 (48 位 hex); 命中 => $lp_ok=1 放行, 否则 0 (页面 302 /login, API 401)。
+map $cookie_lpauth $lp_ok {
+    "__LPAUTH_TOKEN__"   1;
+    default  0;
+}

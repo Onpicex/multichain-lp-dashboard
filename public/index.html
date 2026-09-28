@@ -503,6 +503,12 @@
   .apr-cell { font-family: var(--mono); font-size: 13px; font-weight: 700; color: var(--green); text-align: right; }
   .apr-sub { font-size: 10px; color: var(--text-muted); font-weight: 400; }
   .val-cell { font-family: var(--mono); font-size: 15px; font-weight: 700; }
+  /* 2026-09-28 审计修复: 数据新鲜度小标记 (后端新契约) —— 价格沿用上轮 * / 钱包沿用上轮「旧」/ 日化不稳定 ~ / 抓取失败提示条 / 缺价计数; 只在有标记时出现, 不占位 */
+  .px-stale { color: var(--text-muted); font-size: 0.8em; font-weight: 600; margin-left: 2px; cursor: help; }
+  .w-stale { color: var(--text-muted); font-size: 10px; font-weight: 500; margin-left: 4px; cursor: help; }
+  .rate-unstable { color: var(--text-muted); cursor: help; }
+  .fetch-warn { font-size: 11.5px; color: var(--yellow); padding: 8px 2px; border-bottom: 1px solid var(--border); }
+  .px-miss { font-size: 9.5px; color: var(--yellow); margin-left: 4px; cursor: help; }
 
   /* ── Detail row ── */
   .detail-row { display: none; }
@@ -719,7 +725,8 @@
   .sn-page { padding: 0 0 40px; }
   .sn-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border); }
   .sn-toolbar .filter-label { margin-left: 6px; }
-  .sn-strip { display: grid; grid-template-columns: repeat(5, 1fr); border-bottom: 1px solid var(--border); }
+  .sn-strip { display: grid; grid-template-columns: repeat(6, 1fr); border-bottom: 1px solid var(--border); }   /* 2026-09-28 审计修复: 统计条是 6 格, 原 repeat(5) 让第 6 格单独掉到第二行 */
+  #snStrip .stat-cell:last-child .stat-val { white-space: normal; }   /* 2026-09-28 审计修复: 第 6 格是「未实现 / 已实现」两个数, 1/6 宽放不下时在「/」处折行, 别溢出格子 */
   .sn-strip .stat-sub { font-family: var(--mono); font-size: 10.5px; color: var(--text-muted); margin-top: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .sn-pos { color: var(--green); } .sn-neg { color: var(--red); } .sn-zero { color: var(--text-muted); }
   .sn-chart-card { margin: 14px 0 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px 8px; }
@@ -741,6 +748,12 @@
   .sn-tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border-light); border-radius: 6px; padding: 6px 9px; font-size: 11px; font-family: var(--mono); color: var(--text); white-space: nowrap; display: none; z-index: 3; box-shadow: 0 4px 14px rgba(0,0,0,0.45); line-height: 1.6; }
   .sn-tip b { color: var(--text-dim); font-weight: 500; }
   .sn-tw { overflow-x: auto; margin-top: 8px; }
+  /* 2026-09-28 审计修复: 表格/余额面板横向溢出时给常显细滚动条 (Mac 默认隐藏滚动条 = 看不出右边还有列); 不溢出时不出现, 不改布局。
+     WebKit/Blink 用 ::-webkit-scrollbar 8px; scrollbar-width 只给 Firefox (Chrome 121+ 一旦设了 scrollbar-width 就忽略 ::-webkit-scrollbar, Mac 上又变回隐藏的浮层滚动条) */
+  .sn-tw::-webkit-scrollbar, .idle-panel::-webkit-scrollbar { width: 8px; height: 8px; }
+  .sn-tw::-webkit-scrollbar-thumb, .idle-panel::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 4px; }
+  .sn-tw::-webkit-scrollbar-track, .idle-panel::-webkit-scrollbar-track { background: transparent; }
+  @supports not selector(::-webkit-scrollbar) { .sn-tw, .idle-panel { scrollbar-width: thin; scrollbar-color: var(--border-light) transparent; } }
   .sn-table { width: 100%; border-collapse: collapse; }
   .sn-table th { text-align: right; font-size: 10.5px; font-weight: 500; color: var(--text-muted); padding: 10px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; letter-spacing: 0.04em; text-transform: uppercase; }
   .sn-table th:first-child, .sn-table td:first-child { text-align: left; }
@@ -805,8 +818,8 @@
     .sn-strip { grid-template-columns: repeat(2, 1fr); }
     .sn-strip .stat-cell { border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); }
     .sn-strip .stat-cell:nth-child(2n) { border-right: none; }
-    .sn-strip .stat-cell:last-child { grid-column: 1 / -1; border-right: none; border-bottom: none; }
-    .pn-strip .stat-cell:last-child { grid-column: auto; }   /* #pnStrip 同时带 stats-strip/sn-strip 类, 上面两条「末格整行」都会打到它: 6 格要老实排三行两列 (必须放在 sn-strip 规则之后) */
+    .sn-strip .stat-cell:nth-last-child(-n+2) { border-bottom: none; }   /* 2026-09-28 审计修复: 快照统计条 6 格 = 两列三行, 不再「末格整行」(原规则按奇数格写, 让第 5 格右边空一块); 末行两格都不要底线 */
+    .pn-strip .stat-cell:last-child { grid-column: auto; }   /* #pnStrip 同时带 stats-strip 类, 那边的「末格整行」会打到它: 6 格要老实排三行两列 (必须放在 stats-strip 规则之后) */
     .sn-chart-wrap { height: 190px; }
     .sn-table th, .sn-table td { padding: 8px 6px; font-size: 11.5px; }
     .sn-hm { display: none; }
@@ -843,12 +856,14 @@
       <button class="nav-item" data-chain="base">
         <span class="chain-ico base">B</span> <span class="chain-name">Base</span>
       </button>
-      <button class="nav-item pending" data-chain="arc">
-        <span class="chain-ico arc">A</span> <span class="chain-name">Arc</span> <span class="nav-soon">待主网</span>
+      <!-- 2026-09-28 审计修复: Arc 主网已上线 (服务端 /api/chains 无 pending 字段), 去掉默认 pending 类; 「待主网」角标保留但默认隐藏, 只由服务端 pending 字段点亮 -->
+      <button class="nav-item" data-chain="arc">
+        <span class="chain-ico arc">A</span> <span class="chain-name">Arc</span> <span class="nav-soon" style="display:none">待主网</span>
       </button>
     </nav>
     <div class="sidebar-section">工具</div>
     <nav id="toolNav">
+      <!-- 2026-09-28 审计修复: 股票看板已迁到 stock.fucklp.com (HTTPS + 登录), 旧 IP 直链改掉 -->
       <a class="nav-item" href="/stocks.html" target="_blank" rel="noopener">
         <span class="chain-ico stk">股</span> <span class="chain-name">股票代币成交额 ↗</span>
       </a>
@@ -895,7 +910,7 @@
 
   <div class="stats-strip" id="statsBar" style="display:none;">
     <div class="stat-cell big" title="钱包余额 + LP 仓位价值（含待领手续费）">
-      <div class="stat-label">总价值（钱包+LP）</div>
+      <div class="stat-label">总价值（钱包+LP）<span class="px-miss" id="pxMissNote" style="display:none"></span></div>
       <div class="stat-val" id="totalValue" style="color:var(--green);">—</div>
     </div>
     <div class="stat-cell big" id="idleCell" onclick="togIdle()" title="LP 头寸之外的钱包代币资产，点击展开代币明细">
@@ -1123,6 +1138,7 @@ document.querySelectorAll('#chainNav .nav-item').forEach(btn => {
     document.getElementById('wmAddr').placeholder = chain === 'sol' ? 'Solana 地址 (base58)' : '0x... EVM 地址';
     document.getElementById('wmAddr').maxLength = chain === 'sol' ? 44 : 42;
     curData = null;
+    loadSeq++;   // 2026-09-28 审计修复: 切链请求序号 +1 (loadSeq 声明在下一个 script 块, 点击时已就绪); 旧链还在路上的 /positions、/wallets 响应回来即丢弃
     try { activeF = localStorage.getItem('lpWalletF_' + chain) || 'all'; } catch { activeF = 'all'; }
     document.getElementById('content').innerHTML = '<div class="state-box"><div class="spinner"></div><div class="state-text">加载链上数据…</div></div>';
     document.getElementById('statsBar').style.display = 'none';
@@ -1161,10 +1177,37 @@ try { activeF = localStorage.getItem('lpWalletF_' + activeChain) || 'all'; } cat
 
 function $(id) { return document.getElementById(id); }
 
+// 2026-09-28 审计修复: 统一 fetch 包装 —— 401 (nginx 登录闸门, 会话过期) 跳登录页并带 next 回跳 (只跳一次, 防抖);
+//   其它非 2xx 抛 Error (message = 服务端 error 字段, 没有则 'API 错误: <status>', 另带 e.status); opts.allow304 时 304 原样返回 (轻探用)
+let authRedirected = false;
+async function apiFetch(url, opts) {
+  const r = await fetch(url, opts);
+  if (r.status === 401) {
+    if (!authRedirected) { authRedirected = true; location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search + location.hash); }
+    const e = new Error('登录已过期, 正在跳转登录页…'); e.status = 401; throw e;
+  }
+  if (r.status === 304 && opts && opts.allow304) return r;
+  if (!r.ok) {
+    let msg = '';
+    try { const j = await r.clone().json(); if (j && j.error) msg = String(j.error); } catch {}
+    const e = new Error(msg || ('API 错误: ' + r.status)); e.status = r.status; throw e;
+  }
+  return r;
+}
+// 2026-09-28 审计修复: 空 body / 非 JSON (刷新撞上后台轮返回空) → 抛可识别错误, 调用方决定重试
+async function apiJson(url, opts) {
+  const r = await apiFetch(url, opts);
+  try { return await r.json(); } catch { const e = new Error('响应为空或非 JSON'); e.badJson = true; throw e; }
+}
+// 2026-09-28 审计修复: 离谱金额护栏 (|v| > 1e12 = 历史定价出错残留), 总览/详情/快照/盈亏共用
+function absurd(v) { return typeof v === 'number' && Math.abs(v) > 1e12; }
+// 2026-09-28 审计修复: 切链请求序号 —— 切链时 +1, 响应回来 seq 不等于当前值即丢弃 (防旧链数据覆盖新链)
+let loadSeq = 0;
+
 // ================= 预接线链 (主网未上线) =================
 // 真源 = 服务端 /api/chains 的 pending 字段; 拿不到时用内置默认降级 —— 宁可多显示占位卡,
 // 也不能去打一个还不存在的 RPC。主网上线后服务端删掉 pending, 前端无需改动即自动转为正常链。
-let PENDING_CHAINS = { arc: '2026-09-16' };
+let PENDING_CHAINS = {};   // 2026-09-28 审计修复: Arc 已上线, 默认不再把它当 pending (真源仍是 /api/chains 的 pending 字段)
 const PENDING_META = {
   arc: {
     chainId: 5042, gas: 'USDC', site: 'https://www.arc.io/',
@@ -1198,9 +1241,7 @@ function renderPending() {
 }
 (async function loadChainPending() {
   try {
-    const r = await fetch('/api/chains');
-    if (!r.ok) return;
-    const list = await r.json();
+    const list = await apiJson('/api/chains');   // 2026-09-28 审计修复: 走统一包装 (401 跳登录)
     if (!Array.isArray(list)) return;
     const wasPending = isPending();          // 只有"本以为 pending、服务端说已上线"才需要补拉,
     const next = {};                         // 否则每次正常打开页面都会多打一轮重复请求
@@ -1227,16 +1268,27 @@ function toggleWalletMgr() {
 }
 
 async function loadWallets() {
+  // 2026-09-28 审计修复: 请求前清空旧链列表; 响应回来核对链/序号再赋值 (防切链竞态把别的链的钱包塞进来); 非 2xx 显示错误不再静默
+  const chainAtStart = activeChain, seq = loadSeq;
+  walletList = [];
   try {
-    const r = await fetch(apiBase() + '/wallets');
-    walletList = await r.json();
+    const list = await apiJson(apiBase() + '/wallets');
+    if (chainAtStart !== activeChain || seq !== loadSeq) return;
+    walletList = Array.isArray(list) ? list : [];
     wmEditing = null;
     renderWalletList();
-  } catch (e) { console.error('Load wallets failed:', e); }
+    // 钱包列表决定「自有」过滤 (钱包余额卡) 与抓取失败钱包的名字映射: 仓位数据若先到, 这里补一次重绘
+    if (curData && !settingsOpen && !snapOpen && !pnlOpen) renderKeepOpen(curData);
+  } catch (e) {
+    console.error('Load wallets failed:', e);
+    if (chainAtStart !== activeChain || seq !== loadSeq) return;
+    const el = $('wmError'); if (el) { el.textContent = '钱包列表加载失败: ' + e.message; el.style.display = 'block'; }
+  }
 }
 
 let wmEditing = null;   // 正在编辑的钱包地址
-function escH(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+// 2026-09-28 审计修复: 补 ' → &#39; (属性值里单引号也能断开)
+function escH(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
 function renderWalletList() {
   const total = walletList.length, onN = walletList.filter(wOn).length;
@@ -1248,7 +1300,7 @@ function renderWalletList() {
       return `<div class="wm-item-edit">
         <input class="wm-input name" id="wmEditName" value="${escH(w.name)}" placeholder="名称">
         <input class="wm-input addr" id="wmEditAddr" value="${escH(w.address)}" placeholder="地址">
-        <button class="wm-save-btn" id="wmSaveBtn" onclick="saveWallet('${w.address}')">保存</button>
+        <button class="wm-save-btn" id="wmSaveBtn" data-addr="${escH(w.address)}" onclick="saveWallet(this.dataset.addr)">保存</button>
         <button class="wm-cancel-btn" onclick="cancelEditWallet()">取消</button>
       </div>`;
     }
@@ -1259,10 +1311,10 @@ function renderWalletList() {
         <span class="wm-item-addr">${escH(w.address)}</span>
       </div>
       <div style="display:flex;flex-shrink:0;align-items:center;">
-        <button class="wm-own-btn${w.own ? ' on' : ''}" onclick="toggleWalletOwn('${w.address}', ${w.own ? 'false' : 'true'})" title="${w.own ? '自有钱包 · 资金查询/快照/盈亏/通知默认都看它 · 点击改为观察' : '观察钱包 (别人的) · 只看仓位, 不进资金/快照/盈亏/通知 · 点击改为自有'}">${w.own ? '自有' : '观察'}</button>
-        <button class="wm-eye-btn${on ? '' : ' off'}" onclick="toggleWalletEnabled('${w.address}', ${on ? 'false' : 'true'})" title="${on ? '已启用 · 点击停用（不再抓取此钱包的仓位与余额）' : '已停用 · 点击启用（恢复抓取）'}">${on ? EYE_ON : EYE_OFF}</button>
-        <button class="wm-edit-btn" onclick="editWallet('${w.address}')" title="编辑">✏️</button>
-        <button class="wm-del-btn" onclick="delWallet('${w.address}')" title="删除">✖</button>
+        <button class="wm-own-btn${w.own ? ' on' : ''}" data-addr="${escH(w.address)}" onclick="toggleWalletOwn(this.dataset.addr, ${w.own ? 'false' : 'true'})" title="${w.own ? '自有钱包 · 资金查询/快照/盈亏/通知默认都看它 · 点击改为观察' : '观察钱包 (别人的) · 只看仓位, 不进资金/快照/盈亏/通知 · 点击改为自有'}">${w.own ? '自有' : '观察'}</button>
+        <button class="wm-eye-btn${on ? '' : ' off'}" data-addr="${escH(w.address)}" onclick="toggleWalletEnabled(this.dataset.addr, ${on ? 'false' : 'true'})" title="${on ? '已启用 · 点击停用（不再抓取此钱包的仓位与余额）' : '已停用 · 点击启用（恢复抓取）'}">${on ? EYE_ON : EYE_OFF}</button>
+        <button class="wm-edit-btn" data-addr="${escH(w.address)}" onclick="editWallet(this.dataset.addr)" title="编辑">✏️</button>
+        <button class="wm-del-btn" data-addr="${escH(w.address)}" onclick="delWallet(this.dataset.addr)" title="删除">✖</button>
       </div>
     </div>`;
   }).join('');
@@ -1302,12 +1354,11 @@ async function saveWallet(oldAddr) {
   const btn = $('wmSaveBtn');
   if (btn) btn.disabled = true;
   try {
-    const r = await fetch(apiBase() + '/wallets/' + encodeURIComponent(oldAddr), {
+    // 2026-09-28 审计修复: 走 apiFetch (401 跳登录; 非 2xx 抛错, message = 服务端 error, 由 catch 显示)
+    const d = await apiJson(apiBase() + '/wallets/' + encodeURIComponent(oldAddr), {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, address: addr })
     });
-    const d = await r.json();
-    if (!r.ok) { errEl.textContent = d.error || '保存失败'; errEl.style.display = 'block'; return; }
     walletList = d.wallets;
     wmEditing = null;
     renderWalletList();
@@ -1332,12 +1383,11 @@ async function addWallet() {
 
   $('wmAddBtn').disabled = true;
   try {
-    const r = await fetch(apiBase() + '/wallets', {
+    // 2026-09-28 审计修复: 走 apiFetch (401 跳登录; 非 2xx 抛错, message = 服务端 error, 由 catch 显示)
+    const d = await apiJson(apiBase() + '/wallets', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ address: addr, name })
     });
-    const d = await r.json();
-    if (!r.ok) { errEl.textContent = d.error || '添加失败'; errEl.style.display = 'block'; return; }
     walletList = d.wallets;
     renderWalletList();
     $('wmAddr').value = ''; $('wmName').value = '';
@@ -1345,6 +1395,11 @@ async function addWallet() {
     loadData(false);
   } catch (e) { errEl.textContent = e.message; errEl.style.display = 'block'; }
   finally { $('wmAddBtn').disabled = false; }
+}
+// 2026-09-28 审计修复: 地址 / 名称框里回车 = 点「添加」(输入法组字时的回车不算; 请求在路上时不重复提交)
+for (const id of ['wmAddr', 'wmName']) {
+  const el = $(id);
+  if (el) el.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229 && !$('wmAddBtn').disabled) { e.preventDefault(); addWallet(); } });
 }
 
 // --- 钱包启停 (小眼睛): 停用=服务端不再抓取该钱包 (仓位/余额/资金回溯), 列表保留可随时恢复 ---
@@ -1354,9 +1409,7 @@ function wOn(w) { return w.enabled !== false; }
 async function toggleWalletOwn(addr, own) {
   const errEl = $('wmError'); errEl.style.display = 'none';
   try {
-    const r = await fetch(apiBase() + '/wallets/' + encodeURIComponent(addr), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ own: !!own }) });
-    const d = await r.json();
-    if (!r.ok) { errEl.textContent = d.error || '操作失败'; errEl.style.display = 'block'; return; }
+    const d = await apiJson(apiBase() + '/wallets/' + encodeURIComponent(addr), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ own: !!own }) });   // 2026-09-28 审计修复: 走 apiFetch
     walletList = d.wallets;
     renderWalletList();
     if (typeof renderStTabs === 'function') renderStTabs();
@@ -1366,12 +1419,11 @@ async function toggleWalletEnabled(addr, enable) {
   const errEl = $('wmError');
   errEl.style.display = 'none';
   try {
-    const r = await fetch(apiBase() + '/wallets/' + encodeURIComponent(addr), {
+    // 2026-09-28 审计修复: 走 apiFetch
+    const d = await apiJson(apiBase() + '/wallets/' + encodeURIComponent(addr), {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: !!enable })
     });
-    const d = await r.json();
-    if (!r.ok) { errEl.textContent = d.error || '操作失败'; errEl.style.display = 'block'; return; }
     walletList = d.wallets;
     renderWalletList();
     // 停用: 服务端已就地剔出缓存, 轻拉即可; 启用: 数据靠后台刷新, 实时同步 (10s 轻探) 自动带回
@@ -1382,28 +1434,31 @@ async function toggleWalletEnabled(addr, enable) {
 async function delWallet(addr) {
   if (!confirm('确认删除该地址？')) return;
   try {
-    const r = await fetch(apiBase() + '/wallets/' + encodeURIComponent(addr), { method: 'DELETE' });
-    const d = await r.json();
-    if (r.ok) {
-      walletList = d.wallets;
-      renderWalletList();
-      loadData(false);   // 服务端缓存已同步剔除该钱包, 轻拉即可
-    }
-  } catch (e) { console.error('Delete wallet failed:', e); }
+    const d = await apiJson(apiBase() + '/wallets/' + encodeURIComponent(addr), { method: 'DELETE' });   // 2026-09-28 审计修复: 走 apiFetch, 失败显示错误不再静默
+    walletList = d.wallets;
+    renderWalletList();
+    loadData(false);   // 服务端缓存已同步剔除该钱包, 轻拉即可
+  } catch (e) { console.error('Delete wallet failed:', e); const el = $('wmError'); if (el) { el.textContent = '删除失败: ' + e.message; el.style.display = 'block'; } }
 }
+// 2026-09-28 审计修复: 金额格式化 —— null/undefined/NaN/Infinity → '—' (此前显示 $0 假装有数); |v|>1e12 → '异常'; 负数带符号 (-$1,234.56, 此前出 "$-5.000000")
 function fU(v) {
-  if (v==null||isNaN(v)||v===0) return '$0';
-  if (v>=1e6) return '$'+(v/1e6).toFixed(2)+'M';
-  if (v>=1000) return '$'+v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
-  if (v>=1) return '$'+v.toFixed(2);
-  if (v>=0.01) return '$'+v.toFixed(4);
-  return '$'+v.toFixed(6);
+  if (v==null) return '—'; v=Number(v); if (!isFinite(v)) return '—';
+  if (absurd(v)) return '异常';
+  if (v===0) return '$0';
+  const s=v<0?'-':'', a=Math.abs(v);
+  if (a>=1e6) return s+'$'+(a/1e6).toFixed(2)+'M';
+  if (a>=1000) return s+'$'+a.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  if (a>=1) return s+'$'+a.toFixed(2);
+  if (a>=0.01) return s+'$'+a.toFixed(4);
+  return s+'$'+a.toFixed(6);
 }
 function fU2(v) {
-  if (v==null||isNaN(v)) return '$0.00';
-  if (v>=1e6) return '$'+(v/1e6).toFixed(2)+'M';
-  if (v>=1000) return '$'+v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
-  return '$'+v.toFixed(2);
+  if (v==null) return '—'; v=Number(v); if (!isFinite(v)) return '—';
+  if (absurd(v)) return '异常';
+  const s=v<0?'-':'', a=Math.abs(v);
+  if (a>=1e6) return s+'$'+(a/1e6).toFixed(2)+'M';
+  if (a>=1000) return s+'$'+a.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  return s+'$'+a.toFixed(2);
 }
 function fN(v,d=4) {
   if (v==null||isNaN(v)||v===0) return '0';
@@ -1449,10 +1504,10 @@ function togCl(id) {
 // 协议标签: Uniswap 按 V3/V4 着色; PancakeSwap (仅 BSC, dex='pancake') 青色 CAKE V3, 质押在 MasterChef 的加"质押"
 // Solana 仓位带 platform: 平台名 + 池型 (METEORA DLMM / RAYDIUM CLMM / ORCA WHIRLPOOL), 颜色按池型
 function protoTag(p) {
-  const proto = p.protocol || 'V3';
-  if (p.platform) return `<span class="protocol-tag ${proto.toLowerCase()}">${p.platform.toUpperCase()} ${proto.toUpperCase()}</span>`;
-  if (p.dex === 'pancake') return `<span class="protocol-tag pcs" title="PancakeSwap V3${p.staked ? ' · 已质押 MasterChefV3' : ''}">CAKE ${proto}${p.staked ? ' 质押' : ''}</span>`;
-  return `<span class="protocol-tag ${proto.toLowerCase()}">${proto}</span>`;
+  const proto = String(p.protocol || 'V3');   // 2026-09-28 审计修复: 协议名/平台名来自链上或第三方元数据, 一律 escH
+  if (p.platform) return `<span class="protocol-tag ${escH(proto.toLowerCase())}">${escH(String(p.platform).toUpperCase())} ${escH(proto.toUpperCase())}</span>`;
+  if (p.dex === 'pancake') return `<span class="protocol-tag pcs" title="PancakeSwap V3${p.staked ? ' · 已质押 MasterChefV3' : ''}">CAKE ${escH(proto)}${p.staked ? ' 质押' : ''}</span>`;
+  return `<span class="protocol-tag ${escH(proto.toLowerCase())}">${escH(proto)}</span>`;
 }
 
 // 设置页各功能的「生效钱包」(四处共用): 默认 = 管理钱包里标了「自有」的; 本链有单独设置 (例外) 时列出并给「改为跟随自有」
@@ -1470,7 +1525,7 @@ function stEffective(explicitArr, followFn) {
   return h;
 }
 async function pnToggleLedgerFromSettings(addr) {
-  try { const r = await fetch(apiBase() + '/wallets/' + encodeURIComponent(addr), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ledger: false }) }); if (r.ok) { walletList = (await r.json()).wallets; renderWalletList(); } } catch {}
+  try { const d = await apiJson(apiBase() + '/wallets/' + encodeURIComponent(addr), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ledger: false }) }); walletList = d.wallets; renderWalletList(); } catch (e) { console.error('关账本失败:', e); }   // 2026-09-28 审计修复: 走 apiFetch
 }
 // 触屏没有 hover: 点一下 .has-tip 展开提示, 再点或点别处收起
 document.addEventListener('click', e => {
@@ -1489,6 +1544,16 @@ window.addEventListener('load', sbScrollToActive);
 function fdFollowOwn() { if (fdCfg && fdCfg.wallets) { delete fdCfg.wallets[activeChain]; saveFdCfg(); } }
 function spFollowOwn() { if (spCfg && spCfg.wallets) { delete spCfg.wallets[activeChain]; saveSpCfg(); } }
 function nmFollowOwn() { if (notifyCfg && notifyCfg.wallets) { delete notifyCfg.wallets[activeChain]; saveNotifyCfg(); } }
+// 2026-09-28 审计修复: 待领费「读取失败」判定 —— feesUnknown 在后端是两个语义共用一个字段:
+//   EVM (server.js): 只来自 applyPnl, 含义 = V4/账本「已领费拆不开/无来源」, 待领费本身是准的 → 绝不当读取失败 (否则 V4 仓刚领完费 待领=0 时会被误标 —)
+//   Solana (sol-adapter, 仓位带 platform): 未领费读取失败/溢出 → feesUnknown (待领费落 0); 有账本 (costSource=ledger) 时再与账本的「已领费拆不开」合并
+//   所以: 非 Solana 不认; Solana 无账本 = 必是读取失败; Solana 有账本 = 两义混合, 只在待领费为 0 时当读取失败 (有正值说明读到了)
+function feesBad(p) {
+  if (p.pendingFeesFailed === true) return true;   // 建议后端改用的专用字段, 有就直接认
+  if (p.feesUnknown !== true || !p.platform) return false;
+  if (p.costSource !== 'ledger') return true;
+  return !(p.feesValueUSD > 0);
+}
 // 开仓成本按币拆分的悬浮文本: costBy = { token地址: { q: 存入数量(毛), cost: 分摊成本 } }; tokens = [{address, symbol}]
 function costTip(costBy, tokens) {
   if (!costBy) return '';
@@ -1500,7 +1565,8 @@ function costTip(costBy, tokens) {
 }
 function mkDet(p) {
   const full = isFullRange(p);
-  const pct = full ? 50 : (p.inRange
+  // 2026-09-28 审计修复: 现价 ≤0 或上下限相等时不算百分比 (此前除零出 NaN%), 游标停在 0
+  const pct = full ? 50 : (!(p.currentPrice > 0) || !(p.upperPrice > p.lowerPrice)) ? 0 : (p.inRange
     ? Math.min(100, Math.max(0, ((p.currentPrice-p.lowerPrice)/(p.upperPrice-p.lowerPrice))*100))
     : (p.currentPrice<p.lowerPrice ? 0 : 100));
   // Uniswap 官方仓位链接: 仅 app 收录的链(eth/base/bsc/rh); sol 按平台跳池子页 (URL 格式与 sol-stocks 看板同源)
@@ -1512,18 +1578,22 @@ function mkDet(p) {
     Orca: a => `https://www.orca.so/pools/${a}`,
   };
   const solPool = p.platform && p.poolAddress && SOL_POOL_URL[p.platform];
+  // 2026-09-28 审计修复: tokenId / 池地址 / 平台名进 href 与文本前 escH (Solana 的 tokenId 是链上 pubkey 字符串)
   const uniLink = p.dex === 'pancake'
-    ? `<a class="uni-link" href="https://pancakeswap.finance/liquidity/position/v3/bsc/${p.tokenId}" target="_blank" rel="noopener">在 PancakeSwap 查看 ↗</a>`
+    ? `<a class="uni-link" href="https://pancakeswap.finance/liquidity/position/v3/bsc/${escH(p.tokenId)}" target="_blank" rel="noopener">在 PancakeSwap 查看 ↗</a>`
     : solPool
-    ? `<a class="uni-link" href="${solPool(p.poolAddress)}" target="_blank" rel="noopener">在 ${p.platform} 查看池子 ↗</a>`
+    ? `<a class="uni-link" href="${escH(solPool(p.poolAddress))}" target="_blank" rel="noopener">在 ${escH(p.platform)} 查看池子 ↗</a>`
     : slug
-    ? `<a class="uni-link" href="https://app.uniswap.org/positions/${(p.protocol||'V3').toLowerCase()}/${slug}/${p.tokenId}" target="_blank" rel="noopener">在 Uniswap 查看 ↗</a>`
+    ? `<a class="uni-link" href="https://app.uniswap.org/positions/${escH(String(p.protocol||'V3').toLowerCase())}/${slug}/${escH(p.tokenId)}" target="_blank" rel="noopener">在 Uniswap 查看 ↗</a>`
     : '';
   // (原「开仓时价值」「建仓至今差价」两格 2026-09-28 按用户要求去掉: 有了开仓成本/无常损失/净利润后没用了)
   // 开仓成本 (真实购买成本) / 无常损失 / 净利润 —— 服务端 pnl-ledger.applyPnl 注入:
   //   rh·arc 走钱包账本 (实际付出, 含换币损耗); 其他链退回开仓时点池价 (approx)
   let pnlCells = '';
-  if (p.costBasisUSD > 0) {
+  // 2026-09-28 审计修复: 盈亏任一金额离谱 (|v|>1e12, 历史定价出错残留) → 三格合并标「数据异常」, 不显示假数字
+  if (p.costBasisUSD > 0 && [p.costBasisUSD, p.netProfitUSD, p.ilUSD, p.hodlValueUSD].some(absurd)) {
+    pnlCells += `<div><div class="d-label">开仓成本 / 无常损失 / 净利润</div><div class="d-val"><span class="pn-st out" title="该仓某笔事件的历史池价离谱 (死池/薄池), 账本下轮重算会修正">数据异常 · 等待重算</span></div></div>`;
+  } else if (p.costBasisUSD > 0) {
     const sg = v => v >= 0 ? '+' : '-';
     const costSub = p.costSource === 'ledger'
       ? (p.costApprox ? '钱包实付 · 部分按当时市值补齐' : '钱包实付 · 含换币损耗/滑点')
@@ -1534,20 +1604,24 @@ function mkDet(p) {
       const il = p.ilUSD || 0, pc = p.hodlValueUSD > 0 ? il / p.hodlValueUSD * 100 : 0;
       pnlCells += `<div><div class="d-label">无常损失</div><div class="d-val ${il >= 0 ? 'gain' : 'loss'}">${sg(il)}${fU2(Math.abs(il))} (${sg(il)}${Math.abs(pc).toFixed(2)}%)</div><div class="d-sub">对比持币不动 ${fU(p.hodlValueUSD)}</div></div>`;
     }
-    const np = p.netProfitUSD || 0, npc = p.netProfitPct || 0;
+    const np = p.netProfitUSD, npc = p.netProfitPct || 0;
     const parts = ['现值', '待领费'];
     if (p.collectedFeesUSD > 0) parts.push('已领费 ' + fU2(p.collectedFeesUSD));
     if (p.withdrawnUSD > 0) parts.push('已提 ' + fU2(p.withdrawnUSD));
-    pnlCells += `<div><div class="d-label">净利润</div><div class="d-val ${np >= 0 ? 'gain' : 'loss'}">${sg(np)}${fU2(Math.abs(np))} (${sg(np)}${Math.abs(npc).toFixed(2)}%)</div><div class="d-sub">${parts.join('+')}−成本${p.feesUnknown ? ' · 不含已领费' : ''}</div></div>`;
+    // 2026-09-28 审计修复: netProfitUSD 为 null/undefined (账本尚未算出) 显示 —, 此前 ||0 假装 +$0.00
+    pnlCells += `<div><div class="d-label">净利润</div>${np == null ? '<div class="d-val">—</div>' : `<div class="d-val ${np >= 0 ? 'gain' : 'loss'}">${sg(np)}${fU2(Math.abs(np))} (${sg(np)}${Math.abs(npc).toFixed(2)}%)</div>`}<div class="d-sub">${parts.join('+')}−成本${p.feesUnknown ? ' · 不含已领费' : ''}</div></div>`;
   }
+  // 2026-09-28 审计修复: 代币符号来自链上元数据, 一律 escH; 头寸价值沿用上轮价时加灰色 *; 待领费读取失败时显示 —
+  const s0 = escH(p.token0.symbol), s1 = escH(p.token1.symbol);
+  const pxStale = p.priceStale ? '<span class="px-stale" title="本轮价格缺失, 沿用上轮价">*</span>' : '';
   return `<div class="detail-inner">
     <div class="detail-grid">
-      <div><div class="d-label">${p.token0.symbol} 数量</div><div class="d-val">${fN(p.amount0)}</div>${p.token0USD?`<div class="d-sub">${fU(p.amount0*p.token0USD)}</div>`:''}</div>
-      <div><div class="d-label">${p.token1.symbol} 数量</div><div class="d-val">${fN(p.amount1)}</div>${p.token1USD?`<div class="d-sub">${fU(p.amount1*p.token1USD)}</div>`:''}</div>
-      <div><div class="d-label">手续费 ${p.token0.symbol}</div><div class="d-val fees">${fN(p.feesOwed0)}</div>${p.token0USD?`<div class="d-sub">${fU2(p.feesOwed0*p.token0USD)}</div>`:''}</div>
-      <div><div class="d-label">手续费 ${p.token1.symbol}</div><div class="d-val fees">${fN(p.feesOwed1)}</div>${p.token1USD?`<div class="d-sub">${fU2(p.feesOwed1*p.token1USD)}</div>`:''}</div>
-      <div><div class="d-label">头寸价值</div><div class="d-val">${fU(p.positionValueUSD)}</div></div>
-      <div><div class="d-label">手续费价值</div><div class="d-val fees">${fU2(p.feesValueUSD)}</div></div>
+      <div><div class="d-label">${s0} 数量</div><div class="d-val">${fN(p.amount0)}</div>${p.token0USD?`<div class="d-sub">${fU(p.amount0*p.token0USD)}</div>`:''}</div>
+      <div><div class="d-label">${s1} 数量</div><div class="d-val">${fN(p.amount1)}</div>${p.token1USD?`<div class="d-sub">${fU(p.amount1*p.token1USD)}</div>`:''}</div>
+      <div><div class="d-label">手续费 ${s0}</div><div class="d-val fees">${feesBad(p) ? '<span title="未领费读取失败">—</span>' : fN(p.feesOwed0)}</div>${p.token0USD && !feesBad(p)?`<div class="d-sub">${fU2(p.feesOwed0*p.token0USD)}</div>`:''}</div>
+      <div><div class="d-label">手续费 ${s1}</div><div class="d-val fees">${feesBad(p) ? '<span title="未领费读取失败">—</span>' : fN(p.feesOwed1)}</div>${p.token1USD && !feesBad(p)?`<div class="d-sub">${fU2(p.feesOwed1*p.token1USD)}</div>`:''}</div>
+      <div><div class="d-label">头寸价值</div><div class="d-val">${fU(p.positionValueUSD)}${pxStale}</div></div>
+      <div><div class="d-label">手续费价值</div><div class="d-val fees">${feesBad(p) ? '<span title="未领费读取失败">—</span>' : fU2(p.feesValueUSD)}</div></div>
       ${p.pendingCake > 0 ? `<div><div class="d-label">CAKE 奖励 (待领)</div><div class="d-val fees">${fN(p.pendingCake)}</div>${p.rewardValueUSD ? `<div class="d-sub">${fU2(p.rewardValueUSD)}</div>` : ''}</div>` : ''}
       ${p.dailyRateCumulative ? `<div><div class="d-label">累计日化</div><div class="d-val fees">${p.dailyRateCumulative.toFixed(2)}%</div><div class="d-sub">${p.totalDays>=1 ? p.totalDays+'天'+((p.totalHours%24)>0?(p.totalHours%24)+'h':'') : (p.totalHours||0)+'h'} · ${p.protocol==='V4' ? '不含已领' : '含已领'}</div></div>` : ''}
       ${pnlCells}
@@ -1555,7 +1629,7 @@ function mkDet(p) {
     <div class="range-bar-labels"><span>下限: ${fP(p.lowerPrice)}</span><span>上限: ${fP(p.upperPrice)}</span></div>
     <div class="range-bar-track"><div class="range-bar-fill" style="left:0;width:${pct}%"></div><div class="range-bar-cursor" style="left:${pct}%"></div></div>
     <div class="range-bar-current">当前价: <span>${fP(p.currentPrice)}</span></div>
-    <div class="detail-foot"><span class="pos-id">仓位 <b>#${p.tokenId}</b>${p.histPending ? ' <span title="Pancake 无子图, 建仓时间/领费历史靠链上事件回扫, 尚未追平; 追平前累计日化可能偏低">· 历史回扫中…</span>' : ''}</span>${uniLink}</div>
+    <div class="detail-foot"><span class="pos-id">仓位 <b>#${escH(p.tokenId)}</b>${p.histPending ? ' <span title="Pancake 无子图, 建仓时间/领费历史靠链上事件回扫, 尚未追平; 追平前累计日化可能偏低">· 历史回扫中…</span>' : ''}</span>${uniLink}</div>
   </div>`;
 }
 
@@ -1590,11 +1664,11 @@ function render(data) {
       fh+=`<button class="ftag fgrp${curF==='g:'+g?' active':''}${open?' open':''}" style="--gc:${col}" data-f="${open?'all':'g:'+escH(g)}" onclick="setF(this.dataset.f)" title="${open?'再点收起':'点开看组内钱包'}"><span class="fdot"></span>${escH(g)}<span class="fcount">${members.length}</span><span class="farrow">${open?'▾':'▸'}</span></button>`;
       if(open){
         fh+=`<span class="fsub" style="--gc:${col}">`;
-        for(const w of members) fh+=`<button class="ftag fwal${curF===w.address?' active':''}" onclick="setF('${w.address}')" title="${escH(w.name)}">${escH(groupRest(w.name)||w.name)}</button>`;
+        for(const w of members) fh+=`<button class="ftag fwal${curF===w.address?' active':''}" data-f="${escH(w.address)}" onclick="setF(this.dataset.f)" title="${escH(w.name)}">${escH(groupRest(w.name)||w.name)}</button>`;   // 2026-09-28 审计修复: 地址走 data 属性
         fh+='</span>';
       }
     }
-    for(const w of singles) fh+=`<button class="ftag${curF===w.address?' active':''}" onclick="setF('${w.address}')">${escH(w.name)}</button>`;
+    for(const w of singles) fh+=`<button class="ftag${curF===w.address?' active':''}" data-f="${escH(w.address)}" onclick="setF(this.dataset.f)">${escH(w.name)}</button>`;   // 2026-09-28 审计修复: 地址走 data 属性
     fb.innerHTML=fh;
   } else fb.style.display='none';
 
@@ -1633,9 +1707,20 @@ function render(data) {
     $('totalFees').textContent=fU2(tf);
   }
 
+  lastIdle={data:idleData,f:idleF};   // 2026-09-28 审计修复: 记下闲置面板入参, 展开/收起面板时只重绘面板不重绘整表 (别把展开的明细行收起)
   renderIdle(idleData,idleF);
 
-  if(!ws.length){ $('content').innerHTML='<div class="state-box"><div class="state-text">暂无活跃头寸</div></div>'; return; }
+  // 2026-09-28 审计修复: 后端新契约 —— failedWallets (本轮抓取失败, 仓位沿用上轮) 提示条; stats.priceMiss (缺价代币数) 在总价值卡副行
+  let warn='';
+  const failed=Array.isArray(data.failedWallets)?data.failedWallets:[];
+  if(failed.length){
+    const nm=a=>{ const k=nmNorm(a); const w=walletList.find(x=>nmNorm(x.address)===k)||data.wallets.find(x=>nmNorm(x.address)===k); return w&&w.name?w.name:sA(String(a)); };
+    warn=`<div class="fetch-warn" title="${escH(failed.join(', '))}">⚠ 本轮 ${failed.length} 个钱包抓取失败, 沿用上轮数据: ${escH(failed.map(nm).join(', '))}</div>`;
+  }
+  const pmEl=$('pxMissNote'), pm=data.stats&&Number(data.stats.priceMiss)||0;
+  if(pmEl){ if(pm>0){ pmEl.textContent='⚠'+pm+' 缺价'; pmEl.title='本轮 '+pm+' 个代币没拿到价格, 相关仓位/余额沿用上轮价 (标 *)'; pmEl.style.display=''; } else pmEl.style.display='none'; }   // 文案收短: 统计卡标签不换行, 手机两列放得下
+
+  if(!ws.length){ $('content').innerHTML=warn+'<div class="state-box"><div class="state-text">暂无活跃头寸</div></div>'; return; }
 
   let h=`<table class="pos-table"><thead><tr>
     <th>交易对</th><th style="text-align:center">钱包</th><th class="hide-m" style="text-align:center">区间</th><th style="text-align:center">状态</th><th class="hide-m" style="text-align:right">手续费</th><th style="text-align:right">当前日化</th><th style="text-align:right">价值</th>
@@ -1646,10 +1731,15 @@ function render(data) {
     const cls=w.positions.filter(p=>!p.liquidityActive);
     for(const p of act){
       const uid=w.address.slice(-6)+'-'+p.tokenId;
-      h+=`<tr class="pos-row" onclick="togExp('${uid}')">
-        <td class="pair-cell">${p.token0.symbol}/${p.token1.symbol}${protoTag(p)}${p.feeLabel?`<span class="fee-tag">${p.feeLabel}</span>`:''}<span class="pair-wallet">${w.name}</span></td>
-        <td class="wallet-cell">${w.name}</td>
+      // 2026-09-28 审计修复: 代币符号/费率标签/钱包名/uid 一律 escH, uid 走 data 属性; 新标记: 钱包沿用上轮「旧」/ 价格沿用上轮 * / 日化不稳定 ~ / 待领费读取失败 —
+      const sym=escH(p.token0.symbol)+'/'+escH(p.token1.symbol), wn=escH(w.name)+(w._stale?'<span class="w-stale" title="沿用上轮">旧</span>':'');
+      const rate=p.dailyRateCurrent ? (p.rateUnstable?'<span class="rate-unstable" title="持有不足 1 小时, 日化不稳定">~</span>':'')+p.dailyRateCurrent.toFixed(2)+'%' : '—';
+      h+=`<tr class="pos-row" data-uid="${escH(uid)}" onclick="togExp(this.dataset.uid)">
+        <td class="pair-cell">${sym}${protoTag(p)}${p.feeLabel?`<span class="fee-tag">${escH(p.feeLabel)}</span>`:''}<span class="pair-wallet">${wn}</span></td>
+        <td class="wallet-cell">${wn}</td>
         <td class="range-cell hide-m">${isFullRange(p) ? `<span class="range-bounds"><span style="opacity:.7">全区间</span> 0 — ∞</span><div class="mini-range"><span class="mini-range-pct down">—</span><div class="mini-range-track"><div class="mini-range-fill" style="left:0;width:50%"></div></div><span class="mini-range-pct up">—</span></div>` : ('<span class="range-bounds">'+fP(p.lowerPrice)+' — '+fP(p.upperPrice)+'</span>')+(()=>{
+          // 2026-09-28 审计修复: 现价 ≤0 或上下限相等 → 不算百分比 (此前除零出 NaN%), 显示 —, 进度条 0
+          if(!(p.currentPrice>0)||!(p.upperPrice>p.lowerPrice)) return `<div class="mini-range"><span class="mini-range-pct down">—</span><div class="mini-range-track"><div class="mini-range-fill" style="left:0;width:0%"></div></div><span class="mini-range-pct up">—</span></div>`;
           const pct=p.inRange?Math.min(100,Math.max(0,((p.currentPrice-p.lowerPrice)/(p.upperPrice-p.lowerPrice))*100)):(p.currentPrice<p.lowerPrice?0:100);
           const dL=((p.lowerPrice-p.currentPrice)/p.currentPrice)*100;
           const dU=((p.upperPrice-p.currentPrice)/p.currentPrice)*100;
@@ -1657,25 +1747,28 @@ function render(data) {
           return `<div class="mini-range"><span class="mini-range-pct down">${fD(dL)}</span><div class="mini-range-track"><div class="mini-range-fill" style="left:0;width:${pct}%"></div></div><span class="mini-range-pct up">${fD(dU)}</span></div>`;
         })()}</td>
         <td class="status-cell"><span class="range-dot ${p.inRange?'in':'out'}"></span><span class="status-text ${p.inRange?'in':'out'}">${p.inRange?'区间内':'区间外'}</span></td>
-        <td class="fees-cell hide-m" style="text-align:right">${fU2(p.feesValueUSD)}</td>
-        <td class="apr-cell">${p.dailyRateCurrent ? p.dailyRateCurrent.toFixed(2)+'%' : '—'}${p.dailyRateCurrent ? `<div class="apr-sub">${p.holdDays>=1 ? p.holdDays+'天'+(p.holdHours%24>0?(p.holdHours%24)+'h':'') : p.holdHours+'h'+((p.holdMinutes||0)>0?(p.holdMinutes+'m'):'')}${p.hasCollected ? ' ↻' : ''}</div>` : ''}</td>
-        <td class="val-cell">${fU(p.totalValueUSD)}${(()=>{
+        <td class="fees-cell hide-m" style="text-align:right">${feesBad(p)?'<span title="未领费读取失败">—</span>':fU2(p.feesValueUSD)}</td>
+        <td class="apr-cell">${rate}${p.dailyRateCurrent ? `<div class="apr-sub">${p.holdDays>=1 ? p.holdDays+'天'+(p.holdHours%24>0?(p.holdHours%24)+'h':'') : p.holdHours+'h'+((p.holdMinutes||0)>0?(p.holdMinutes+'m'):'')}${p.hasCollected ? ' ↻' : ''}</div>` : ''}</td>
+        <td class="val-cell">${fU(p.totalValueUSD)}${p.priceStale?'<span class="px-stale" title="本轮价格缺失, 沿用上轮价">*</span>':''}${(()=>{
           if(!(p.costBasisUSD>0)) return '';
-          const np=p.netProfitUSD||0, pc=p.netProfitPct||0, sign=np>=0?'+':'-';
+          // 2026-09-28 审计修复: 净利润 null/undefined → — (此前 ||0 显示 +$0.00); 离谱值 (>1e12) → 数据异常
+          if([p.costBasisUSD,p.netProfitUSD].some(absurd)) return `<div class="val-diff" title="历史池价离谱, 账本下轮重算">数据异常</div>`;
+          if(p.netProfitUSD==null) return `<div class="val-diff" title="净利润 (账本尚未算出)">—</div>`;
+          const np=p.netProfitUSD, pc=p.netProfitPct||0, sign=np>=0?'+':'-';
           return `<div class="val-diff ${np>=0?'gain':'loss'}" title="净利润">${sign}${fU2(Math.abs(np))} · ${sign}${Math.abs(pc).toFixed(1)}%${p.costApprox?'*':''}</div>`;
         })()}</td>
-      </tr><tr class="detail-row" id="det-${uid}"><td colspan="7">${mkDet(p)}</td></tr>`;
+      </tr><tr class="detail-row" id="det-${escH(uid)}"><td colspan="7">${mkDet(p)}</td></tr>`;
     }
     // 已结束头寸暂时隐藏
   }
   h+='</tbody></table>';
-  $('content').innerHTML=h;
+  $('content').innerHTML=warn+h;
 }
 
 function setF(v){
   activeF=v;
   try{localStorage.setItem('lpWalletF_'+activeChain,v);}catch{}
-  if(curData)render(curData);
+  if(curData)renderKeepOpen(curData);   // 2026-09-28 审计修复: 切筛选保留已展开的明细行
 }
 
 // --- 钱包余额 (闲置资金) 统计卡 + 明细面板 ---
@@ -1718,12 +1811,13 @@ function idleTotalFor(data,curF){
   const w=d.byWallet[curF];
   return w?(w.totalUSD||0):null;
 }
-let idleOpen=false;
+let idleOpen=false, lastIdle=null;   // lastIdle = 上次 render 传给 renderIdle 的 {data,f} (2026-09-28 审计修复)
 try{ idleOpen=localStorage.getItem('lpIdleOpen')==='1'; }catch{}
 function togIdle(){
   idleOpen=!idleOpen;
   try{localStorage.setItem('lpIdleOpen',idleOpen?'1':'0');}catch{}
-  if(curData)render(curData);
+  if(!curData) return;
+  if(lastIdle) renderIdle(lastIdle.data,lastIdle.f); else render(curData);   // 2026-09-28 审计修复: 只重绘余额面板, 不重绘整表 (此前把展开的明细行收起)
 }
 function renderIdle(data,curF){
   const panel=$('idlePanel');
@@ -1744,6 +1838,7 @@ function renderIdle(data,curF){
         const k=t.address;
         if(!agg[k]) agg[k]={symbol:t.symbol,address:k,native:t.native,amount:0,valueUSD:0,priceUSD:t.priceUSD,ws:[]};
         agg[k].amount+=t.amount; agg[k].valueUSD+=t.valueUSD; agg[k].ws.push(w.name);
+        if(t.priceStale) agg[k].priceStale=true;   // 2026-09-28 审计修复: 任一钱包该币缺价 → 汇总行也打 *
       }
     }
     rows=Object.values(agg).sort((a,b)=>b.valueUSD-a.valueUSD);
@@ -1772,7 +1867,7 @@ function renderIdle(data,curF){
     h+='<tr><td class="idle-sym">'+escH(t.symbol)+(t.native?'<span class="idle-native">原生</span>':'')+'</td>'
       +'<td class="num">'+fN(t.amount)+'</td>'
       +'<td class="num">'+(t.priceUSD>0?fU(t.priceUSD):'—')+'</td>'
-      +'<td class="num idle-val">'+fU2(t.valueUSD)+'</td>'
+      +'<td class="num idle-val">'+fU2(t.valueUSD)+(t.priceStale?'<span class="px-stale" title="本轮价格缺失, 沿用上轮价或暂无价">*</span>':'')+'</td>'   // 2026-09-28 审计修复: 后端余额条目 priceStale 标记
       +(curF==='all'?('<td class="idle-ws" title="'+escH((t.ws||[]).join(', '))+'">'+escH((t.ws||[]).join(', '))+'</td>'):'')
       +'</tr>';
   }
@@ -1783,7 +1878,7 @@ function renderIdle(data,curF){
 
 // --- 初始资金 (净入金) 摘要 + 转账明细 (仅 rh 后端提供 funding 数据) ---
 let fundOpen=false;
-function togFund(){ fundOpen=!fundOpen; if(curData)render(curData); }
+function togFund(){ fundOpen=!fundOpen; if(!curData) return; if(lastIdle) renderIdle(lastIdle.data,lastIdle.f); else render(curData); }   // 2026-09-28 审计修复: 只重绘余额面板
 function fT(ts){ if(!ts) return '—'; const d=new Date(ts); return (d.getMonth()+1)+'-'+d.getDate()+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }
 const FUND_CT={external:'外部',internal:'内部',mint:'铸入',burn:'销毁'};
 function mkFund(d,curF){
@@ -1819,7 +1914,7 @@ function mkFund(d,curF){
     for(const e of evs){
       h+='<tr><td class="num">'+fT(e.ts)+'</td>'
         +(curF==='all'?'<td>'+escH(e.wn||'')+'</td>':'')
-        +'<td><span class="fund-dir-'+e.dir+'">'+(e.dir==='in'?'转入':'转出')+'</span><span class="fund-ct">'+(FUND_CT[e.ct]||e.ct)+'</span></td>'
+        +'<td><span class="fund-dir-'+(e.dir==='in'?'in':'out')+'">'+(e.dir==='in'?'转入':'转出')+'</span><span class="fund-ct">'+escH(FUND_CT[e.ct]||e.ct||'')+'</span></td>'   // 2026-09-28 审计修复: dir 收敛为常量, ct 兜底值 escH
         +'<td class="idle-sym">'+escH(e.sym)+'</td>'
         +'<td class="num">'+fN(e.amt)+'</td>'
         +'<td class="num idle-val">'+fU2(e.usd)+'</td>'
@@ -1839,19 +1934,22 @@ function renderKeepOpen(d){
   for(const id of open){ const el=$(id); if(el) el.classList.add('open'); }
 }
 let loadBusy=false, liveEtag=null, liveBusy=false;
-async function loadData(fr=false){
+async function loadData(fr=false,_retry=0){
   if(isPending()){ renderPending(); return; }   // 预接线链: 只渲染占位卡, 不发任何请求
   const b=$('refreshBtn'); b.disabled=true; b.title=''; b.textContent='加载中…'; loadBusy=true;
-  const chainAtStart=activeChain;
+  const chainAtStart=activeChain, seq=loadSeq;   // 2026-09-28 审计修复: 链 + 切链序号双重核对 (A→B→A 快速来回切时链名相同也能认出旧请求)
   try{
-    const r=await fetch(apiBase()+'/positions'+(fr?'?refresh=true':''));
-    if(!r.ok) throw new Error('API 错误: '+r.status);
-    const d=await r.json();
-    if(chainAtStart!==activeChain) return; // 链已切走，丢弃旧数据
+    const r=await apiFetch(apiBase()+'/positions'+(fr?'?refresh=true':''));   // 2026-09-28 审计修复: 走统一包装 (401 跳登录, 非 2xx 带服务端错误)
+    let d; try{ d=await r.json(); }catch{ const e=new Error('响应为空或非 JSON'); e.badJson=true; throw e; }   // 要读 ETag 头, 所以不用 apiJson, 语义相同
+    if(chainAtStart!==activeChain||seq!==loadSeq) return; // 链已切走，丢弃旧数据
     liveEtag=r.headers.get('ETag');
     renderKeepOpen(d);
     nextR=Date.now()+RI;
-  }catch(e){ $('content').innerHTML='<div class="error-box"><p>⚠ '+e.message+'</p></div>'; }
+  }catch(e){
+    if(chainAtStart!==activeChain||seq!==loadSeq) return;   // 2026-09-28 审计修复: 旧链请求的报错也别盖到新链页面上
+    if(e.badJson&&!_retry){ setTimeout(()=>loadData(false,1),2000); return; }   // 2026-09-28 审计修复: 空 body (刷新撞上后台轮) 2 秒后静默重试一次
+    $('content').innerHTML='<div class="error-box"><p>⚠ '+escH(e.message)+'</p></div>';   // 2026-09-28 审计修复: 错误消息可能带服务端原文, escH
+  }
   finally{ b.disabled=false; b.textContent='刷新'; loadBusy=false; }
 }
 
@@ -1860,13 +1958,16 @@ async function loadData(fr=false){
 const LIVE_MS=10000;
 async function livePoll(){
   if(liveBusy||loadBusy||document.hidden||settingsOpen||snapOpen||pnlOpen||isPending()) return;
-  liveBusy=true; const chainAtStart=activeChain;
+  liveBusy=true; const chainAtStart=activeChain, seq=loadSeq;
   try{
     const h={}; if(liveEtag) h['If-None-Match']=liveEtag;
-    const r=await fetch(apiBase()+'/positions',{headers:h});
-    if(chainAtStart!==activeChain||r.status===304||!r.ok) return;
-    liveEtag=r.headers.get('ETag');
+    const r=await apiFetch(apiBase()+'/positions',{headers:h,allow304:true});   // 2026-09-28 审计修复: 走统一包装 —— 会话过期时 10s 轻探拿到 401 即跳登录; 非 2xx 抛错被下面 catch 吞掉 (同原 !r.ok return)
+    if(chainAtStart!==activeChain||seq!==loadSeq||r.status===304) return;
     const d=await r.json();
+    if(chainAtStart!==activeChain||seq!==loadSeq) return;
+    // 2026-09-28 审计修复: 比屏上数据还旧的轻探结果 (手动刷新已先拿到新数据, 轻探才回来) 丢弃, 也不记它的 ETag
+    if(curData&&d.timestamp<curData.timestamp) return;
+    liveEtag=r.headers.get('ETag');
     if(curData&&d.timestamp===curData.timestamp&&d.wallets.length===curData.wallets.length) return;
     renderKeepOpen(d);
     nextR=Date.now()+RI;
@@ -1960,6 +2061,7 @@ function stSetChain(ch) {
   $('wmAddr').placeholder = ch === 'sol' ? 'Solana 地址 (base58)' : '0x... EVM 地址';
   $('wmAddr').maxLength = ch === 'sol' ? 44 : 42;
   curData = null; liveEtag = null; stChainDirty = true;
+  loadSeq++;   // 2026-09-28 审计修复: 设置页切链同样推进请求序号
   try { activeF = localStorage.getItem('lpWalletF_' + ch) || 'all'; } catch { activeF = 'all'; }
   $('content').innerHTML = '<div class="state-box"><div class="spinner"></div><div class="state-text">加载链上数据…</div></div>';
   $('statsBar').style.display = 'none'; $('idlePanel').style.display = 'none'; $('idleValue').textContent = '—';
@@ -2022,20 +2124,16 @@ function applyUiCfg() {
 }
 async function loadUiCfg() {
   try {
-    const r = await fetch('/api/ui/config');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    uiCfg = await r.json();
+    uiCfg = await apiJson('/api/ui/config');   // 2026-09-28 审计修复: 走统一包装
     applyUiCfg();
   } catch (e) { console.error('界面配置加载失败:', e); }
 }
 async function saveUiCfg() {
   const body = { walletMgr: $('wmEnabled').checked };
   try {
-    const r = await fetch('/api/ui/config', {
+    uiCfg = await apiJson('/api/ui/config', {   // 2026-09-28 审计修复: 走统一包装 (非 2xx 抛错, message = 服务端 error)
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
-    uiCfg = await r.json();
     applyUiCfg();
     if (fdCfg) renderFd(); if (notifyCfg) renderNotify(); if (spCfg) renderSp(); if (pnCfg) renderPnCfg();   // 空态提示文案随开关变
     $('wmStError').style.display = 'none';
@@ -2048,12 +2146,10 @@ async function saveUiCfg() {
 }
 
 // --- 钱包资金查询配置 (wallets.<chain> 未设置=全部参与; []=全不参与) ---
-let fdCfg = null;
+let fdCfg = null, fdReloadT = [];   // fdReloadT: 保存后两次回读的定时器 id (2026-09-28 审计修复)
 async function loadFdCfg() {
   try {
-    const r = await fetch('/api/fund/config');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    fdCfg = await r.json();
+    fdCfg = await apiJson('/api/fund/config');   // 2026-09-28 审计修复: 走统一包装
     renderFd();
   } catch (e) { console.error('资金查询配置加载失败:', e); }
 }
@@ -2082,16 +2178,15 @@ async function saveFdCfg() {
   if (!fdCfg) return;
   const body = { enabled: $('fdEnabled').checked, wallets: fdCfg.wallets || {}, _chain: activeChain };
   try {
-    const r = await fetch('/api/fund/config', {
+    fdCfg = await apiJson('/api/fund/config', {   // 2026-09-28 审计修复: 走统一包装
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
-    fdCfg = await r.json();
     renderFd();
     $('fdError').style.display = 'none';
     // 服务端已踢当前链后台刷新, 45s/100s 两次回读让统计卡自然跟上
-    setTimeout(() => loadData(false), 45000);
-    setTimeout(() => loadData(false), 100000);
+    // 2026-09-28 审计修复: 连点开关/勾选时不再堆定时器 —— 先清掉上一次保存排的两次回读
+    for (const t of fdReloadT) clearTimeout(t);
+    fdReloadT = [setTimeout(() => loadData(false), 45000), setTimeout(() => loadData(false), 100000)];
   } catch (e) {
     const el = $('fdError');
     el.textContent = '保存失败: ' + e.message;
@@ -2100,9 +2195,7 @@ async function saveFdCfg() {
 }
 async function loadNotifyCfg() {
   try {
-    const r = await fetch('/api/notify/config');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    notifyCfg = await r.json();
+    notifyCfg = await apiJson('/api/notify/config');   // 2026-09-28 审计修复: 走统一包装
     renderNotify();
   } catch (e) { console.error('通知配置加载失败:', e); }
 }
@@ -2125,7 +2218,7 @@ function renderNotify() {
     ? '<span style="color:var(--green)">哨兵 Telegram ●</span>'
     : '<span style="color:var(--red)">哨兵 Telegram ● 服务器未配置</span>';
   const last = notifyCfg.lastRun ? tA(notifyCfg.lastRun) + '检查' : '尚未运行首轮';
-  $('nmStatus').innerHTML = `通知渠道: ${ch} · 监控中 ${notifyCfg.tracked || 0} 仓 · ${last}`;
+  $('nmStatus').innerHTML = `通知渠道: ${ch} · 监控中 ${escH(notifyCfg.tracked || 0)} 仓 · ${escH(last)}`;   // 2026-09-28 审计修复: 服务端字段插值也 escH
 }
 function nmToggleWallet(addr, on) {
   const arr = nmSelArr(), n = nmNorm(addr);
@@ -2143,11 +2236,9 @@ async function saveNotifyCfg() {
     wallets: notifyCfg.wallets || {},
   };
   try {
-    const r = await fetch('/api/notify/config', {
+    notifyCfg = await apiJson('/api/notify/config', {   // 2026-09-28 审计修复: 走统一包装
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
-    notifyCfg = await r.json();
     renderNotify();
     $('nmError').style.display = 'none';
   } catch (e) {
@@ -2160,9 +2251,9 @@ async function testNotify() {
   const b = $('nmTestBtn'), t = b.textContent;
   b.disabled = true; b.textContent = '⏳ 发送中';
   try {
-    const r = await fetch('/api/notify/test', { method: 'POST' });
-    b.textContent = r.ok ? '✓ 已发送' : ('✗ ' + ((await r.json().catch(() => ({}))).error || '失败'));
-  } catch (e) { b.textContent = '✗ 失败'; }
+    await apiFetch('/api/notify/test', { method: 'POST' });   // 2026-09-28 审计修复: 走统一包装 (非 2xx 抛错, message = 服务端 error)
+    b.textContent = '✓ 已发送';
+  } catch (e) { b.textContent = '✗ ' + (e.status ? e.message : '失败'); }
   setTimeout(() => { b.textContent = t; b.disabled = false; }, 2500);
 }
 
@@ -2178,6 +2269,10 @@ try {
 // 指标: gain = 总资产 − 净入金 (把充提剔掉的真实收益; 没有净入金数据的链退回总资产并注明)
 const SN_METRICS = { gain: '收益', total: '总资产', lp: 'LP 价值', idle: '钱包余额', np: '未实现盈亏', realized: '已实现盈亏', collected: '手续费累计' };
 const SN_RANGES = [['24h', '24 小时'], ['7d', '7 天'], ['30d', '30 天'], ['all', '全部']];
+// 2026-09-28 审计修复: localStorage 里的指标 / 区间 / 范围不在白名单 (旧版本写入、手改) → 回默认, 否则图表标题出 undefined、按钮一个都不亮
+if (!Object.prototype.hasOwnProperty.call(SN_METRICS, snMetric)) snMetric = 'gain';
+if (!SN_RANGES.some(([k]) => k === snRange)) snRange = '30d';
+if (snSc !== 'own' && snSc !== 'obs') snSc = 'own';
 function snSave() { try { localStorage.setItem('snScope', snSc); localStorage.setItem('snChain', snChain); localStorage.setItem('snWallet', snWallet); localStorage.setItem('snMetric2', snMetric); localStorage.setItem('snRange2', snRange); } catch {} }
 // 当前范围的数据源: 自有 = days/hourly/m5; 观察 = obs.days/obs.hourly (无 5 分钟级)
 function snSrc() { const d = snData || {}; return snSc === 'obs' ? { days: (d.obs && d.obs.days) || [], hourly: (d.obs && d.obs.hourly) || [], m5: [] } : { days: d.days || [], hourly: d.hourly || [], m5: d.m5 || [] }; }
@@ -2196,9 +2291,7 @@ function snGroups(wm) {
 async function loadSnap() {
   if (!snData) $('snTable').innerHTML = '<div class="state-box"><div class="spinner"></div><div class="state-text">加载记录…</div></div>';
   try {
-    const r = await fetch('/api/snapshot/list');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    snData = await r.json();
+    snData = await apiJson('/api/snapshot/list');   // 2026-09-28 审计修复: 走统一包装
     renderSnap();
   } catch (e) { $('snTable').innerHTML = '<div class="error-box"><p>⚠ 加载失败: ' + escH(e.message) + '</p></div>'; }
 }
@@ -2244,22 +2337,22 @@ function snSeries() {
   for (const e of src) {
     if (cutoff && e.ts < cutoff) continue;
     const z = snScope(e); if (!z) continue;
-    const v = snMetricVal(z); if (v == null || isNaN(v)) continue;
+    const v = snMetricVal(z); if (v == null || isNaN(v) || absurd(v)) continue;   // 2026-09-28 审计修复: 离谱值 (>1e12) 不进曲线, 否则纵轴被拉到万亿、其余点压成一条线
     out.push({ ts: e.ts, e, z, v });
   }
   // hourly 不足 30 天时用 days 补前段
   if (snRange === '30d' && src === d.hourly && out.length && d.days.length) {
     const first = out[0].ts;
     const pre = [];
-    for (const e of d.days.filter(snIsNew)) { if (e.ts >= first || e.ts < cutoff) continue; const z = snScope(e); if (!z) continue; const v = snMetricVal(z); if (v == null) continue; pre.push({ ts: e.ts, e, z, v }); }
+    for (const e of d.days.filter(snIsNew)) { if (e.ts >= first || e.ts < cutoff) continue; const z = snScope(e); if (!z) continue; const v = snMetricVal(z); if (v == null || isNaN(v) || absurd(v)) continue; pre.push({ ts: e.ts, e, z, v }); }
     out.unshift(...pre);
   }
   return out.sort((a, b) => a.ts - b.ts);
 }
 // 改版 (2026-09-28) 前的每日定时记录: 钱包范围/字段都不同, 不参与统计与曲线, 表里保留并标「旧版」
 function snIsNew(e) { return e.mode === 'auto'; }
-function fD(v) { if (v == null || isNaN(v)) return '—'; const a = Math.abs(v); const s = v > 0 ? '+' : (v < 0 ? '−' : ''); if (a >= 1e6) return s + '$' + (a / 1e6).toFixed(2) + 'M'; return s + '$' + a.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
-function fPc(v, base) { if (!base || v == null || isNaN(v)) return ''; const p = v / Math.abs(base) * 100; return (p > 0 ? '+' : (p < 0 ? '−' : '')) + Math.abs(p).toFixed(2) + '%'; }
+function fD(v) { if (v == null || isNaN(v)) return '—'; if (absurd(v)) return '异常'; /* 2026-09-28 审计修复: 离谱值护栏 */ const a = Math.abs(v); const s = v > 0 ? '+' : (v < 0 ? '−' : ''); if (a >= 1e6) return s + '$' + (a / 1e6).toFixed(2) + 'M'; return s + '$' + a.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function fPc(v, base) { if (!base || v == null || isNaN(v) || absurd(v) || absurd(base)) return ''; /* 2026-09-28 审计修复: 离谱值不算百分比 */ const p = v / Math.abs(base) * 100; return (p > 0 ? '+' : (p < 0 ? '−' : '')) + Math.abs(p).toFixed(2) + '%'; }
 function dCls(v) { return v == null || isNaN(v) || Math.abs(v) < 0.005 ? 'sn-zero' : (v > 0 ? 'sn-pos' : 'sn-neg'); }
 function fK(v) { const a = Math.abs(v); const s = v < 0 ? '−' : ''; if (a >= 1e6) return s + '$' + (a / 1e6).toFixed(2) + 'M'; if (a >= 1e4) return s + '$' + (a / 1e3).toFixed(1) + 'k'; if (a >= 1e3) return s + '$' + (a / 1e3).toFixed(2) + 'k'; return s + '$' + a.toFixed(0); }
 function snTs(ts, withDate) { const d = new Date(ts); const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); return withDate ? (d.getMonth() + 1) + '/' + d.getDate() + ' ' + hm : hm; }
@@ -2297,9 +2390,10 @@ function renderSnap() {
       for (const g of snGI.gList) {
         const open = openG === g, col = groupColor(g), mem = snGI.byG[g];
         h += '<button class="ftag fgrp' + (snWallet === 'g:' + g ? ' active' : '') + (open ? ' open' : '') + '" style="--gc:' + col + '" data-f="' + escH(open ? 'all' : 'g:' + g) + '" onclick="snSetWallet(this.dataset.f)"><span class="fdot"></span>' + escH(g) + '<span class="fcount">' + mem.length + '</span><span class="farrow">' + (open ? '▾' : '▸') + '</span></button>';
-        if (open) { h += '<span class="fsub" style="--gc:' + col + '">'; for (const [a, n] of mem) h += '<button class="ftag fwal' + (snWallet === a ? ' active' : '') + '" onclick="snSetWallet(\'' + escH(a) + '\')" title="' + escH(n) + '">' + escH(groupRest(n) || n) + '</button>'; h += '</span>'; }
+        // 2026-09-28 审计修复: 地址走 data 属性 (escH 进 onclick 的 JS 字符串挡不住: 属性值先 HTML 解码, &#39; 又变回单引号)
+        if (open) { h += '<span class="fsub" style="--gc:' + col + '">'; for (const [a, n] of mem) h += '<button class="ftag fwal' + (snWallet === a ? ' active' : '') + '" data-f="' + escH(a) + '" onclick="snSetWallet(this.dataset.f)" title="' + escH(n) + '">' + escH(groupRest(n) || n) + '</button>'; h += '</span>'; }
       }
-      for (const [a, n] of snGI.singles) h += '<button class="ftag ' + (snWallet === a ? 'active' : '') + '" onclick="snSetWallet(\'' + escH(a) + '\')">' + escH(n) + '</button>';
+      for (const [a, n] of snGI.singles) h += '<button class="ftag ' + (snWallet === a ? 'active' : '') + '" data-f="' + escH(a) + '" onclick="snSetWallet(this.dataset.f)">' + escH(n) + '</button>';
       h += '</div>';
     }
     tb.innerHTML = h; tb.classList.add('two-rows'); tb.style.display = 'block';
@@ -2346,7 +2440,7 @@ function renderSnap() {
     const x = dailyAll[i], pe = i > 0 && snIsNew(x.e) && snIsNew(dailyAll[i - 1].e) ? dailyAll[i - 1] : null;   // 只在新旧同版之间算收益
     const g = pe ? snGainBetween(pe.z, x.z) : null;
     const open = snOpenRow === x.e.date;
-    th += '<tr class="sn-row' + (open ? ' open' : '') + '" onclick="snToggleRow(\'' + x.e.date + '\')"><td><span class="sn-date">' + escH(x.e.date) + '</span><span class="sn-time">' + escH(x.e.time || '') + (i === dailyAll.length - 1 ? ' 最新' : '') + '</span>' + snTags(x.e) + '</td>'
+    th += '<tr class="sn-row' + (open ? ' open' : '') + '" data-k="' + escH(x.e.date) + '" onclick="snToggleRow(this.dataset.k)"><td><span class="sn-date">' + escH(x.e.date) + '</span><span class="sn-time">' + escH(x.e.time || '') + (i === dailyAll.length - 1 ? ' 最新' : '') + '</span>' + snTags(x.e) + '</td>'
       + '<td>' + fU(x.z.total) + '</td>'
       + '<td>' + (g ? '<span class="' + dCls(g.gain) + '">' + fD(g.gain) + '</span>' + (g.flowKnown ? '' : '<span class="sn-tag" title="无净入金数据, 含出入金">含出入金</span>') : '<span class="sn-zero">—</span>') + '</td>'
       + '<td class="sn-hm">' + (g && g.flowKnown ? '<span class="' + dCls(g.dNet) + '">' + fD(g.dNet) + '</span>' : '<span class="sn-zero">—</span>') + '</td>'
@@ -2364,6 +2458,12 @@ function snTags(e) {
   let t = '';
   if (e.stale && e.stale.length) t += '<span class="sn-tag warn" title="记录时这些链的缓存超过 12 分钟: ' + escH(e.stale.join(',')) + '">旧</span>';
   if (e.failed && e.failed.length) t += '<span class="sn-tag warn" title="记录时这些链拉取失败: ' + escH(e.failed.join(',')) + '">缺</span>';
+  // 2026-09-28 审计修复: 后端沿用标记 —— carried = 这些链本轮拉取失败 / 有钱包抓取失败, 数值沿用上一点; pnlStale = ["<链>:<钱包>"] 这些钱包 /pnl 失败, 已实现/手续费沿用上一点
+  if (Array.isArray(e.carried) && e.carried.length) t += '<span class="sn-tag warn" title="' + escH('这些链本轮拉取失败, 数值沿用上一点: ' + e.carried.map(c => CHAIN_NAMES[c] || c).join(', ')) + '">部分链沿用</span>';
+  if (Array.isArray(e.pnlStale) && e.pnlStale.length) {
+    const nm = s => { const i = String(s).indexOf(':'), ch = String(s).slice(0, i), a = String(s).slice(i + 1); const w = (((e.chains || {})[ch] || {}).wallets || {})[a]; return (CHAIN_NAMES[ch] || ch) + ' ' + (w && w.name ? w.name : sA(a)); };
+    t += '<span class="sn-tag warn" title="' + escH('这些钱包的盈亏接口失败, 已实现 / 手续费沿用上一点: ' + e.pnlStale.map(nm).join(', ')) + '">盈亏沿用</span>';
+  }
   if (!snIsNew(e)) t += '<span class="sn-tag" title="2026-09-28 改版前的每日定时记录: 钱包范围与字段不同, 不参与统计与曲线">旧版</span>';
   return t;
 }
@@ -2446,7 +2546,7 @@ function snDrawChart(ser) {
     if (seen.has(idx)) continue; seen.add(idx);
     const anchor = idx === 0 ? 'start' : (idx === ser.length - 1 ? 'end' : 'middle');
     const lab = snRange === 'all' ? ser[idx].e.date.slice(5).replace('-', '/') : snTs(ser[idx].ts, withDate);
-    ax += '<text x="' + pts[idx].x.toFixed(1) + '" y="' + (H - 6) + '" text-anchor="' + anchor + '">' + lab + '</text>';
+    ax += '<text x="' + pts[idx].x.toFixed(1) + '" y="' + (H - 6) + '" text-anchor="' + anchor + '">' + escH(lab) + '</text>';   // 2026-09-28 审计修复: 日期来自服务端数据, escH
   }
   ax += '</g>';
   const lineD = pts.map((p, i) => (i ? 'L' : 'M') + p.x.toFixed(1) + ' ' + p.y.toFixed(1)).join(' ');
@@ -2479,9 +2579,7 @@ window.addEventListener('resize', () => { if (!snapOpen || !snData) return; clea
 let spCfg = null;
 async function loadSpCfg() {
   try {
-    const r = await fetch('/api/snapshot/config');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    spCfg = await r.json();
+    spCfg = await apiJson('/api/snapshot/config');   // 2026-09-28 审计修复: 走统一包装
     renderSp();
   } catch (e) { console.error('快照配置加载失败:', e); }
 }
@@ -2502,11 +2600,9 @@ async function saveSpCfg() {
   if (!spCfg) return;
   const body = { enabled: $('spEnabled').checked, observe: $('spObserve').checked, wallets: spCfg.wallets || {} };
   try {
-    const r = await fetch('/api/snapshot/config', {
+    spCfg = await apiJson('/api/snapshot/config', {   // 2026-09-28 审计修复: 走统一包装
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
-    spCfg = await r.json();
     renderSp();
     $('spError').style.display = 'none';
   } catch (e) {
@@ -2520,9 +2616,7 @@ async function saveSpCfg() {
 let pnCfg = null;
 async function loadPnCfg() {
   try {
-    const r = await fetch('/api/pnl/config');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    pnCfg = await r.json();
+    pnCfg = await apiJson('/api/pnl/config');   // 2026-09-28 审计修复: 走统一包装
     renderPnCfg();
   } catch (e) { console.error('钱包盈亏配置加载失败:', e); }
 }
@@ -2541,7 +2635,7 @@ function renderPnCfg() {
   $('pnSubNote').textContent = explicit ? '本链单独设置' : '跟随管理钱包里的「自有」标记';
   $('pnFollowBtn').style.display = 'none';
   $('pnList').innerHTML = stEffective(Array.isArray((pnCfg.wallets || {})[activeChain]) ? pnCfg.wallets[activeChain] : null, 'pnFollowFund')
-    + (() => { const obs = walletList.filter(w => w.own !== true && wOn(w)); const on = obs.filter(w => w.ledger === true); return '<div class="st-eff"><div class="st-eff-row"><span class="st-eff-label">观察钱包已开账本 · ' + on.length + '/' + obs.length + '</span>' + (on.map(w => '<span class="st-eff-name">' + escH(w.name) + ' <a href="#" onclick="event.preventDefault(); pnToggleLedgerFromSettings(\'' + escH(w.address) + '\')" title="关掉该钱包的账本">✕</a></span>').join('') || '<span class="st-sub-note">无 · 在左侧「钱包盈亏 → 观察」里按钱包开启</span>') + '</div></div>'; })();
+    + (() => { const obs = walletList.filter(w => w.own !== true && wOn(w)); const on = obs.filter(w => w.ledger === true); return '<div class="st-eff"><div class="st-eff-row"><span class="st-eff-label">观察钱包已开账本 · ' + on.length + '/' + obs.length + '</span>' + (on.map(w => '<span class="st-eff-name">' + escH(w.name) + ' <a href="#" data-addr="' + escH(w.address) + '" onclick="event.preventDefault(); pnToggleLedgerFromSettings(this.dataset.addr)" title="关掉该钱包的账本">✕</a></span>').join('') || '<span class="st-sub-note">无 · 在左侧「钱包盈亏 → 观察」里按钱包开启</span>') + '</div></div>'; })();
 }
 function pnCfgToggleWallet(addr, on) {
   if (!pnCfg.wallets || typeof pnCfg.wallets !== 'object') pnCfg.wallets = {};
@@ -2561,9 +2655,7 @@ async function savePnCfg() {
   if (!pnCfg) return;
   const body = { enabled: $('pnEnabled').checked, wallets: pnCfg.wallets || {}, _chain: activeChain };
   try {
-    const r = await fetch('/api/pnl/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
-    pnCfg = await r.json();
+    pnCfg = await apiJson('/api/pnl/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });   // 2026-09-28 审计修复: 走统一包装
     renderPnCfg();
     $('pnError').style.display = 'none';
   } catch (e) {
@@ -2577,9 +2669,10 @@ async function savePnCfg() {
 // 钱包盈亏页: /api/<chain>/pnl?wallet= —— 账本里全部仓位 (活跃 + 已关闭) + 资金对照
 //   rh/arc: 服务端 pnl-ledger 按钱包 Transfer 流水 + 仓位事件重放, 成本=钱包实付; 其他链只有活跃仓 (成本按开仓时价)
 // =============================================================
-let pnScope = 'own', pnChain = 'all', pnWallet = 'all', pnData = null, pnBusy = false, pnPollTimer = null;
+let pnScope = 'own', pnChain = 'all', pnWallet = 'all', pnData = null, pnSeq = 0, pnPollTimer = null;   // pnSeq: 盈亏页请求序号 (2026-09-28 审计修复, 取代 pnBusy)
 try { pnScope = localStorage.getItem('pnScope') || 'own'; pnChain = localStorage.getItem('pnChain2') || 'all'; pnWallet = localStorage.getItem('pnWallet2') || 'all'; } catch {}
 if (pnScope !== 'own' && pnScope !== 'obs') pnScope = 'own';
+if (pnChain !== 'all' && !Object.prototype.hasOwnProperty.call(CHAIN_NAMES, pnChain)) pnChain = 'all';   // 2026-09-28 审计修复: 记忆里的链已不存在 → 全部
 function pnApi(ch) { return ch === 'bsc' ? '/api' : '/api/' + ch; }
 function pnSave() { try { localStorage.setItem('pnScope', pnScope); localStorage.setItem('pnChain2', pnChain); localStorage.setItem('pnWallet2', pnWallet); } catch {} }
 function openPnl() {
@@ -2603,11 +2696,19 @@ function pnWalletMap(d) {
   for (const w of (d.wallets || [])) { const k = w.name; (wm[k] = wm[k] || { name: k, chains: [], items: [] }); wm[k].chains.push(w.chain); wm[k].items.push(w); }
   return wm;
 }
+// 2026-09-28 审计修复: 记忆里的钱包筛选 (localStorage) 与本次数据零交集 (改名 / 删了 / 换了范围或链) → 按「全部」显示, 但不覆盖记忆 (数据回来后自动恢复)
+function pnEffWallet(d) {
+  if (pnWallet === 'all' || !d) return 'all';
+  const names = Object.keys(pnWalletMap(d));
+  const hit = pnWallet.startsWith('g:') ? names.some(n => groupKey(n) === pnWallet.slice(2)) : names.includes(pnWallet);
+  return hit ? pnWallet : 'all';
+}
 function pnSelectedNames(d) {   // 当前钱包筛选覆盖的钱包名集合; null = 全部
-  if (pnWallet === 'all') return null;
+  const pw = pnEffWallet(d);
+  if (pw === 'all') return null;
   const wm = pnWalletMap(d);
-  if (pnWallet.startsWith('g:')) { const g = pnWallet.slice(2); return new Set(Object.keys(wm).filter(n => groupKey(n) === g)); }
-  return new Set([pnWallet]);
+  if (pw.startsWith('g:')) { const g = pw.slice(2); return new Set(Object.keys(wm).filter(n => groupKey(n) === g)); }
+  return new Set([pw]);
 }
 function renderPnToolbar(d) {
   let h = '<div class="tb-row"><span class="filter-label">范围</span>'
@@ -2618,56 +2719,55 @@ function renderPnToolbar(d) {
   h += '</div>';
   const wm = d ? pnWalletMap(d) : {};
   const names = Object.keys(wm);
+  const pw = pnEffWallet(d);   // 2026-09-28 审计修复: 高亮按「生效」的筛选 (记忆失效时亮「全部」)
   h += '<div class="tb-row"><span class="filter-label">钱包</span>';
-  if (!names.length) h += '<span class="st-sub-note">' + (pnScope === 'own' ? '该范围没有标「自有」的钱包 — 到总览页「管理钱包」里把你自己的钱包点成「自有」' : '没有观察钱包') + '</span>';
+  if (!d) h += '<span class="st-sub-note">加载中…</span>';   // 2026-09-28 审计修复: 数据未到时别闪「没有自有钱包」假空态
+  else if (!names.length) h += '<span class="st-sub-note">' + (pnScope === 'own' ? '该范围没有标「自有」的钱包 — 到总览页「管理钱包」里把你自己的钱包点成「自有」' : '没有观察钱包') + '</span>';
   else {
     const gi = snGroups(Object.fromEntries(names.map(n => [n, n])));
-    const openG = pnWallet.startsWith('g:') ? pnWallet.slice(2) : (gi.gmap[pnWallet] || null);
-    h += '<button class="ftag' + (pnWallet === 'all' ? ' active' : '') + '" onclick="pnSetWallet(\'all\')">全部</button>';
+    const openG = pw.startsWith('g:') ? pw.slice(2) : (gi.gmap[pw] || null);
+    h += '<button class="ftag' + (pw === 'all' ? ' active' : '') + '" onclick="pnSetWallet(\'all\')">全部</button>';
     for (const g of gi.gList) {
       const open = openG === g, col = groupColor(g), mem = gi.byG[g];
-      h += '<button class="ftag fgrp' + (pnWallet === 'g:' + g ? ' active' : '') + (open ? ' open' : '') + '" style="--gc:' + col + '" data-f="' + escH(open ? 'all' : 'g:' + g) + '" onclick="pnSetWallet(this.dataset.f)"><span class="fdot"></span>' + escH(g) + '<span class="fcount">' + mem.length + '</span><span class="farrow">' + (open ? '▾' : '▸') + '</span></button>';
-      if (open) { h += '<span class="fsub" style="--gc:' + col + '">'; for (const [n] of mem) h += '<button class="ftag fwal' + (pnWallet === n ? ' active' : '') + '" data-f="' + escH(n) + '" onclick="pnSetWallet(this.dataset.f)">' + escH(groupRest(n) || n) + '</button>'; h += '</span>'; }
+      h += '<button class="ftag fgrp' + (pw === 'g:' + g ? ' active' : '') + (open ? ' open' : '') + '" style="--gc:' + col + '" data-f="' + escH(open ? 'all' : 'g:' + g) + '" onclick="pnSetWallet(this.dataset.f)"><span class="fdot"></span>' + escH(g) + '<span class="fcount">' + mem.length + '</span><span class="farrow">' + (open ? '▾' : '▸') + '</span></button>';
+      if (open) { h += '<span class="fsub" style="--gc:' + col + '">'; for (const [n] of mem) h += '<button class="ftag fwal' + (pw === n ? ' active' : '') + '" data-f="' + escH(n) + '" onclick="pnSetWallet(this.dataset.f)">' + escH(groupRest(n) || n) + '</button>'; h += '</span>'; }
     }
-    for (const [n] of gi.singles) h += '<button class="ftag' + (pnWallet === n ? ' active' : '') + '" data-f="' + escH(n) + '" onclick="pnSetWallet(this.dataset.f)">' + escH(n) + '</button>';
+    for (const [n] of gi.singles) h += '<button class="ftag' + (pw === n ? ' active' : '') + '" data-f="' + escH(n) + '" onclick="pnSetWallet(this.dataset.f)">' + escH(n) + '</button>';
   }
   h += '</div>';
   $('pnToolbar').innerHTML = h; $('pnToolbar').classList.add('two-rows'); $('pnToolbar').style.display = 'block';
 }
 async function loadPnl(refresh, opts) {
   opts = opts || {};
-  if (pnBusy) return;
-  pnBusy = true;
+  // 2026-09-28 审计修复: 原「pnBusy 忙就 return」会吞掉切链 / 切范围 / 开账本发出的请求 (页面停在空白); 改请求序号: 每次都发, 只认最新一次的响应
+  const seq = ++pnSeq;
   const b = $('pnRefreshBtn'); b.disabled = true; b.textContent = refresh ? '账本扫描中…' : '加载中…';
   const scopeAt = pnScope, chainAt = pnChain;
   if (!pnData) renderPnToolbar(null);
   try {
-    const r = await fetch('/api/pnl/all?scope=' + pnScope + (pnChain !== 'all' ? '&chain=' + pnChain : '') + (refresh ? '&refresh=true' : (opts.nocache ? '&nocache=true' : '')));
-    if (!r.ok) throw new Error('API 错误: ' + r.status);
-    const d = await r.json();
-    if (scopeAt !== pnScope || chainAt !== pnChain) return;
+    const d = await apiJson('/api/pnl/all?scope=' + pnScope + (pnChain !== 'all' ? '&chain=' + pnChain : '') + (refresh ? '&refresh=true' : (opts.nocache ? '&nocache=true' : '')));   // 2026-09-28 审计修复: 走统一包装
+    if (seq !== pnSeq || scopeAt !== pnScope || chainAt !== pnChain) return;
     pnData = d; renderPnl();
     // 刷新账本 = 服务端后台扫一轮, 之后隔 25s 再拉几次把新结果带回来 (开账本后同样轮询, 把首扫结果带回来)
     if (refresh || opts.poll) {
       let left = 8;
-      const tick = async () => { if (!pnlOpen || scopeAt !== pnScope || chainAt !== pnChain || left-- <= 0) return; try { const r2 = await fetch('/api/pnl/all?scope=' + pnScope + (pnChain !== 'all' ? '&chain=' + pnChain : '') + '&nocache=true'); if (r2.ok) { const d2 = await r2.json(); if (scopeAt === pnScope && chainAt === pnChain) { pnData = d2; renderPnl(); if (!d2.ledgerScanning) return; } } } catch {} pnPollTimer = setTimeout(tick, 25000); };
+      const tick = async () => { if (!pnlOpen || scopeAt !== pnScope || chainAt !== pnChain || left-- <= 0) return; try { const d2 = await apiJson('/api/pnl/all?scope=' + pnScope + (pnChain !== 'all' ? '&chain=' + pnChain : '') + '&nocache=true'); if (scopeAt === pnScope && chainAt === pnChain) { pnData = d2; renderPnl(); if (!d2.ledgerScanning) return; } } catch {} pnPollTimer = setTimeout(tick, 25000); };
       if (pnPollTimer) clearTimeout(pnPollTimer);
       pnPollTimer = setTimeout(tick, 25000);
     }
-  } catch (e) { $('pnTable').innerHTML = '<div class="error-box"><p>⚠ ' + escH(e.message) + '</p></div>'; }
-  finally { pnBusy = false; b.disabled = false; b.textContent = '刷新账本'; }
+  } catch (e) { if (seq === pnSeq) $('pnTable').innerHTML = '<div class="error-box"><p>⚠ ' + escH(e.message) + '</p></div>'; }
+  finally { if (seq === pnSeq) { b.disabled = false; b.textContent = '刷新账本'; } }   // 只有最新一次请求收尾时才恢复按钮
 }
 // 观察钱包开/关账本: PATCH 该链的钱包记录 ledger 标记, 开启即踢一轮账本扫描
 async function pnToggleLedger(chain, addr, on) {
   try {
-    const r = await fetch(pnApi(chain) + '/wallets/' + encodeURIComponent(addr), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ledger: !!on }) });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
+    await apiFetch(pnApi(chain) + '/wallets/' + encodeURIComponent(addr), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ledger: !!on }) });   // 2026-09-28 审计修复: 走统一包装
     if (chain === activeChain) loadWallets();
     loadPnl(false, { nocache: true, poll: !!on });   // PATCH 已踢该链账本扫描; 这里只重拉合并视图 (跳缓存) 并轮询首扫结果
   } catch (e) { alert('操作失败: ' + e.message); }
 }
 function pnD(ts) { if (!ts) return '—'; const d = new Date(ts); return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
-function pnDays(a, b) { const ms = Math.max(0, (b || Date.now()) - a); const d = ms / 86400000; return d >= 1 ? Math.floor(d) + '天' + (Math.floor((ms % 86400000) / 3600000) > 0 ? Math.floor((ms % 86400000) / 3600000) + 'h' : '') : Math.floor(ms / 3600000) + 'h'; }
+function pnDays(a, b) { if (!a) return '—'; /* 2026-09-28 审计修复: 缺开仓时间 (openTs=0) 此前按 1970 起算出 20000+ 天 */ const ms = Math.max(0, (b || Date.now()) - a); const d = ms / 86400000; return d >= 1 ? Math.floor(d) + '天' + (Math.floor((ms % 86400000) / 3600000) > 0 ? Math.floor((ms % 86400000) / 3600000) + 'h' : '') : Math.floor(ms / 3600000) + 'h'; }
 function pnSigned(v, cls) { if (v == null || isNaN(v)) return '<span class="sn-zero">—</span>'; const c = cls || dCls(v); return '<span class="' + c + '">' + (v > 0 ? '+' : (v < 0 ? '−' : '')) + fU2(Math.abs(v)) + '</span>'; }
 function renderPnl() {
   const d = pnData; if (!d) return;
@@ -2713,7 +2813,7 @@ function renderPnl() {
   // 观察范围: 每个钱包一行账本开关; 自有范围只在账本未就绪时提示
   const wRows = wallets.map(w => {
     const st = w.partial ? '高频钱包 · 账本放弃' : (w.ledgerOn ? (w.pending ? '账本待扫' : (w.scanning ? '扫描中' : '账本 ' + (w.updatedAt ? tA(w.updatedAt) : '待算') + (w.priceMiss ? ' · ' + w.priceMiss + ' 处历史价暂缺, 下轮重算' : ''))) : (w.ledgerStale ? '未开账本 · 盘里有旧账本, 开后重算' : '未开账本'));
-    const btn = pnScope === 'obs' && !w.own ? ' <button class="nm-test-btn" onclick="pnToggleLedger(\'' + w.chain + '\', \'' + escH(w.address) + '\', ' + (w.ledger ? 'false' : 'true') + ')">' + (w.ledger ? '关账本' : '开账本') + '</button>' : '';
+    const btn = pnScope === 'obs' && !w.own ? ' <button class="nm-test-btn" data-ch="' + escH(w.chain) + '" data-addr="' + escH(w.address) + '" onclick="pnToggleLedger(this.dataset.ch, this.dataset.addr, ' + (w.ledger ? 'false' : 'true') + ')">' + (w.ledger ? '关账本' : '开账本') + '</button>' : '';
     return '<span class="pn-wrow"><b>' + escH(w.name) + '</b> <span class="st-sub-note">' + CHAIN_NAMES[w.chain] + ' · ' + st + '</span>' + btn + '</span>';
   });
   if (pnScope === 'obs' || wallets.some(w => !w.ledgerOn || w.pending || w.scanning)) fh += '<span style="flex-basis:100%"></span>' + wRows.join('');
@@ -2732,7 +2832,7 @@ function renderPnl() {
     const meta = ['#' + escH(String(r.tokenId || '').slice(0, 12))];
     if (showChain) meta.push(escH(CHAIN_NAMES[r.chain] || r.chain));
     if (showWallet) meta.push(escH(r.wallet));
-    const pairCell = '<td class="pn-pair">' + escH(r.pair || '') + '<span class="protocol-tag ' + (r.dex === 'pancake' ? 'pcs' : String(r.protocol || 'v3').toLowerCase()) + '">' + escH(r.dex === 'pancake' ? 'CAKE V3' : (r.platform ? r.platform.toUpperCase() + ' ' + r.protocol : r.protocol)) + '</span>' + (r.feeLabel ? '<span class="fee-tag">' + escH(r.feeLabel) + '</span>' : '')
+    const pairCell = '<td class="pn-pair">' + escH(r.pair || '') + '<span class="protocol-tag ' + (r.dex === 'pancake' ? 'pcs' : escH(String(r.protocol || 'v3').toLowerCase())) + '">' + escH(r.dex === 'pancake' ? 'CAKE V3' : (r.platform ? r.platform.toUpperCase() + ' ' + r.protocol : r.protocol)) + '</span>' + (r.feeLabel ? '<span class="fee-tag">' + escH(r.feeLabel) + '</span>' : '')
       + '<span class="pn-meta">' + meta.join(' · ') + (r._absurd ? '' : '<span class="pn-st-m">' + st + '</span>') + '</span></td>';
     if (r._absurd) return '<tr>' + pairCell + '<td colspan="' + (ncol - 1) + '"><span class="pn-st out" title="该仓某笔事件的历史池价离谱 (死池/薄池), 账本下轮重算会修正">数据异常 · 等待重算</span></td></tr>';
     const ctip = costTip(r.costBy, r.tokens);
