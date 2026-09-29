@@ -727,7 +727,7 @@
   .sn-toolbar .filter-label { margin-left: 6px; }
   .sn-strip { display: grid; grid-template-columns: repeat(6, 1fr); border-bottom: 1px solid var(--border); }   /* 2026-09-28 审计修复: 统计条是 6 格, 原 repeat(5) 让第 6 格单独掉到第二行 */
   #snStrip .stat-cell:last-child .stat-val { white-space: normal; }   /* 2026-09-28 审计修复: 第 6 格是「未实现 / 已实现」两个数, 1/6 宽放不下时在「/」处折行, 别溢出格子 */
-  .sn-strip .stat-sub { font-family: var(--mono); font-size: 10.5px; color: var(--text-muted); margin-top: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sn-strip .stat-sub { font-family: var(--mono); font-size: 10.5px; color: var(--text-muted); margin-top: 5px; white-space: normal; overflow: visible; line-height: 1.45; overflow-wrap: anywhere; }   /* 2026-09-30: 副行允许换行 (原 nowrap+ellipsis 把「净入金 … 已剔除 · +x%」截成 …, 桌面也看不全) */
   .sn-pos { color: var(--green); } .sn-neg { color: var(--red); } .sn-zero { color: var(--text-muted); }
   .sn-chart-card { margin: 14px 0 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px 8px; }
   .sn-chart-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
@@ -2299,7 +2299,7 @@ async function loadSnap() {
 const SN_SUMK = ['total', 'lp', 'idle', 'fees', 'cost', 'np', 'realized', 'collected', 'active', 'inRange'];
 function snZero() { const z = {}; for (const k of SN_SUMK) z[k] = 0; z.netIn = null; z._n = 0; z._nin = 0; return z; }
 function snAdd(z, o) { for (const k of SN_SUMK) z[k] += Number(o[k]) || 0; z._n++; if (typeof o.netIn === 'number') { z.netIn = (z.netIn || 0) + o.netIn; z._nin++; } }
-function snFin(z) { if (z._n && z._nin < z._n) z.netIn = null; z.gain = z.netIn == null ? null : z.total - z.netIn; return z; }
+function snFin(z) { if (z._n && z._nin < z._n) z.netIn = null; z.pnl = z.np + z.realized; z.gain = z.pnl; return z; }   // 2026-09-30: 收益 = 未实现 + 已实现盈亏 (与出入金无关), 原 总资产−净入金 只有 rh 有净入金
 function snScope(e) {
   const chs = e.chains;
   if (!chs) {   // m5 精简条目: 只有总量, 仅在「全部」范围可用
@@ -2356,12 +2356,13 @@ function fPc(v, base) { if (!base || v == null || isNaN(v) || absurd(v) || absur
 function dCls(v) { return v == null || isNaN(v) || Math.abs(v) < 0.005 ? 'sn-zero' : (v > 0 ? 'sn-pos' : 'sn-neg'); }
 function fK(v) { const a = Math.abs(v); const s = v < 0 ? '−' : ''; if (a >= 1e6) return s + '$' + (a / 1e6).toFixed(2) + 'M'; if (a >= 1e4) return s + '$' + (a / 1e3).toFixed(1) + 'k'; if (a >= 1e3) return s + '$' + (a / 1e3).toFixed(2) + 'k'; return s + '$' + a.toFixed(0); }
 function snTs(ts, withDate) { const d = new Date(ts); const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); return withDate ? (d.getMonth() + 1) + '/' + d.getDate() + ' ' + hm : hm; }
-// 两条记录之间的「收益」= Δ总资产 − Δ净入金 (双方都有净入金才剔); 返回 { gain, dNet, flowKnown }
+// 两条记录之间的「收益」= Δ(未实现盈亏 + 已实现盈亏): 只看 LP 盈亏, 钱包充提不影响 (2026-09-30 改; 原 = Δ总资产 − Δ净入金, 而净入金只有 rh 有, 其它链等于把充提当收益)
+//   顺带给 Δ总资产 dTotal 与 Δ净入金 dNet (双方都有净入金数据才给) 供副行参考; 返回 { gain, dTotal, dNet, flowKnown }
 function snGainBetween(za, zb) {
   if (!za || !zb) return null;
   const dTotal = zb.total - za.total;
-  if (za.netIn != null && zb.netIn != null) { const dNet = zb.netIn - za.netIn; return { gain: dTotal - dNet, dNet, flowKnown: true }; }
-  return { gain: dTotal, dNet: null, flowKnown: false };
+  const dNet = (za.netIn != null && zb.netIn != null) ? zb.netIn - za.netIn : null;
+  return { gain: (zb.np + zb.realized) - (za.np + za.realized), dTotal, dNet, flowKnown: dNet != null };
 }
 function renderSnap() {
   if (!snData) return;
@@ -2415,7 +2416,8 @@ function renderSnap() {
   const gainCell = (label, ref) => {
     if (!ref) return cell(label, '—', '', '无对照记录');
     const g = snGainBetween(ref.z, cur.z);
-    return cell(label, '<span class="' + dCls(g.gain) + '">' + fD(g.gain) + '</span>', '', (g.flowKnown ? (g.dNet ? '净入金 ' + fD(g.dNet) + ' 已剔除' : '期间无出入金') : '含出入金 (无净入金数据)') + ' · ' + fPc(g.gain, ref.z.total));
+    const pc = fPc(g.gain, ref.z.total);
+    return cell(label, '<span class="' + dCls(g.gain) + '">' + fD(g.gain) + '</span>', '', (pc ? pc + ' · ' : '') + '总资产 ' + fD(g.dTotal) + (g.dNet != null && Math.abs(g.dNet) >= 0.005 ? ' · 净入金 ' + fD(g.dNet) : ''));   // 2026-09-30: 副行=占期初总资产% · Δ总资产 (· Δ净入金)
   };
   let sh = '';
   sh += cell('最新总资产', fU(cur.z.total), 'green', '钱包 ' + fU(cur.z.idle) + ' + LP ' + fU(cur.z.lp) + ' · ' + escH(cur.e.date + ' ' + (cur.e.time || '')));
@@ -2430,8 +2432,7 @@ function renderSnap() {
   $('snMetricBtns').innerHTML = Object.entries(SN_METRICS).map(([k, n]) => '<button class="ftag ' + (snMetric === k ? 'active' : '') + '" onclick="snSetMetric(\'' + k + '\')">' + n + '</button>').join('');
   $('snRangeBtns').innerHTML = SN_RANGES.map(([k, n]) => '<button class="ftag ' + (snRange === k ? 'active' : '') + '" onclick="snSetRange(\'' + k + '\')">' + n + '</button>').join('');
   const ser = snSeries();
-  const flowKnown = ser.length && ser.every(x => x.z.gain != null);
-  $('snChartTitle').textContent = (snMetric === 'gain' ? (flowKnown ? '收益 (总资产 − 净入金)' : '总资产 (本范围无净入金数据, 含出入金)') : SN_METRICS[snMetric]) + ' · ' + (ser.length ? ser.length + ' 点' : '无数据');
+  $('snChartTitle').textContent = (snMetric === 'gain' ? '收益 (未实现 + 已实现盈亏, 不含出入金)' : SN_METRICS[snMetric]) + ' · ' + (ser.length ? ser.length + ' 点' : '无数据');
   if (ser.length >= 2) { $('snChartCard').style.display = ''; snDrawChart(ser); } else $('snChartCard').style.display = 'none';
 
   // 表格: 按日, 新的在上
@@ -2442,7 +2443,7 @@ function renderSnap() {
     const open = snOpenRow === x.e.date;
     th += '<tr class="sn-row' + (open ? ' open' : '') + '" data-k="' + escH(x.e.date) + '" onclick="snToggleRow(this.dataset.k)"><td><span class="sn-date">' + escH(x.e.date) + '</span><span class="sn-time">' + escH(x.e.time || '') + (i === dailyAll.length - 1 ? ' 最新' : '') + '</span>' + snTags(x.e) + '</td>'
       + '<td>' + fU(x.z.total) + '</td>'
-      + '<td>' + (g ? '<span class="' + dCls(g.gain) + '">' + fD(g.gain) + '</span>' + (g.flowKnown ? '' : '<span class="sn-tag" title="无净入金数据, 含出入金">含出入金</span>') : '<span class="sn-zero">—</span>') + '</td>'
+      + '<td>' + (g ? '<span class="' + dCls(g.gain) + '">' + fD(g.gain) + '</span>' : '<span class="sn-zero">—</span>') + '</td>'
       + '<td class="sn-hm">' + (g && g.flowKnown ? '<span class="' + dCls(g.dNet) + '">' + fD(g.dNet) + '</span>' : '<span class="sn-zero">—</span>') + '</td>'
       + '<td class="sn-hm">' + fU(x.z.idle) + '</td><td class="sn-hm">' + fU(x.z.lp) + '</td>'
       + '<td class="sn-hm">' + (x.e.np == null && !x.e.chains ? '—' : '<span class="' + dCls(x.z.np) + '">' + fD(x.z.np) + '</span>') + '</td>'
@@ -2452,7 +2453,7 @@ function renderSnap() {
   }
   th += '</tbody></table>';
   $('snTable').innerHTML = th;
-  $('snNote').innerHTML = escH((snSc === 'obs' ? '观察钱包（别人的）：每小时记一点，含余额与 LP；没开账本的钱包未实现/已实现按开仓时价估算或为空 · ' : '') + '口径：总资产 = 钱包余额 + LP 价值（含待领费）· 收益 = 总资产变动 − 净入金变动（净入金来自初始资金回溯，目前只有 Robinhood 链有；其它链的「收益」含出入金）· 未实现盈亏 = 活跃仓 现值+手续费−开仓成本 · 已实现盈亏 = 已关闭仓合计 · 自有钱包每 5 分钟记一点，保留 24 小时的 5 分钟级、30 天的小时级、全部的日级（按 ' + (meta0.tz || 'Asia/Shanghai') + ' 零点切日，当天那行随时间更新）· 点击行看各链 / 各钱包明细');
+  $('snNote').innerHTML = escH((snSc === 'obs' ? '观察钱包（别人的）：每小时记一点，含余额与 LP；没开账本的钱包未实现/已实现按开仓时价估算或为空，平仓后已实现不计、收益会相应回落 · ' : '') + '口径：总资产 = 钱包余额 + LP 价值（含待领费）· 收益 = 未实现盈亏变动 + 已实现盈亏变动（只看 LP 盈亏，钱包充提不影响；总资产变动与净入金在副行 / 净入金变动列另给参考，净入金来自初始资金回溯，目前只有 Robinhood 链有）· 未实现盈亏 = 活跃仓 现值+手续费−开仓成本 · 已实现盈亏 = 已关闭仓合计 · 自有钱包每 5 分钟记一点，保留 24 小时的 5 分钟级、30 天的小时级、全部的日级（按 ' + (meta0.tz || 'Asia/Shanghai') + ' 零点切日，当天那行随时间更新）· 点击行看各链 / 各钱包明细');
 }
 function snTags(e) {
   let t = '';

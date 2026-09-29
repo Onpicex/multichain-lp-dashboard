@@ -594,16 +594,40 @@ const STABLECOINS = new Set([USDT_ADDRESS, BUSD_ADDRESS, USDC_ADDRESS]);
 
 // 2026-09-28 审计修复: coingecko 按合约地址批量取价抽成独立函数 (主流程与账本参考价钩子 getUSDPrices 共用);
 // 非 200 抛错由调用方决定回退 (以前非 200 静默当作没价), 50 个一批防 URL 过长, 15s 超时防整轮悬死
+// 2026-09-30 修「⚠2 缺价」: CoinGecko 免费无 key 档现在一次只许 1 个合约地址 (>1 个直接 400 error_code 10012, 连打还 429),
+//   原先 50 个一批 ⇒ 每轮整批失败 ⇒ WBNB/CAKE 这类不在稳定币池里的 token 永远拿不到价 (只靠 CoinGecko)。
+//   现在: 池内价先推; WBNB/CAKE 走币安现货; 再用已定价 token 的池子推一层; 最后仍缺的才逐个问 CoinGecko (每轮最多 COINGECKO_MAX_PER_ROUND 个, 间隔 1.5s)
+const COINGECKO_MAX_PER_ROUND = 5;
 async function coingeckoBscPrices(addrs) {
-  const out = {};
-  for (let i = 0; i < addrs.length; i += 50) {
-    const url = `https://api.coingecko.com/api/v3/simple/token_price/binance-smart-chain?contract_addresses=${addrs.slice(i, i + 50).join(',')}&vs_currencies=usd`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
-    if (!res.ok) throw new Error(`CoinGecko HTTP ${res.status}`);
-    const data = await res.json();
-    for (const [addr, info] of Object.entries(data || {})) if (info && info.usd > 0) out[addr.toLowerCase()] = info.usd;
-    if (i + 50 < addrs.length) await sleep(1200);
+  const out = {}; let failed = 0;
+  const list = addrs.slice(0, COINGECKO_MAX_PER_ROUND);
+  for (let i = 0; i < list.length; i++) {
+    if (i) await sleep(1500);
+    const url = `https://api.coingecko.com/api/v3/simple/token_price/binance-smart-chain?contract_addresses=${list[i]}&vs_currencies=usd`;
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+      if (res.status === 429) { failed += list.length - i; console.warn(`  [bsc] CoinGecko 429, 本轮余下 ${list.length - i} 个不再问`); break; }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      for (const [addr, info] of Object.entries(data || {})) if (info && info.usd > 0) out[addr.toLowerCase()] = info.usd;
+    } catch (e) { failed++; console.warn(`  [bsc] CoinGecko ${list[i].slice(0, 10)} 失败: ${e.message}`); }
   }
+  return { prices: out, failed, skipped: addrs.length - list.length };
+}
+// 主流币走币安现货 ticker (无 key、不限流之忧): WBNB / CAKE 不在稳定币池里, 原先只能靠 CoinGecko
+async function binanceSpotPrices(addrs) {
+  const out = {};
+  const map = { [WBNB.toLowerCase()]: 'BNBUSDT', [require('./pancake-bsc').CAKE.toLowerCase()]: 'CAKEUSDT' };
+  const want = addrs.filter(a => map[a]);
+  if (!want.length) return out;
+  try {
+    const symbols = encodeURIComponent(JSON.stringify(want.map(a => map[a])));
+    const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbols=${symbols}`, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const bySym = {}; for (const r of (Array.isArray(data) ? data : [])) bySym[r.symbol] = Number(r.price);
+    for (const a of want) if (bySym[map[a]] > 0) out[a] = bySym[map[a]];
+  } catch (e) { console.warn(`  [bsc] 币安行情失败: ${e.message}`); }
   return out;
 }
 
@@ -616,24 +640,14 @@ async function getUSDPrices(tokenAddresses, positionsData, meta = {}) {
     if (STABLECOINS.has(addr)) prices[addr] = 1.0;
   }
 
-  let coingeckoOk = true;
-  const needCoinGecko = unique.filter(a => !prices[a]);
-  if (needCoinGecko.length > 0) {
-    try {
-      Object.assign(prices, await coingeckoBscPrices(needCoinGecko));
-    } catch (e) {
-      coingeckoOk = false;
-      console.error('CoinGecko API error:', e.message);
-    }
-  }
-
-  // Derive prices from pool data, preferring active in-range positions
+  // ① 池内价推导 (稳定币对), 优先活跃且在区间的仓
   // Track which source set each price so we can upgrade later
   const priceSource = {}; // addr -> 'active-inrange' | 'active' | 'inactive'
+  const poolOk = pos => pos.currentPrice > 0 && Number.isFinite(pos.currentPrice);
   for (const pos of positionsData) {
     const t0 = pos.token0addr.toLowerCase();
     const t1 = pos.token1addr.toLowerCase();
-    if (pos.currentPrice <= 0) continue;
+    if (!poolOk(pos)) continue;
 
     let target, price;
     if (STABLECOINS.has(t1) && !STABLECOINS.has(t0)) {
@@ -653,6 +667,27 @@ async function getUSDPrices(tokenAddresses, positionsData, meta = {}) {
     }
   }
 
+  // ② WBNB / CAKE: 币安现货
+  Object.assign(prices, await binanceSpotPrices(unique.filter(a => !(prices[a] > 0))));
+
+  // ③ 第二轮: 用已定价 token (如 WBNB) 的池子再推一层 (token/WBNB 对)
+  for (const pos of positionsData) {
+    const t0 = pos.token0addr.toLowerCase(), t1 = pos.token1addr.toLowerCase();
+    if (!poolOk(pos)) continue;
+    if (prices[t1] > 0 && !(prices[t0] > 0)) prices[t0] = pos.currentPrice * prices[t1];
+    else if (prices[t0] > 0 && !(prices[t1] > 0)) prices[t1] = prices[t0] / pos.currentPrice;
+  }
+
+  // ④ 仍缺的逐个问 CoinGecko (每轮限量, 其余下轮再问; 失败沿用上轮价)
+  let coingeckoOk = true;
+  const needCoinGecko = unique.filter(a => !(prices[a] > 0));
+  if (needCoinGecko.length > 0) {
+    const r = await coingeckoBscPrices(needCoinGecko);
+    Object.assign(prices, r.prices);
+    if (r.failed) coingeckoOk = false;
+    if (r.skipped) console.log(`  [bsc] CoinGecko 本轮只问 ${COINGECKO_MAX_PER_ROUND} 个, 余 ${r.skipped} 个下轮`);
+  }
+
   // 2026-09-28 审计修复: 缺价不再静默归零 —— 先回退上轮价 (lastUsdPricesBsc, 记入 meta.stale), 上轮也没有的才是 0 (记入 meta.missing)
   const stale = new Set(), missing = new Set();
   for (const addr of unique) {
@@ -662,7 +697,7 @@ async function getUSDPrices(tokenAddresses, positionsData, meta = {}) {
     else { prices[addr] = 0; missing.add(addr); }
   }
   meta.stale = stale; meta.missing = missing; meta.priceMiss = stale.size + missing.size; meta.coingeckoOk = coingeckoOk;
-  if (meta.priceMiss) console.log(`  [bsc] 定价缺失 ${meta.priceMiss} 个 token (沿用上轮 ${stale.size}, 无价 ${missing.size})${coingeckoOk ? '' : ' [coingecko 失败]'}`);
+  if (meta.priceMiss) console.log(`  [bsc] 定价缺失 ${meta.priceMiss} 个 token (沿用上轮 ${stale.size}, 无价 ${missing.size}): ${[...stale, ...missing].map(a => a.slice(0, 10)).join(',')}${coingeckoOk ? '' : ' [coingecko 失败]'}`);
 
   return prices;
 }
@@ -2145,8 +2180,14 @@ try {
         else need.push(a);
       }
       if (need.length) {
-        try { const got = await coingeckoBscPrices([...new Set(need)]); Object.assign(out, got); if (got[wbnbL] > 0 && !(out[ZERO] > 0)) out[ZERO] = got[wbnbL]; }
-        catch (e) { console.error('[bsc] getUSDPrices (ledger ref) coingecko failed:', e.message?.slice(0, 80)); }
+        const uniq = [...new Set(need)];
+        try {
+          const got = await binanceSpotPrices(uniq);   // 2026-09-30: WBNB/CAKE 先走币安 (CoinGecko 免费档一次只许 1 个地址)
+          const rest = uniq.filter(a => !(got[a] > 0));
+          if (rest.length) Object.assign(got, (await coingeckoBscPrices(rest)).prices);   // 2026-09-30: coingeckoBscPrices 现返回 { prices, failed, skipped }
+          Object.assign(out, got); if (got[wbnbL] > 0 && !(out[ZERO] > 0)) out[ZERO] = got[wbnbL];
+        }
+        catch (e) { console.error('[bsc] getUSDPrices (ledger ref) 取价失败:', e.message?.slice(0, 80)); }
       }
       return out;
     },
