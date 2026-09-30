@@ -41,6 +41,7 @@ const STABLES = { EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: 'USDC', Es9vMFrz
 const FILE = path.join(__dirname, 'pnl-ledger-sol.json');
 const RAW_LIMIT = 4000;              // 交易数上限, 超过=高频钱包放弃
 const ROUND_MS = 30 * 60 * 1000;
+const PARSE_V = 2;                   // 2026-09-30: 解析层版本; IX 表补了名字就 +1, 下轮扫描把落盘记录里没命名的 LP 指令重解析 (有 d 就本地查表, 没有 d 的旧记录按签名重拉)
 const SOL_NOISE = 0.15;              // LP 操作 tx 里 |ΔSOL| 小于此 = 租金/手续费噪声, 不计流水 (SOL 不是池子币时)
                                      // 2026-09-28 审计修复: 只在该 tx 的 LP 指令 xf 里不含 WSOL 时才按它过滤; xf 有 WSOL = SOL 是真实资金腿, 小额也计
 const APPROX_OBS_MS = 6 * 3600 * 1000;   // 2026-09-28 审计修复: 价格观测离交易时刻超过 6h 即标 approx (旧版 ±3 天内都当精确价)
@@ -60,6 +61,9 @@ const IX = {
   Orca: { openPosition: 'open', openPositionWithMetadata: 'open', openPositionWithTokenExtensions: 'open', increaseLiquidity: 'dep', increaseLiquidityV2: 'dep',
     decreaseLiquidity: 'wd', decreaseLiquidityV2: 'wd', collectFees: 'col', collectFeesV2: 'col', collectReward: 'col', collectRewardV2: 'col', closePosition: 'close', closePositionWithTokenExtensions: 'close',
     updateFeesAndRewards: 'aux',   // 辅助指令, 不代表操作
+    // 2026-09-30 修: Orca 新版 UI (whirlpool IDL 0.9.0) 的加仓走 increase_liquidity_by_token_amounts_v2 (disc effb097c…), 之前没命名被当 flow 判,
+    //   zap 加仓找零回钱包时按 dep+wd 记, 把 $2.7 找零算成「已提回」且没冲减成本 (DJT/USDC 加仓实例); reposition_liquidity_v2 (bfa9e00b…) 一条指令换区间, 按净流向判
+    increaseLiquidityByTokenAmountsV2: 'dep', repositionLiquidityV2: 'flow',
     swap: 'swap', swapV2: 'swap', twoHopSwap: 'swap', twoHopSwapV2: 'swap' },
 };
 // 开仓指令参数里 tick_lower/tick_upper (i32×2) 的字节偏移 (8 字节 discriminator 之后; Orca 旧版前面还有 bumps)
@@ -72,7 +76,7 @@ function ticksOf(prog, name, buf) {
   const lo = buf.readInt32LE(off), hi = buf.readInt32LE(off + 4);
   return lo < hi && Math.abs(lo) < 1e6 && Math.abs(hi) < 1e6 ? [lo, hi] : null;
 }
-// 没对上名字但账户里含已知仓位的指令 (如 Orca 新版开仓流程里的入金指令 effb097c…) 一律按本 tx 净流向判 (flow)
+// 没对上名字但账户里含已知仓位的指令一律按本 tx 净流向判 (flow); 有 IDL 的程序 (Orca/Meteora 链上 anchor:idl 账户, Raydium CLMM 没有) 尽量把名字补进 IX, 否则找零会被记成提回
 // Anchor discriminator 用的是 Rust 侧 snake_case 函数名: sha256("global:add_liquidity_by_strategy")[0..8]
 const snake = n => n.replace(/([A-Z])/g, '_$1').toLowerCase();
 const DISC = {};   // `${prog}:${hex8}` -> camelCase name
@@ -175,7 +179,7 @@ function parseTx(wallet, t) {
       const hex8 = buf.subarray(0, 8).toString('hex');
       if (hex8 !== EVENT_CPI) {
         const name = buf.length >= 8 ? DISC[`${prog}:${hex8}`] || null : null;
-        cur = { p: prog, n: name, acc: ix.accounts || [] };
+        cur = { p: prog, n: name, d: hex8, acc: ix.accounts || [] };   // d: 2026-09-30 起把 discriminator 也存下, IX 表后补名字时本地重解析即可 (reparseUnnamed)
         const tk = name && IX[prog][name] === 'open' ? ticksOf(prog, name, buf) : null;
         if (tk) cur.tk = tk;
         lp.push(cur);
@@ -234,6 +238,37 @@ async function scanWallet(wallet, deadline) {
   W.stopped = null; W.updatedAt = Date.now();
   save();
   return W;
+}
+
+// ---- 重解析 (2026-09-30): IX 表补名字后, 落盘记录里 n=null 的 LP 指令按新表重新命名; 旧记录没存 d 的按签名从 Helius 重拉 (POST /v0/transactions, 100 签名一批) ----
+//   实例: Orca 新版加仓 increase_liquidity_by_token_amounts_v2 之前没命名, DJT/USDC 的 4 笔加仓被当 flow 判, zap 找零记成「已提回」
+async function reparseUnnamed(wallet, deadline) {
+  const W = state().d.wallets[wallet]; if (!W || W.partial || W.pv === PARSE_V) return 0;
+  const refetch = []; let renamed = 0;
+  for (const [sig, rec] of Object.entries(W.txs)) {
+    if (!rec.lp || !rec.lp.some(ix => ix.n == null)) continue;
+    if (rec.lp.every(ix => ix.n != null || ix.d)) { for (const ix of rec.lp) if (ix.n == null && ix.d) { const n = DISC[`${ix.p}:${ix.d}`]; if (n) { ix.n = n; renamed++; } } }
+    else refetch.push(sig);
+  }
+  for (let i = 0; i < refetch.length; i += 100) {
+    if (Date.now() > deadline) { deps.log(`[SOL] pnl-ledger 重解析 ${wallet.slice(0, 6)}: 预算用尽, 下轮续`); return renamed; }   // 不写 pv, 下轮继续
+    const chunk = refetch.slice(i, i + 100);
+    let arr = null;
+    for (let k = 0; k < 4 && !arr; k++) {
+      try {
+        const r = await fetch(`https://api.helius.xyz/v0/transactions?api-key=${key()}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ transactions: chunk }), signal: AbortSignal.timeout(60000) });
+        if (r.ok) { const j = await r.json(); if (Array.isArray(j)) arr = j; }
+        else await sleep(2000 * (k + 1));
+      } catch { await sleep(2000 * (k + 1)); }
+    }
+    if (!arr) { deps.log(`[SOL] pnl-ledger 重解析 ${wallet.slice(0, 6)}: Helius 重拉失败, 下轮续`); return renamed; }
+    for (const t of arr) { if (t && t.signature && W.txs[t.signature] && !t.transactionError) { W.txs[t.signature] = parseTx(wallet, t); renamed++; } }
+    await sleep(150);
+  }
+  W.pv = PARSE_V;
+  if (renamed || refetch.length) deps.log(`[SOL] pnl-ledger 重解析 ${wallet.slice(0, 6)}: 本地改名/重拉 ${renamed} 处 (重拉 ${refetch.length} 笔)`);
+  save();
+  return renamed;
 }
 
 // ---- 仓位识别 + 重放 ----
@@ -508,6 +543,7 @@ async function runQueue(liveByWallet, opts = {}) {
       try {
         const W = await scanWallet(w.address, deadline);
         if (W.partial || W.stopped) { deps.log(`[SOL] pnl-ledger ${w.name}: ${W.partial ? '高频钱包放弃' : '未扫完 (' + W.stopped + '), 下轮续'}`); continue; }
+        await reparseUnnamed(w.address, deadline);
         computeWallet(w.address, (liveByWallet && liveByWallet[w.address]) || []);
         save();
         const n = Object.values(W.pos).filter(P => P.c).length, cl = Object.values(W.pos).filter(P => P.c && P.c.status === 'closed').length;
@@ -574,4 +610,4 @@ function walletReport(wallet, liveWallet, useLedger = true) {   // useLedger=fal
   return out;
 }
 
-module.exports = { init, enabled, runQueue, positionPnl, walletStatus, walletReport, ROUND_MS, _state: state, _test: { parseTx, computeWallet, buildPriceObs, poolPriceFromAmounts, scanWallet, positionKeysOf, impliedPriceNear, priceAt } };   // 2026-09-28 审计修复: 多导出几个给独立脚本验证
+module.exports = { init, enabled, runQueue, positionPnl, walletStatus, walletReport, ROUND_MS, _state: state, _test: { parseTx, computeWallet, reparseUnnamed, buildPriceObs, poolPriceFromAmounts, scanWallet, positionKeysOf, impliedPriceNear, priceAt } };   // 2026-09-28 审计修复: 多导出几个给独立脚本验证

@@ -206,6 +206,8 @@ async function fetchMeteoraPositions(wallet) {
           tickUpper: d.upperBinId,
           currentTick: activeId,
           liquidity: liquidityActive ? '1' : '0',
+          // 2026-09-30: 价格无关的流动性指纹 (各 bin 份额之和), 加减仓触发账本即扫用; totalX/YAmount 随价变不能当指纹
+          _liqFp: (() => { try { let t = 0n; for (const b of (d.positionBinData || [])) t += BigInt(String(b.positionLiquidity || 0).split('.')[0] || 0); return t.toString(); } catch { return liquidityActive ? '1' : '0'; } })(),
           liquidityActive,
           inRange,
           currentPrice,
@@ -897,8 +899,10 @@ async function _fetchAllSol() {
   // 2026-09-28 审计修复: Jupiter 整批为空 (或本轮根本没有 mint 要问) 不覆盖上轮价, 避免把 lastPricesSol 清成空表污染账本估值
   if (uniqMints.length && !batchEmpty) lastPricesSol = prices;
   sanitizeCacheSymbols(result);   // 2026-09-28 审计修复 (XSS 上游): 写缓存前再过一遍
+  const changed = ledgerPositionsChanged(cache.data, result);   // 比较要在覆盖缓存之前
   cache = { data: result, timestamp: Date.now() };
   saveCache();
+  if (changed.length) { console.log(`[SOL] ${changed.length} 个账本仓位流动性变化 (${changed.slice(0, 3).join(', ')}${changed.length > 3 ? '…' : ''}), 立即扫账本`); setImmediate(kickSolLedger); }
   console.log(`[SOL] Fetch complete. ${wallets.length} wallets, ${totalActive} active, total $${grandTotalUSD.toFixed(2)}${failedWallets.length ? `, ${failedWallets.length} wallets stale` : ''}${priceMiss ? `, ${priceMiss} mints price-miss` : ''}`);
   return result;
 }
@@ -1091,7 +1095,53 @@ solLedger.init({
   log: console.log,
 });
 function liveByWalletSol() { const m = {}; for (const w of (cache.data?.wallets || [])) m[w.address] = (w.positions || []).filter(p => p.liquidityActive); return m; }
-function kickSolLedger() { if (!solLedger.enabled()) return; solLedger.runQueue(liveByWalletSol()).catch(e => console.error('[SOL] pnl-ledger:', e.message)); }
+// 2026-09-30 修 (DJT/USDC 加仓后成本/无常/净利润错 40 分钟实例): 账本 30 分钟一轮 + 仓位缓存 5 分钟一轮, 用户加减仓后页面最长要等两轮才对。
+//   ① 本轮仓位刷新发现账本钱包的活跃仓流动性变了 (Raydium/Orca 用 liquidity, Meteora 用 _liqFp) 或多出新仓 → 立即扫账本 (增量, Helius 只拉新签名)
+//   ② 账本扫完 → 用缓存里各仓当时的价把成本/持币对照/已提回/净利润重算回缓存, 不等下一轮仓位刷新 (纯计算, 零 RPC)
+function ledgerPositionsChanged(prev, next) {
+  if (!prev || !solLedger.enabled()) return [];
+  const track = new Set(solPnlWallets().map(w => w.address));
+  const fp = p => `${p.liquidity}|${p._liqFp || ''}`;
+  const old = new Map();
+  for (const w of (prev.wallets || [])) if (track.has(w.address)) for (const p of (w.positions || [])) old.set(w.address + ':' + p.positionKey, fp(p));
+  const out = [];
+  for (const w of (next.wallets || [])) {
+    if (!track.has(w.address) || w._stale) continue;
+    for (const p of (w.positions || [])) {
+      if (!p.liquidityActive || p._stale) continue;
+      const k = w.address + ':' + p.positionKey, o = old.get(k);
+      if (o === undefined || o !== fp(p)) out.push(`${w.name} ${p.token0?.symbol || '?'}/${p.token1?.symbol || '?'}`);
+    }
+  }
+  return out;
+}
+function reapplyLedgerToCache() {
+  const data = cache.data; if (!data || !solLedger.enabled()) return;
+  let n = 0;
+  for (const w of (data.wallets || [])) {
+    for (const pos of (w.positions || [])) {
+      if (pos._stale || !pos.liquidityActive) continue;
+      const lg = solLedger.positionPnl(w.address, pos._activityKey || pos.positionKey);
+      if (!lg) continue;
+      const price0 = pos.token0USD || 0, price1 = pos.token1USD || 0;
+      const priceOf = a => a === pos.token0addr ? price0 : a === pos.token1addr ? price1 : (lastPricesSol[a] || 0);
+      const collectedUSD = lg.fees > 0 ? lg.fees : (Number.isFinite(pos.collectedFeesUSD) ? pos.collectedFeesUSD : 0);   // 同主流程口径 (主流程已把链上已领折算进 collectedFeesUSD; 仓位归一后 _claimed0/1 与 token0/1 可能已对调, 不再折算)
+      pnlLedger.applyPnl(pos, { cost: lg.cost, approx: lg.approx, source: 'ledger', am: lg.a, costBy: lg.cb, withdrawnUSD: lg.ret, collectedUSD, feesUnknown: !!(lg.feesUnknown || pos.feesUnknown) }, priceOf);
+      pos.collectedFeesUSD = collectedUSD;
+      n++;
+    }
+  }
+  if (n) { saveCache(); console.log(`[SOL] pnl-ledger 扫完, 已按缓存价回填 ${n} 个活跃仓的成本/盈亏`); }
+}
+let ledgerRerun = false;   // 扫描进行中又来了触发 → 扫完立刻再扫一轮 (runQueue 有 busy 锁, 直接调会被吞掉)
+function kickSolLedger() {
+  if (!solLedger.enabled()) return;
+  if (solLedger._state().busy) { ledgerRerun = true; return; }
+  solLedger.runQueue(liveByWalletSol())
+    .then(() => { try { reapplyLedgerToCache(); } catch (e) { console.error('[SOL] pnl-ledger 回填缓存失败:', e.message); } })
+    .catch(e => console.error('[SOL] pnl-ledger:', e.message))
+    .finally(() => { if (ledgerRerun) { ledgerRerun = false; setImmediate(kickSolLedger); } });
+}
 if (solLedger.enabled()) {
   setTimeout(kickSolLedger, 190 * 1000);
   setInterval(kickSolLedger, solLedger.ROUND_MS);
