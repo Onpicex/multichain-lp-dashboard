@@ -287,6 +287,17 @@ function positionKeysOf(ix) {
 //   pr 1 = 纯换币 tx (不碰本钱包仓位) 的钱包净流向隐含价: 原有口径, 聚合器实际成交价
 //   pr 2 = 本钱包换币腿 (LP 程序 swap 指令名下的转账) 的成交价: 含池子手续费 (卖出偏低/买入偏高约一个费率), 分单路由时单腿可能偏
 //          主要用途是 zap tx (换币+开仓合一, 净流向不是价格, pr 1 不看它) 和 Meteora (没有 pr 0)
+// 钱包净流水 (人类单位), 原生 SOL 折进 WSOL 项。回放 (记成本/提回) 与价格观测表共用这一份规则, 两边口径不会再分叉:
+//   SOL 只在「本 tx 的 LP 指令 xf 里有 WSOL (SOL 是真实资金腿, 小额也计)」或「|ΔSOL| ≥ SOL_NOISE」或「非 LP tx 且 > 0.001」时计,
+//   其余 (LP 操作里的租金/手续费噪声) 不计。2026-09-28 审计修复定的规则, 2026-10-01 抽成函数。
+function walletFlow(t) {
+  const fl = { ...t.fl };
+  const solAmt = t.sol + (fl[WSOL] || 0);
+  delete fl[WSOL];
+  const lpWsol = (t.lp || []).some(ix => (ix.xf || []).some(([m]) => m === WSOL));
+  if ((lpWsol && Math.abs(solAmt) > 1e-9) || Math.abs(solAmt) >= SOL_NOISE || (!t.lp && Math.abs(solAmt) > 0.001)) fl[WSOL] = solAmt;
+  return fl;
+}
 function buildPriceObs(order, P, keys) {
   const obs = {};
   const add = (m, ts, p, pr, sg) => { if (p > 0 && Number.isFinite(p)) (obs[m] = obs[m] || []).push({ ts, p, pr, s: sg }); };   // 2026-09-28 审计修复: 记下来源 tx 签名 s, 供「同 tx 观测优先」
@@ -315,10 +326,18 @@ function buildPriceObs(order, P, keys) {
         if (STABLES[mB]) add(mA, t.ts, pAB, 0, t.sig); else add(mB, t.ts, 1 / pAB, 0, t.sig);
       }
     }
-    if (t._pos || !(t.swap || t.type === 'SWAP')) continue;
-    let usd = 0; for (const [m, v] of Object.entries(t.fl)) if (STABLES[m]) usd += v;
+    if (t._pos) continue;
+    // 2026-10-01 修复 (SOL/BE 仓净利严重偏负的真因): 旧版直接读 t.fl, 而原生 SOL 只在 t.sol 里 (回放时才折进 WSOL), 所以 USDC↔SOL 换币
+    //   从不产生 SOL 观测; 又没有 SOL 的活跃仓 → 现价表里 SOL 也是 0, 提回的 5.978 SOL 按 $0 估值。现在用与回放同一份 walletFlow。
+    const fl = walletFlow(t);
+    let usd = 0, non = 0, oppo = false;
+    for (const [m, v] of Object.entries(fl)) { if (STABLES[m]) usd += v; else if (v) non++; }
     if (!usd || Math.abs(usd) < 5) continue;
-    for (const [m, q] of Object.entries(t.fl)) if (!STABLES[m] && q && Math.sign(usd) !== Math.sign(q)) add(m, t.ts, Math.abs(usd / q), 1, t.sig);
+    for (const [m, q] of Object.entries(fl)) if (!STABLES[m] && q && Math.sign(usd) !== Math.sign(q)) oppo = true;
+    // 换币判据: Helius 标了 swap / 类型 SWAP; 或 (2026-10-01) 不含 LP 指令、只有一种非稳定币且与稳定币反向流动 —— 聚合器换币常被 Helius
+    //   标成 UNKNOWN / INITIALIZE_ACCOUNT (本例 3 笔 USDC↔SOL 有 2 笔), 回放层记成本时本来就不看类型, 观测层同口径
+    if (!(t.swap || t.type === 'SWAP' || (!t.lp && non === 1 && oppo))) continue;
+    for (const [m, q] of Object.entries(fl)) if (!STABLES[m] && q && Math.sign(usd) !== Math.sign(q)) add(m, t.ts, Math.abs(usd / q), 1, t.sig);
   }
   return obs;
 }
@@ -418,13 +437,8 @@ function computeWallet(wallet, livePositions) {
       if (kind === 'aux' || kind === 'swap') continue;   // 辅助/换币指令不是仓位操作 (换币腿只在 buildPriceObs 里用)
       for (const k of keys) if (ix.acc.includes(k) && P[k].p === ix.p) { const set = ops.get(k) || new Set(); set.add(kind); ops.set(k, set); }
     }
-    // 钱包流水 (人类单位): SOL 只在池子币是 SOL 或大额时计
-    const fl = { ...t.fl };
-    const solAmt = t.sol + (fl[WSOL] || 0);
-    delete fl[WSOL];
-    // 2026-09-28 审计修复: 本 tx 的 LP 指令 xf 里有 WSOL = SOL 是真实资金腿 (SOL 对池存取、zap 换币), 小额也计; 只有 xf 不含 WSOL 时才按 SOL_NOISE 当租金/手续费噪声滤掉
-    const lpWsol = (t.lp || []).some(ix => (ix.xf || []).some(([m]) => m === WSOL));
-    if ((lpWsol && Math.abs(solAmt) > 1e-9) || Math.abs(solAmt) >= SOL_NOISE || (!t.lp && Math.abs(solAmt) > 0.001)) fl[WSOL] = solAmt;
+    // 钱包流水 (人类单位), 原生 SOL 折进 WSOL: 规则见 walletFlow (2026-10-01 与价格观测表共用)
+    const fl = walletFlow(t);
     const outs = Object.entries(fl).filter(([, v]) => v < 0).map(([m, v]) => [m, -v]);
     const ins = Object.entries(fl).filter(([, v]) => v > 0);
     if (ops.size) {
@@ -610,4 +624,4 @@ function walletReport(wallet, liveWallet, useLedger = true) {   // useLedger=fal
   return out;
 }
 
-module.exports = { init, enabled, runQueue, positionPnl, walletStatus, walletReport, ROUND_MS, _state: state, _test: { parseTx, computeWallet, reparseUnnamed, buildPriceObs, poolPriceFromAmounts, scanWallet, positionKeysOf, impliedPriceNear, priceAt } };   // 2026-09-28 审计修复: 多导出几个给独立脚本验证
+module.exports = { init, enabled, runQueue, positionPnl, walletStatus, walletReport, ROUND_MS, _state: state, _test: { parseTx, computeWallet, reparseUnnamed, buildPriceObs, walletFlow, poolPriceFromAmounts, scanWallet, positionKeysOf, impliedPriceNear, priceAt } };   // 2026-09-28 审计修复: 多导出几个给独立脚本验证

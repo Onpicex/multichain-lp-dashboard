@@ -764,6 +764,9 @@ async function _fetchAllSol() {
   // 补 symbol（Meteora/Orca 只有 mint 地址）+ 价格 (沿用仓的 mint 也一起问, 让 lastPricesSol 持续覆盖它们)
   const allMints = [];
   for (const wr of walletResults) for (const p of wr.positions) allMints.push(p.token0addr, p.token1addr);
+  // 2026-10-01 修复: WSOL 常驻报价表 —— 账本给 SOL 腿兜底估值 (priceAt 无观测时退到 lastPricesSol[WSOL]); 旧版只问活跃仓的 mint,
+  //   钱包没有 SOL 对的活跃仓时 SOL 现价 = 0, 已关闭仓的 SOL 提回就按 $0 算
+  allMints.push(WSOL_MINT);
   const [symbols, freshPrices] = await Promise.all([getTokenSymbols(allMints), getPrices(allMints)]);
   // 2026-09-28 审计修复: 某 mint 本轮无价而上轮有 → 回退上轮价 (仓位打 priceStale); 整批为空不覆盖 lastPricesSol; stats.priceMiss = 缺价 token 数
   const prices = { ...freshPrices };
