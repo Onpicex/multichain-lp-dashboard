@@ -1121,7 +1121,9 @@ function walletReport(chainId, addr, liveWallet, useLedger = true) {
   const out = { ...status, positions: [], lots: [] };
   if (!useLedger) { out.ledgerStale = !!status.ledger; out.ledger = false; out.pending = false; out.scanning = false; }
   const liveMap = new Map();
-  for (const p of (liveWallet?.positions || [])) liveMap.set(`${p.dex === 'pancake' ? 'pcs' : (p.protocol === 'V4' ? 'v4' : 'v3')}-${p.tokenId}`, p);
+  // 2026-09-30: 只把 liquidityActive 的仓当实时活跃仓 (与 runQueue 传入的 liveByWallet / sol-ledger 同口径) ——
+  //   BSC 主流程缓存保留清空未 burn 的仓 (liquidity=0), 此前照单合并 → 账本报告把它们标 active、现值 0 混进活跃仓 (pPOLY/USDT #1359784 实例)
+  for (const p of (liveWallet?.positions || [])) if (p.liquidityActive) liveMap.set(`${p.dex === 'pancake' ? 'pcs' : (p.protocol === 'V4' ? 'v4' : 'v3')}-${p.tokenId}`, p);
   const seen = new Set();
   if (useLedger && status.ledger && !status.partial && !status.pending) {
     const W = ledgerState(chainId).d.wallets[low(addr)];
