@@ -1,7 +1,7 @@
 {
   "name": "lp-dashboard",
   "version": "1.0.0",
-  "description": "Uniswap V3 LP Dashboard for BSC",
+  "description": "Uniswap V3/V4 + Pancake V3 LP dashboard: BSC / ETH / Robinhood Chain / Base / Arc / Solana",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

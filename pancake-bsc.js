@@ -88,7 +88,8 @@ function create(ctx) {
   //   publicnode:                          单次 ≤1 万块, 深历史/连打都 403             ← 末位
   //   官方 dataseed / drpc / 1rpc / meow / blockrazor: 一律拒绝或 limit exceeded
   // 格式 url@每次块数, 逗号分隔; 顺序即优先级, 失败冷却 60s 自动切下一个, 成功的粘住。
-  const DEFAULT_LOG_RPCS = 'https://bsc-mainnet.nodereal.io/v1/__NODEREAL_KEY__@49999,https://bsc.rpc.blxrbdn.com@4999,https://bsc-rpc.publicnode.com@4999';
+  // 承重的 NodeReal 端点请在 .env 的 PCS_LOG_RPCS 里自己配 (格式 https://bsc-mainnet.nodereal.io/v1/<key>@49999,...)，开源版默认只带公共兜底
+  const DEFAULT_LOG_RPCS = 'https://bsc.rpc.blxrbdn.com@4999,https://bsc-rpc.publicnode.com@4999';
   const logRpcs = (process.env.PCS_LOG_RPCS || DEFAULT_LOG_RPCS).split(',').map(s => s.trim()).filter(Boolean).map(s => {
     const m = s.match(/^(.*?)(?:@(\d+))?$/);
     return { url: m[1], chunk: Math.max(500, parseInt(m[2] || '4999')), provider: null, failUntil: 0, ok: 0, fail: 0 };
