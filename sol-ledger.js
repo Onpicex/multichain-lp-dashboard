@@ -41,7 +41,8 @@ const STABLES = { EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: 'USDC', Es9vMFrz
 const FILE = path.join(__dirname, 'pnl-ledger-sol.json');
 const RAW_LIMIT = 4000;              // 交易数上限, 超过=高频钱包放弃
 const ROUND_MS = 30 * 60 * 1000;
-const PARSE_V = 2;                   // 2026-09-30: 解析层版本; IX 表补了名字就 +1, 下轮扫描把落盘记录里没命名的 LP 指令重解析 (有 d 就本地查表, 没有 d 的旧记录按签名重拉)
+const PARSE_V = 3;                   // 2026-09-30: 解析层版本; IX 表补了名字就 +1, 下轮扫描把落盘记录里没命名的 LP 指令重解析 (有 d 就本地查表, 没有 d 的旧记录按签名重拉)
+                                     // v3 (2026-10-02): 记录加 to/from (托管挂单的成本接力), 旧记录里可能带这两项的按签名重拉一次
 const SOL_NOISE = 0.15;              // LP 操作 tx 里 |ΔSOL| 小于此 = 租金/手续费噪声, 不计流水 (SOL 不是池子币时)
                                      // 2026-09-28 审计修复: 只在该 tx 的 LP 指令 xf 里不含 WSOL 时才按它过滤; xf 有 WSOL = SOL 是真实资金腿, 小额也计
 const APPROX_OBS_MS = 6 * 3600 * 1000;   // 2026-09-28 审计修复: 价格观测离交易时刻超过 6h 即标 approx (旧版 ±3 天内都当精确价)
@@ -191,6 +192,26 @@ function parseTx(wallet, t) {
   for (const ix of (t.instructions || [])) walk(ix, true);
   const rec = { slot: t.slot, ts: Number(t.timestamp || 0) * 1000, type: t.type, src: t.source, fl, sol: +sol.toFixed(9) };
   if (lp.length) rec.lp = lp;
+  // 2026-10-02 托管挂单 (Jupiter 限价单): 下单 = 本钱包把币转给托管地址 (无 LP 指令); 成交 = 托管里的币换成别的币打进本钱包, 撤单 = 原币退回,
+  //   这两种 tx 里本钱包只有流入. 记下 to (无 LP 指令、只有流出的 tx 里本钱包转给谁多少) 和 from (只有流入的 tx 里别人付出多少), 回放时按地址接力成本
+  //   (只有流出才记 to: 走非 LP 程序的换币 tx 里本钱包也有转给池子的腿, 那不是托管)
+  const xs = (t.tokenTransfers || []).filter(x => x.mint && Number(x.tokenAmount) > 0);
+  const sum = (o, a, m, q) => { const e = o[a] || (o[a] = {}); e[m] = +((e[m] || 0) + q).toFixed(12); };
+  const to = {}, from = {};
+  if (!lp.length && !xs.some(x => x.toUserAccount === wallet)) for (const x of xs) if (x.fromUserAccount === wallet && x.toUserAccount && x.toUserAccount !== wallet) sum(to, x.toUserAccount, x.mint, Number(x.tokenAmount));
+  //   from 记净付出 (转出 − 转入): 托管同时是成交路由的中转站 —— 卖单成交时 USDC 先进托管再转给本钱包, 换路时 USDT/中间币也在托管里过一手,
+  //   按转出总额算会把过路的币当成付出, 占掉别的挂单存着的币 (他人真实 366 笔托管 tx 实测)
+  if (!xs.some(x => x.fromUserAccount === wallet) && xs.some(x => x.toUserAccount === wallet)) {
+    const net = {}, gross = {};
+    for (const x of xs) {
+      const q = Number(x.tokenAmount);
+      if (x.fromUserAccount && x.fromUserAccount !== wallet) { sum(net, x.fromUserAccount, x.mint, q); sum(gross, x.fromUserAccount, x.mint, q); }
+      if (x.toUserAccount && x.toUserAccount !== wallet) sum(net, x.toUserAccount, x.mint, -q);
+    }
+    for (const [a, ms] of Object.entries(gross)) for (const [m, g] of Object.entries(ms)) if (net[a][m] > g * 1e-9) sum(from, a, m, net[a][m]);
+  }
+  if (Object.keys(to).length) rec.to = to;
+  if (Object.keys(from).length) rec.from = from;
   const sw = t.events && t.events.swap;
   if (sw && (sw.tokenInputs?.length || sw.tokenOutputs?.length || sw.nativeInput || sw.nativeOutput)) rec.swap = 1;
   return rec;
@@ -324,10 +345,14 @@ async function scanTokenAccounts(wallet, deadline, scanStart) {
 
 // ---- 重解析 (2026-09-30): IX 表补名字后, 落盘记录里 n=null 的 LP 指令按新表重新命名; 旧记录没存 d 的按签名从 Helius 重拉 (POST /v0/transactions, 100 签名一批) ----
 //   实例: Orca 新版加仓 increase_liquidity_by_token_amounts_v2 之前没命名, DJT/USDC 的 4 笔加仓被当 flow 判, zap 找零记成「已提回」
+//   v3 (2026-10-02): v2 及以前的记录没有 to/from, 其中可能带的 (无 LP 指令且有流出 / 只有流入) 一并重拉
 async function reparseUnnamed(wallet, deadline) {
   const W = state().d.wallets[wallet]; if (!W || W.partial || W.pv === PARSE_V) return 0;
   const refetch = []; let renamed = 0;
+  const v3 = (W.pv || 0) < 3;
   for (const [sig, rec] of Object.entries(W.txs)) {
+    const vs = Object.values(rec.fl || {});
+    if (v3 && ((!rec.lp && vs.some(v => v < 0)) || (vs.some(v => v > 0) && !vs.some(v => v < 0)))) { refetch.push(sig); continue; }
     if (!rec.lp || !rec.lp.some(ix => ix.n == null)) continue;
     if (rec.lp.every(ix => ix.n != null || ix.d)) { for (const ix of rec.lp) if (ix.n == null && ix.d) { const n = DISC[`${ix.p}:${ix.d}`]; if (n) { ix.n = n; renamed++; } } }
     else refetch.push(sig);
@@ -369,6 +394,7 @@ function positionKeysOf(ix) {
 //   pr 1 = 纯换币 tx (不碰本钱包仓位) 的钱包净流向隐含价: 原有口径, 聚合器实际成交价
 //   pr 2 = 本钱包换币腿 (LP 程序 swap 指令名下的转账) 的成交价: 含池子手续费 (卖出偏低/买入偏高约一个费率), 分单路由时单腿可能偏
 //          主要用途是 zap tx (换币+开仓合一, 净流向不是价格, pr 1 不看它) 和 Meteora (没有 pr 0)
+//   (2026-10-02) 托管挂单成交也记 pr 1: 本钱包只有流入, 付出的一边是之前收过本钱包同种币的地址 (托管) → 托管付出 / 本钱包收到 = 成交价
 // 钱包净流水 (人类单位), 原生 SOL 折进 WSOL 项。回放 (记成本/提回) 与价格观测表共用这一份规则, 两边口径不会再分叉:
 //   SOL 只在「本 tx 的 LP 指令 xf 里有 WSOL (SOL 是真实资金腿, 小额也计)」或「|ΔSOL| ≥ SOL_NOISE」或「非 LP tx 且 > 0.001」时计,
 //   其余 (LP 操作里的租金/手续费噪声) 不计。2026-09-28 审计修复定的规则, 2026-10-01 抽成函数。
@@ -384,7 +410,9 @@ function buildPriceObs(order, P, keys) {
   const obs = {};
   const add = (m, ts, p, pr, sg) => { if (p > 0 && Number.isFinite(p)) (obs[m] = obs[m] || []).push({ ts, p, pr, s: sg }); };   // 2026-09-28 审计修复: 记下来源 tx 签名 s, 供「同 tx 观测优先」
   const dec = m => { const x = state().d.tok[m]; return x && x.decimals != null ? x.decimals : null; };
+  const sentTo = {};   // 收过本钱包代币的地址 → 收过的 mint
   for (const t of order) {
+    for (const [a, ms] of Object.entries(t.to || {})) for (const m of Object.keys(ms)) (sentTo[a] = sentTo[a] || {})[m] = 1;
     for (const ix of (t.lp || [])) {
       if (!ix.xf || !ix.xf.length) continue;
       const kind = IX[ix.p][ix.n] || 'flow';
@@ -412,6 +440,19 @@ function buildPriceObs(order, P, keys) {
     // 2026-10-01 修复 (SOL/BE 仓净利严重偏负的真因): 旧版直接读 t.fl, 而原生 SOL 只在 t.sol 里 (回放时才折进 WSOL), 所以 USDC↔SOL 换币
     //   从不产生 SOL 观测; 又没有 SOL 的活跃仓 → 现价表里 SOL 也是 0, 提回的 5.978 SOL 按 $0 估值。现在用与回放同一份 walletFlow。
     const fl = walletFlow(t);
+    if (t.from && !Object.values(fl).some(v => v < 0)) {   // 托管挂单成交 (见上)
+      const paid = {};
+      for (const [a, ms] of Object.entries(t.from)) if (sentTo[a]) for (const [m, x] of Object.entries(ms)) if (sentTo[a][m]) paid[m] = (paid[m] || 0) + x;
+      const pm = Object.entries(paid), got = Object.entries(fl).filter(([m, v]) => v > 0 && !(m === WSOL && v < SOL_NOISE && !paid[WSOL]));   // 顺带退的小额租金不算成交
+      if (pm.length === 1 && got.length === 1) {
+        const [[m1, x], [m2, q]] = [pm[0], got[0]];
+        if (m1 !== m2 && !!STABLES[m1] !== !!STABLES[m2]) {
+          if (STABLES[m1] && x >= 5) add(m2, t.ts, x / q, 1, t.sig);
+          else if (STABLES[m2] && q >= 5) add(m1, t.ts, q / x, 1, t.sig);
+          continue;
+        }
+      }
+    }
     let usd = 0, non = 0, oppo = false;
     for (const [m, v] of Object.entries(fl)) { if (STABLES[m]) usd += v; else if (v) non++; }
     if (!usd || Math.abs(usd) < 5) continue;
@@ -499,6 +540,10 @@ function computeWallet(wallet, livePositions) {
     const pr = priceAt(obs, mint, ts, cur, sig); return { cost: q * pr.p, approx: true };
   };
   const addLot = (mint, q, c, ax) => { if (STABLES[mint] || !(q > 0)) return; const L = lots[mint] || (lots[mint] = { q: 0, c: 0, ax: false }); L.q += q; L.c += c; if (ax) L.ax = true; };
+  // 2026-10-02 托管接力: 转给别人的币连成本挂在对方名下 esc[地址][mint] = {q, c, ax}; 之后只有流入的 tx 里该地址付出了这种币
+  //   (Jupiter 限价单成交 = 托管的币换成别的币打进本钱包; 撤单 = 原币退回) → 按付出数量取走挂着的成本, 记给流入的币.
+  //   旧版流入一律按观测价 (没有就现价) 估成本: 他人真实限价买单 16 笔重放偏差 −63%~+99%, 这些币再拿去做 LP, 开仓成本跟着错
+  const esc = {};
   const C = {};
   const cOf = k => C[k] || (C[k] = { cost: 0, ret: 0, fees: 0, a: {}, cb: {}, n: 0, approx: false, feesUnknown: false, lastTs: 0, closed: false, mints: {} });
   // 2026-09-28 审计修复: 本 tx 每条仓位指令 (非 swap/aux) 名下的 xf 按仓归集 —— xfBy[k][mint] = 净额, colIn[k][mint] = 领费/奖励指令的流入,
@@ -610,9 +655,27 @@ function computeWallet(wallet, livePositions) {
       for (const [m, q] of ins) { const pr = priceAt(obs, m, t.ts, cur, t.sig); vals.push([m, q, q * pr.p]); inVal += q * pr.p; }
       for (const [m, q, v] of vals) addLot(m, q, inVal > 0 ? outCost * v / inVal : outCost / ins.length, ax);
     } else if (ins.length) {
-      for (const [m, q] of ins) { const pr = priceAt(obs, m, t.ts, cur, t.sig); addLot(m, q, q * pr.p, !STABLES[m]); }
+      let carried = 0, cAx = false, hit = false;
+      for (const [a, ms] of Object.entries(t.from || {})) for (const [m, x] of Object.entries(ms)) {
+        const e = esc[a] && esc[a][m]; if (!e || !(e.q > 1e-12)) continue;
+        hit = true; carried += e.c / e.q * x;   // 按挂着的均价计全部付出量; 付出比挂着的多 (下单在扫描窗之前) 时多出部分也按这个均价, 标 approx
+        if (e.ax || x > e.q * 1.000001) cAx = true;
+        const take = Math.min(x, e.q); e.c -= e.c * take / e.q; e.q -= take;
+      }
+      if (hit) {
+        let inVal = 0; const vals = [];
+        for (const [m, q] of ins) { const pr = priceAt(obs, m, t.ts, cur, t.sig); vals.push([m, q, q * pr.p]); inVal += q * pr.p; }
+        for (const [m, q, v] of vals) addLot(m, q, inVal > 0 ? carried * v / inVal : carried / ins.length, cAx);
+      } else for (const [m, q] of ins) { const pr = priceAt(obs, m, t.ts, cur, t.sig); addLot(m, q, q * pr.p, !STABLES[m]); }
     } else {
-      for (const [m, q] of outs) consume(m, q, t.ts, t.sig);
+      for (const [m, q] of outs) {
+        const r = consume(m, q, t.ts, t.sig);
+        for (const [a, ms] of Object.entries(t.to || {})) {
+          const x = ms[m]; if (!(x > 0)) continue;
+          const e = (esc[a] = esc[a] || {})[m] || (esc[a][m] = { q: 0, c: 0, ax: false });
+          e.q += x; e.c += r.cost * Math.min(1, x / q); if (r.approx) e.ax = true;
+        }
+      }
     }
   }
   // 3. 收官
