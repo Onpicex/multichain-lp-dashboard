@@ -369,6 +369,25 @@ async function scanTokenAccounts(wallet, deadline, scanStart) {
   save();
 }
 
+// ---- 同 slot 块内顺序 (2026-10-02) ----
+//   Helius 解析结果只有 slot 和秒级时间戳, 同 slot 几笔的先后原先取决于入库顺序 (常常是倒的): 一笔开仓排在了同 slot 里
+//   先发生的 USDC→SOL 换币前面, 开仓用的 SOL 没批次可扣, 按市价估 + 带星. 现对有 ≥2 笔的 slot 取 getBlock 签名表 (只要签名, ~130KB), 记块内序号 bi
+async function fillBlockOrder(wallet, deadline) {
+  const W = state().d.wallets[wallet]; if (!W) return 0;
+  const bySlot = new Map();
+  for (const [sig, t] of Object.entries(W.txs)) { const a = bySlot.get(t.slot) || bySlot.set(t.slot, []).get(t.slot); a.push(sig); }
+  let n = 0;
+  for (const [slot, sigs] of bySlot) {
+    if (sigs.length < 2 || sigs.every(sg => W.txs[sg].bi != null)) continue;
+    if (Date.now() > deadline) break;
+    const r = await heliusRpc('getBlock', [slot, { transactionDetails: 'signatures', rewards: false, maxSupportedTransactionVersion: 0, commitment: 'finalized' }]);
+    const list = r && r.signatures; if (!Array.isArray(list)) continue;   // 没取到: 本轮按旧顺序, 下轮重试
+    const idx = new Map(list.map((sg, i) => [sg, i]));
+    for (const sg of sigs) if (idx.has(sg)) { W.txs[sg].bi = idx.get(sg); n++; }
+  }
+  return n;
+}
+
 // ---- 重解析 (2026-09-30): IX 表补名字后, 落盘记录里 n=null 的 LP 指令按新表重新命名; 旧记录没存 d 的按签名从 Helius 重拉 (POST /v0/transactions, 100 签名一批) ----
 //   实例: Orca 新版加仓 increase_liquidity_by_token_amounts_v2 之前没命名, DJT/USDC 的 4 笔加仓被当 flow 判, zap 找零记成「已提回」
 //   v3 (2026-10-02): v2 及以前的记录没有 to/from, 其中可能带的 (无 LP 指令且有流出 / 只有流入) 一并重拉
@@ -396,7 +415,7 @@ async function reparseUnnamed(wallet, deadline) {
       } catch { await sleep(2000 * (k + 1)); }
     }
     if (!arr) { deps.log(`[SOL] pnl-ledger 重解析 ${wallet.slice(0, 6)}: Helius 重拉失败, 下轮续`); return renamed; }
-    for (const t of arr) { if (t && t.signature && W.txs[t.signature] && !t.transactionError) { W.txs[t.signature] = parseTx(wallet, t); renamed++; } }
+    for (const t of arr) { if (t && t.signature && W.txs[t.signature] && !t.transactionError) { const bi = W.txs[t.signature].bi; W.txs[t.signature] = parseTx(wallet, t); if (bi != null) W.txs[t.signature].bi = bi; renamed++; } }
     await sleep(150);
   }
   W.pv = PARSE_V;
@@ -566,7 +585,7 @@ function computeWallet(wallet, livePositions) {
   const s = state();
   const W = s.d.wallets[wallet]; if (!W || W.partial) return;
   const cur = deps.prices() || {};
-  const order = Object.entries(W.txs).map(([sig, t]) => ({ sig, ...t })).sort((a, b) => a.ts - b.ts || a.slot - b.slot);
+  const order = Object.entries(W.txs).map(([sig, t]) => ({ sig, ...t })).sort((a, b) => a.ts - b.ts || a.slot - b.slot || (a.bi ?? 0) - (b.bi ?? 0));   // 2026-10-02: 同 slot 按块内序号 bi (见 fillBlockOrder)
   // 1. 仓位集合: 开仓指令 + 当前活跃仓 (live)
   const P = W.pos;
   const staleBase = new Set();   // 2026-09-28 审计修复: 旧版把 Meteora initializePositionPda/ByOperator 的 a[1] (base 签名账户, 不是仓位) 当仓位键落了盘, 下面清掉 (否则开仓 tx 被它分走)
@@ -593,8 +612,9 @@ function computeWallet(wallet, livePositions) {
     if (STABLES[mint]) return { cost: q, approx: false };
     const L = lots[mint];
     if (L && L.q > 0) {
-      if (L.q >= q * 0.999999) { const c = L.c * Math.min(1, q / L.q); L.q -= q; L.c -= c; if (L.q < 1e-12) { L.q = 0; L.c = 0; } return { cost: c, approx: !!L.ax }; }
-      const c = L.c, ex = q - L.q; L.q = 0; L.c = 0; const pr = priceAt(obs, mint, ts, cur, sig); return { cost: c + ex * pr.p, approx: true };
+      // 2026-10-02: 批次清空时 ax 一起清 (旧版 ax 粘住: 早年一笔估值进过批次, 之后同币种全部精确的买入/提回也一路带星)
+      if (L.q >= q * 0.999999) { const c = L.c * Math.min(1, q / L.q), ax = !!L.ax; L.q -= q; L.c -= c; if (L.q < 1e-12) { L.q = 0; L.c = 0; L.ax = false; } return { cost: c, approx: ax }; }
+      const c = L.c, ex = q - L.q; L.q = 0; L.c = 0; L.ax = false; const pr = priceAt(obs, mint, ts, cur, sig); return { cost: c + ex * pr.p, approx: true };
     }
     const pr = priceAt(obs, mint, ts, cur, sig); return { cost: q * pr.p, approx: true };
   };
@@ -662,8 +682,8 @@ function computeWallet(wallet, livePositions) {
         const i = pf ? Object.entries(pf).filter(([, v]) => v > 1e-12) : ins;
         let outCost = 0, ax = false; const outCostBy = {};
         for (const [m, q] of o) { const r = consume(m, q, t.ts, t.sig); outCost += r.cost; outCostBy[m] = r.cost; if (r.approx) ax = true; }
-        let inAx = false; const px = {};
-        for (const [m] of i) { const pr = priceAt(obs, m, t.ts, cur, t.sig); px[m] = pr.p; if (pr.approx) inAx = true; }
+        let inAx = false; const px = {}, pxA = {};
+        for (const [m] of i) { const pr = priceAt(obs, m, t.ts, cur, t.sig); px[m] = pr.p; pxA[m] = pr.approx || !(pr.p > 0); if (pr.approx) inAx = true; }
         const val = arr => arr.reduce((sum, [m, q]) => sum + q * (px[m] || 0), 0);
         c.evs++; if (t.ts > c.lastTs) c.lastTs = t.ts;
         for (const [m] of o) c.mints[m] = 1; for (const [m] of i) c.mints[m] = 1;
@@ -689,7 +709,9 @@ function computeWallet(wallet, livePositions) {
           c.cost += outCost; c.n++; if (ax) c.approx = true;
           for (const [m, q] of o) { c.a[m] = (c.a[m] || 0) + q; const cb = c.cb[m] || (c.cb[m] = { q: 0, cost: 0 }); cb.q += q; cb.cost += outCostBy[m] || 0; }
           if (!isOut) {   // 入金 tx 顺带的流入 (zap 找零): 成本、持币基线 a、按币拆分 cb 三处一起扣 (只扣成本会让 IL 虚报找零那么多); 2026-09-28: 领费部分 feeIns 不当找零
-            for (const [m, q] of restIns) { const v = q * (px[m] || 0); if (!(Math.abs(v) > 0)) continue; /* 仓位 NFT (+1, 无价) 之类不算找零 */ c.cost -= v; c.a[m] = (c.a[m] || 0) - q; const cb = c.cb[m] || (c.cb[m] = { q: 0, cost: 0 }); cb.q -= q; cb.cost -= v; }
+            // 2026-10-02 修复: 找零回到钱包, 按扣成本的同一市值入批次 (旧版只扣成本不入批次 → 下一笔用到这些币时批次不够, 差额按市价估 + 带星;
+            //   连续 zap 加仓时, 后面几仓用到上一笔退回的币, 成本都是这么估出来的). 同 tx 有领费时下面 isOut||hasCol 段会把全部流入入批次, 这里不重复
+            for (const [m, q] of restIns) { const v = q * (px[m] || 0); if (!(Math.abs(v) > 0)) continue; /* 仓位 NFT (+1, 无价) 之类不算找零 */ c.cost -= v; c.a[m] = (c.a[m] || 0) - q; const cb = c.cb[m] || (c.cb[m] = { q: 0, cost: 0 }); cb.q -= q; cb.cost -= v; if (!hasCol) addLot(m, q, v, pxA[m]); }
           }
         }
         if (isOut || hasCol) {
@@ -700,7 +722,7 @@ function computeWallet(wallet, livePositions) {
             for (const [m, q] of restIns) c.a[m] = (c.a[m] || 0) - q;   // 持币基线只扣本金 (手续费不是存进去的币)
           } else if (isDep && !split) c.feesUnknown = true;   // 2026-09-28 审计修复: 领费+入金 (复投) 拆不开: 流入已在上面按找零扣了成本, 不再重复计 ret (旧版成本、提回各记一次)
           if (inAx) c.approx = true;
-          for (const [m, q] of i) addLot(m, q, q * (px[m] || 0), true);
+          for (const [m, q] of i) addLot(m, q, q * (px[m] || 0), pxA[m]);   // 2026-10-02: 按市值入批次是记账口径 (同 EVM), 价格精确就不带星 (旧版写死 true)
         }
         if (set.has('close')) { c.closed = true; c.closeTs = t.ts; }
       }
@@ -725,7 +747,7 @@ function computeWallet(wallet, livePositions) {
         let inVal = 0; const vals = [];
         for (const [m, q] of ins) { const pr = priceAt(obs, m, t.ts, cur, t.sig); vals.push([m, q, q * pr.p]); inVal += q * pr.p; }
         for (const [m, q, v] of vals) addLot(m, q, inVal > 0 ? carried * v / inVal : carried / ins.length, cAx);
-      } else for (const [m, q] of ins) { const pr = priceAt(obs, m, t.ts, cur, t.sig); addLot(m, q, q * pr.p, !STABLES[m]); }
+      } else for (const [m, q] of ins) { const pr = priceAt(obs, m, t.ts, cur, t.sig); addLot(m, q, q * pr.p, pr.approx || !(pr.p > 0)); }   // 外部转入按到账时市值记成本 (同充提记录的净入金口径); 2026-10-02: 价格精确就不带星 (旧版非稳定币一律带星)
     } else {
       for (const [m, q] of outs) {
         const r = consume(m, q, t.ts, t.sig);
@@ -773,6 +795,7 @@ async function runQueue(liveByWallet, opts = {}) {
         await scanTokenAccounts(w.address, deadline, scanStart);
         if (W.partial) { deps.log(`[SOL] pnl-ledger ${w.name}: 高频钱包放弃`); continue; }
         await reparseUnnamed(w.address, deadline);
+        await fillBlockOrder(w.address, deadline);
         await computeWithHist(w.address, (liveByWallet && liveByWallet[w.address]) || [], w.name);
         save();
         const n = Object.values(W.pos).filter(P => P.c).length, cl = Object.values(W.pos).filter(P => P.c && P.c.status === 'closed').length;
@@ -839,4 +862,4 @@ function walletReport(wallet, liveWallet, useLedger = true) {   // useLedger=fal
   return out;
 }
 
-module.exports = { init, enabled, runQueue, positionPnl, walletStatus, walletReport, histPrice, obsReady, ROUND_MS, _state: state, _test: { parseTx, computeWallet, computeWithHist, reparseUnnamed, scanTokenAccounts, buildPriceObs, walletFlow, poolPriceFromAmounts, scanWallet, positionKeysOf, impliedPriceNear, priceAt } };   // 2026-09-28 审计修复: 多导出几个给独立脚本验证
+module.exports = { init, enabled, runQueue, positionPnl, walletStatus, walletReport, histPrice, obsReady, ROUND_MS, _state: state, _test: { parseTx, computeWallet, computeWithHist, reparseUnnamed, fillBlockOrder, scanTokenAccounts, buildPriceObs, walletFlow, poolPriceFromAmounts, scanWallet, positionKeysOf, impliedPriceNear, priceAt } };   // 2026-09-28 审计修复: 多导出几个给独立脚本验证

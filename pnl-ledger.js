@@ -801,8 +801,21 @@ function nativeTxsOf(chainId, W) {
   }
   return want;
 }
+// 2026-10-02: 代币换成原生 ETH (路由用内部转账把 ETH 打回来, 没有 Transfer 日志) 的 tx 在流水里只剩「代币流出」, ETH 整笔看不见
+//   → 后面开仓花的 ETH 找不到批次按市价补成本 (某钱包四笔 USDC→ETH 共 3.08 ETH 漏记, 三个 ETH/股票仓带星).
+//   候选 = 只出不进、不碰仓位的 tx; 普通代币转出补查得 0, 不影响. 不进 natDone 闸门 (纯增量: 查到一笔准一笔, 不会比旧口径歪)
+function swapNativeTxsOf(W, core) {
+  const want = new Map();
+  for (const [h, t] of Object.entries(W.txs)) {
+    if (core.has(low(h)) || t.n || t.m || t.v3) continue;
+    const vals = Object.values(t.e || {});
+    if (!vals.length || vals.some(([, a]) => BigInt(a) > 0n)) continue;
+    want.set(low(h), t.b);
+  }
+  return want;
+}
 // blockscout 逐笔: 本 tx 里转给钱包的内部 ETH 合计 (wei 字符串); 取不到 / 没索引 → null (限流/网络等暂时性失败另标 meta.transient)
-async function nativeInFromBlockscout(chainId, addr, h, meta) {
+async function nativeInFromBlockscout(chainId, addr, h, meta, emptyIsZero) {
   const cfg = cfgOf(chainId);
   if (!cfg.blockscout || !E.cfGetJson) return null;
   let total = 0n, n = 0, next = null;
@@ -819,7 +832,7 @@ async function nativeInFromBlockscout(chainId, addr, h, meta) {
     next = j.next_page_params || null;
     if (!next) break;
   }
-  if (!n) return null;   // 走 PositionManager 的 tx 必有内部调用, 一条没有 = blockscout 还没索引这笔
+  if (!n) return emptyIsZero ? '0' : null;   // 走 PositionManager 的 tx 必有内部调用, 一条没有 = blockscout 还没索引这笔; 换币候选里的普通代币转出本来就没有 (块够旧时记 0)
   return total.toString();
 }
 // Ankr 归档余额差 (见上); 拆不开返回 null
@@ -860,8 +873,10 @@ async function scanNative(chainId, addr, W) {
   const topReady = ankr || W.natTo >= 0;   // 非 Ankr 链顶层 ETH 流水至少完整扫成过一次
   if (!ankr && !(cfgOf(chainId).blockscout && E.cfGetJson)) return topOk;   // 两条路都没有 (arc): 不查, 按旧口径
   const want = nativeTxsOf(chainId, W);
-  if (!want.size) { if (topReady) W.natDone = true; return topOk; }
-  const todo = [...want].filter(([h]) => { const n = W.nat[h]; return !n || (n.i == null && (n.f || 0) < NATIVE_MAX_FAIL); }).sort((x, y) => x[1] - y[1]);
+  const swaps = swapNativeTxsOf(W, want);
+  const pend = m => [...m].filter(([h]) => { const n = W.nat[h]; return !n || (n.i == null && (n.f || 0) < NATIVE_MAX_FAIL); }).sort((x, y) => x[1] - y[1]);
+  if (!want.size && topReady) W.natDone = true;
+  const todo = [...pend(want), ...pend(swaps)];   // 仓位 tx 先查 (natDone 只看它们), 换币候选排后
   if (!todo.length) { if (topReady) W.natDone = true; return topOk; }
   const stop = Date.now() + NATIVE_SLICE_MS;
   let done = 0, failed = 0, limited = 0;
@@ -869,7 +884,9 @@ async function scanNative(chainId, addr, W) {
     const n = W.nat[h] || (W.nat[h] = { b });
     const meta = {};
     let i = ankr ? await nativeInFromBalance(chainId, addr, h, b, W).catch(() => null) : null;
-    if (i == null) i = await nativeInFromBlockscout(chainId, addr, h, meta).catch(() => { meta.transient = true; return null; });
+    const bt = ledgerState(chainId).d.bts[b];
+    const emptyIsZero = swaps.has(h) && bt > 0 && Date.now() - bt > 3600 * 1000;   // 块已过 1 小时 blockscout 早索引完了
+    if (i == null) i = await nativeInFromBlockscout(chainId, addr, h, meta, emptyIsZero).catch(() => { meta.transient = true; return null; });
     if (i == null && meta.transient) { limited++; return; }   // 限流/网络: 不计失败次数, 本轮停手下轮再查
     if (i == null) { n.f = (n.f || 0) + 1; failed++; return; }
     n.i = i; delete n.f; done++;
@@ -879,7 +896,8 @@ async function scanNative(chainId, addr, W) {
   const left = [...want].filter(([h]) => { const n = W.nat[h]; return !n || (n.i == null && (n.f || 0) < NATIVE_MAX_FAIL); }).length;
   const gaveUp = [...want].filter(([h]) => { const n = W.nat[h]; return n && n.i == null && (n.f || 0) >= NATIVE_MAX_FAIL; }).length;
   if (!left && topReady) W.natDone = true;   // 首次补全才让 computeWallet 并入 (补一半比旧口径还歪, 实测补到 3/7 时已关闭仓成本虚增数百刀)
-  console.log(`[${chainId}] pnl-ledger ${addr.slice(0, 10)}: 原生币内部转账补查 ${done} 笔${failed ? `, 失败 ${failed}` : ''}${limited ? `, 限流/网络 ${limited}` : ''}${left ? `, 还剩 ${left} 下轮续` : ''}${gaveUp ? `, 放弃 ${gaveUp} (按旧口径)` : ''}`);
+  const swapLeft = pend(swaps).length;
+  console.log(`[${chainId}] pnl-ledger ${addr.slice(0, 10)}: 原生币内部转账补查 ${done} 笔${failed ? `, 失败 ${failed}` : ''}${limited ? `, 限流/网络 ${limited}` : ''}${left ? `, 还剩 ${left} 下轮续` : ''}${swapLeft ? `, 换币候选还剩 ${swapLeft}` : ''}${gaveUp ? `, 放弃 ${gaveUp} (按旧口径)` : ''}`);
   return !left && topOk;
 }
 
@@ -972,8 +990,9 @@ async function computeWallet(chainId, addr, livePositions) {
     if (cfg.stables[tok]) return { cost: qty, approx: false };
     const L = lots[tok];
     if (L && L.q > 0) {
-      if (L.q >= qty * 0.999999) { const c = L.c * Math.min(1, qty / L.q); L.q -= qty; L.c -= c; if (L.q < 1e-12) { L.q = 0; L.c = 0; } return { cost: c, approx: !!L.ax }; }
-      const c = L.c, excess = qty - L.q; L.q = 0; L.c = 0;
+      // 2026-10-02: 批次清空时 ax 一起清 (旧版 ax 粘住: 早年一笔估值进过批次, 之后同币种全部精确的买入/提回也一路带星; SOL 账本同修)
+      if (L.q >= qty * 0.999999) { const c = L.c * Math.min(1, qty / L.q), ax = !!L.ax; L.q -= qty; L.c -= c; if (L.q < 1e-12) { L.q = 0; L.c = 0; L.ax = false; } return { cost: c, approx: ax }; }
+      const c = L.c, excess = qty - L.q; L.q = 0; L.c = 0; L.ax = false;
       const pm = await priceAtW(tok, block);
       return { cost: c + excess * pm.p, approx: true };
     }
@@ -1064,7 +1083,22 @@ async function computeWallet(chainId, addr, livePositions) {
       for (const o of outs) { const r = await consume(o.tok, o.q, tx.b); outCost += r.cost; if (r.approx) anyApprox = true; }
       const depMkt = deps.reduce((s, d) => s + d.mkt, 0);
       const wdMkt = wds.reduce((s, w) => s + w.mkt, 0);
-      const feeMkt = cols.reduce((s, x) => s + (x.known ? x.fee : 0), 0);
+      // 2026-10-02: V4 PositionManager 给已有仓加仓时, 仓里攒的手续费先抵本次应付 (callerDelta = 本金 + 已累计手续费) → 钱包实付 < 存入量,
+      //   旧口径 visible/depMkt < 0.9 按市值补齐还带星. 照 V3「同 tx 先 Collect 再加仓」处理: 抵掉的部分算手续费收入, 也算进本次投入成本.
+      //   只认干净形态: 单笔 V4 加仓、仓里本来有流动性、本 tx 只有这两种币的流水、每种币净付出 ≥ 0、存入 − 实付 ≥ −2% (块价≠tx 时价的误差)、抵扣 ≤ 存入一半;
+      //   原生币池在非 Ankr 链要等 natDone (顶层 ETH 付款没并进来时实付看着是 0, 会把整笔存入当手续费)
+      let v4Credit = 0;
+      if (deps.length === 1 && !wds.length && !cols.length && deps[0].P.k === 'v4' && deps[0].c.liq - deps[0].v.liq > 0n) {
+        const d = deps[0], wn = low(cfg.wrappedNative), t0 = low(d.v.meta.t0.address), t1 = low(d.v.meta.t1.address);
+        const nativeOk = (t0 !== wn && t1 !== wn) || isAnkr(chainId) || W.natDone;
+        if (nativeOk && [...outs, ...ins].every(f => low(f.tok) === t0 || low(f.tok) === t1)) {
+          const paid = t => outs.reduce((s, f) => s + (low(f.tok) === t ? f.q : 0), 0) - ins.reduce((s, f) => s + (low(f.tok) === t ? f.q : 0), 0);
+          const p0 = paid(t0), p1 = paid(t1), f0 = d.v.a0 - p0, f1 = d.v.a1 - p1;
+          const credit = f0 * d.v.px.p0 + f1 * d.v.px.p1;
+          if (p0 >= 0 && p1 >= 0 && f0 >= -d.v.a0 * 0.02 && f1 >= -d.v.a1 * 0.02 && credit > 0 && credit <= d.mkt * 0.5) v4Credit = credit;
+        }
+      }
+      const feeMkt = cols.reduce((s, x) => s + (x.known ? x.fee : 0), 0) + v4Credit;
       const visible = outMkt + wdMkt + feeMkt - inMkt;      // 本 tx 里看得见的、投入到仓位的市值
       let costTotal = outCost + wdMkt + feeMkt - inMkt;
       if (depMkt > 0) {
@@ -1090,6 +1124,7 @@ async function computeWallet(chainId, addr, livePositions) {
       }
       for (const w of wds) { w.c.ret += w.mkt; w.c.a[w.v.meta.t0.address] = (w.c.a[w.v.meta.t0.address] || 0) - w.v.a0; w.c.a[w.v.meta.t1.address] = (w.c.a[w.v.meta.t1.address] || 0) - w.v.a1; }
       for (const x of cols) if (x.known) x.c.fees += x.fee;
+      if (v4Credit) deps[0].c.fees += v4Credit;
       for (const i of ins) addLot(i.tok, i.q, i.mkt, i.ax);   // 找零/退回按市值入批次 (已从成本里扣掉)
     } else if (wds.length || cols.length) {
       const wdMkt = wds.reduce((s, w) => s + w.mkt, 0);
@@ -1124,7 +1159,7 @@ async function computeWallet(chainId, addr, livePositions) {
       for (const o of outs) { const r = await consume(o.tok, o.q, tx.b); outCost += r.cost; if (r.approx) ax = true; }
       for (const i of ins) { const share = inMkt > 0 ? i.mkt / inMkt : 1 / ins.length; addLot(i.tok, i.q, outCost * share, ax); }
     } else if (ins.length) {
-      for (const i of ins) addLot(i.tok, i.q, i.mkt, i.ax || !cfg.stables[i.tok]);   // 外部转入/桥入: 只能按当时市值
+      for (const i of ins) addLot(i.tok, i.q, i.mkt, i.ax);   // 外部转入/桥入: 按到账时市值记成本 (同充提记录的净入金口径); 2026-10-02: 价格精确就不带星 (旧版非稳定币一律带星)
     } else {
       for (const o of outs) await consume(o.tok, o.q, tx.b);
     }
