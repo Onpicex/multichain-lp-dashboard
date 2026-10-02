@@ -1894,7 +1894,7 @@ function renderIdle(data,curF){
 
 // --- 充提记录 (点总价值卡展开): 各钱包 funding.events 汇总 (2026-10-02, 取代钱包余额面板里的「初始资金」块; 后端 rh=Transfer 日志回溯, base/bsc/eth=Ankr, sol=账本+Helius) ---
 // 当前视图内钱包之间的互转 = 内部, 列出但不计合计; 单钱包视图下与其它钱包的往来照算充值/提币
-// ct==='self' (SOL): 对方是没加进列表、但签名把币转回过本钱包的自控地址, 任何视图都标内部、不计 (后端合计也不计)
+// ct==='self' (SOL): 对方是没加进列表、但签名把币转回过本钱包的自控地址 (含 App 临时托管地址), 任何视图都标内部、不计 (后端合计也不计)
 let flowOpen=false, lastFlow=null;   // lastFlow = 上次 render 的 {d: idle, f, lpBy, total}
 try{ flowOpen=localStorage.getItem('lpFlowOpen')==='1'; }catch{}
 function togFlow(){
@@ -1970,7 +1970,7 @@ function renderFlow(L){
       const tag=e.intl?'内部':(e.ct==='mint'?'铸入':e.ct==='burn'?'销毁':'');
       const cpCell=cpName?'<span class="fund-cp known" title="'+escH(e.cp)+'">'+escH(cpName)+'</span>'
         :e.cp?'<a class="fund-cp" href="'+escH(flowAddrUrl(e.cp))+'" target="_blank" rel="noopener" title="'+escH(e.cp)+'">'+escH(sA(String(e.cp)))+'</a>':'<span class="fund-cp">—</span>';
-      const intlTip=e.ct==='self'?'对方不在钱包列表里，但它签名把币转回过本钱包（手续费由本钱包付）＝你自己控制的地址，往来不算充提、不计合计':'本视图内钱包互转，不计入合计';
+      const intlTip=e.ct==='self'?'对方不在钱包列表里，但它签名把币转回过本钱包（手续费由本钱包付）＝你或你用的钱包 / App 控制的地址（比如 App 下单时临时生成的托管地址），往来不算充提、不计合计':'本视图内钱包互转，不计入合计';
       h+='<tr'+(e.intl?' class="flow-intl" title="'+intlTip+'"':'')+'>'
         +'<td class="num">'+(tu?'<a href="'+escH(tu)+'" target="_blank" rel="noopener" title="在浏览器查看交易">'+fT(e.ts)+'</a>':fT(e.ts))+'</td>'
         +(multi?'<td class="idle-ws">'+escH(e.wn||'')+'</td>':'')
@@ -1984,7 +1984,7 @@ function renderFlow(L){
     if(cut) h+='<div class="idle-note">仅显示最近 '+MAX+' 笔（合计含全部）</div>';
   }
   const scope=activeChain==='sol'
-    ?'开了账本的钱包里不含 LP / 换币指令的单向转账（SOL 与 WSOL 合并，建 / 关代币账户的租金不算）；本钱包付手续费、对方是程序账户的（借贷 / 质押 / 跨链桥存取）不算；本钱包付手续费、由对方签名转入的普通地址视为你自己控制的地址，与它的往来标「内部」· 没开账本的钱包无数据'
+    ?'开了账本的钱包里不含 LP / 换币指令的单向转账（SOL 与 WSOL 合并，建 / 关代币账户的租金不算）；本钱包付手续费、对方是程序账户的（借贷 / 质押 / 跨链桥存取）不算；本钱包付手续费、由对方签名转入的普通地址视为你或你用的钱包 / App 控制的地址（如 App 临时托管地址），与它的往来标「内部」· 没开账本的钱包无数据'
     :'钱包与外部地址之间的单向转账（交易所充提、个人转账，含交易所合约热钱包打来的）；同一笔交易有进有出（换币 / LP 存取）、钱包自己发起的合约交互（LP、领费、路由、跨链桥转出）不算'
       +(activeChain==='rh'?' · 原生 ETH 直转链上无日志，看不见':' · 合约内部转出的原生币（如跨链桥解包后打来的币）看不见');
   h+='<div class="idle-note">口径：'+scope+' · 视图内钱包互转标「内部」不计合计 · 稳定币按面值、原生币按转账时点价、其他代币'+(activeChain==='sol'?'按该钱包前后 3 天内的换币成交价（离转账超 6 小时或没有成交、改按当前价的标 *）':'按当前价近似（*）')+' · 单笔 &lt;$1 不计 · 盈亏 = 现值（钱包余额 + LP）− 净入金</div>';
