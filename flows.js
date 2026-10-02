@@ -17,8 +17,12 @@
 //   对方判定 (2026-10-02, 同 EVM「钱包自己发起的合约交互不计」): 本钱包付手续费 + 对方是程序账户 (PDA, 不在 ed25519 曲线上) = 协议存取, 不计;
 //     本钱包付手续费、从普通地址转入 = 对方签了名 (转出必须源地址签名) = 用户自己控制的地址 (未加进钱包列表), 记入 C.self,
 //     与它的往来 (含之前转过去的那笔) 标 self、不计合计。实例: 钱包把代币转到一个未登记的普通地址, 又由该地址签名转回, 两笔都是本钱包付费
+//     转出同理 (2026-10-02 补): 本钱包付手续费、转给未登记普通地址时对方也在签名人里 = 同一方控制 (钱包 App 的托管地址), 记 self。
+//     实例 = Jupiter 限价单: 下单时把币转进一个 App 生成的托管地址 (托管地址 + Jupiter 联署者都签名), 撤单由托管地址签名转回;
+//     成交时由 Jupiter 付费从托管地址换币、所得直接从池子打进本钱包 (Helius 标 SWAP, solLegs 本来就跳过)。
+//     只认「转回」的话, 成交的单永远等不到转回, 下单那笔会被记成提币, 盈亏虚高同额。签名人靠 getTransaction 取 (增强解析结果里没有), 只对这种转出腿查
 // 内部互转照记 (带对方地址), 前端按当前视图的钱包集合判「内部」并不计合计; 单钱包视图下就是该钱包的充值/提币
-// 缓存 flows-cache-<chain>.json (v2: 合约对手改按发起人判; v3: SOL 加账本价格观测; SOL v4: 自控地址/PDA 判定 —— 版本不符整体重扫):
+// 缓存 flows-cache-<chain>.json (v2: 合约对手改按发起人判; v3: SOL 加账本价格观测; SOL v4: 自控地址/PDA 判定; SOL v5: 转出时对方联署也算自控 —— 版本不符整体重扫):
 //   { v, wallets: { addr: { scannedTo|chk, stopped, raw, events, inUSD, outUSD, updatedAt } }, code, self (仅 SOL: { 自控地址: 1 }) }
 // =============================================================
 'use strict';
@@ -27,7 +31,7 @@ const path = require('path');
 const ledger = require('./pnl-ledger');
 const { PublicKey } = require('@solana/web3.js');
 
-const CACHE_V = { sol: 4 };         // 按链分版本: 只改 SOL 口径时不逼 EVM 链整体重扫
+const CACHE_V = { sol: 5 };         // 按链分版本: 只改 SOL 口径时不逼 EVM 链整体重扫
 const verOf = chainId => CACHE_V[chainId] || 3;
 const RAW_LIMIT = 8000;            // 单钱包原始转账条数上限, 超过 = 高频 bot 钱包放弃 (同 rh FUNDING_RAW_LIMIT)
 const DUST_USD = 1;
@@ -286,6 +290,20 @@ function solCounterparty(p, wallet, mint, dir) {
   }
   return pick(tok, 'fromUserAccount', 'toUserAccount', 'tokenAmount');
 }
+// 这笔 tx 的签名人 (Helius RPC); 失败返回 null, 调用方别把这笔标已查
+async function solSigners(sig) {
+  for (let i = 0; i < 3; i++) {
+    try {
+      const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${heliusKey()}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getTransaction', params: [sig, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 }] }), signal: AbortSignal.timeout(30000) });
+      if (!r.ok) { await sleep(2000 * (i + 1)); continue; }
+      const j = await r.json();
+      const keys = j && j.result && j.result.transaction && j.result.transaction.message.accountKeys;
+      if (keys) return new Set(keys.filter(k => k.signer).map(k => k.pubkey));
+      await sleep(2000 * (i + 1));
+    } catch { await sleep(2000 * (i + 1)); }
+  }
+  return null;
+}
 function onCurve(a) { try { return PublicKey.isOnCurve(new PublicKey(a).toBytes()); } catch { return true; } }   // 解析不了当普通地址 (走旧口径)
 // 新认出的自控地址: 全部钱包里与它的旧事件 (比如先转出、后来才转回的那笔) 一起改标 self
 function markSelf(C, cp) {
@@ -325,6 +343,15 @@ async function scanSolWallet(addr, monitored, deadline) {
     for (const c of batch) {
       const p = bySig.get(c.sig);
       if (!p) continue;   // 这笔没解析回来, 下轮再试
+      // 本钱包付费、转给未登记普通地址: 查对方是否也签了名 (托管地址), 是就先记自控, 下面这条腿直接标 self
+      if (p.feePayer === addr) {
+        const ask = c.legs.filter(l => l.amt < 0).map(l => solCounterparty(p, addr, l.mint, 'out')).filter(cp => cp && !monitored.has(cp) && !C.self[cp] && onCurve(cp));
+        if (ask.length) {
+          const sg = await solSigners(c.sig);
+          if (!sg) { W.stopped = 'rpc'; continue; }   // 没查到, 不标已查, 下轮再试
+          for (const cp of ask) if (sg.has(cp)) markSelf(C, cp);
+        }
+      }
       for (const l of c.legs) {
         const dir = l.amt > 0 ? 'in' : 'out', amt = Math.abs(l.amt);
         if (!SOL_STABLES[l.mint]) { const cur = curPrice('sol', l.mint); if (cur > 0 && amt * cur < DUST_PRE_USD) continue; }   // 现价没加载 (0) 时不预判, 免得整笔被标已查永久漏掉
