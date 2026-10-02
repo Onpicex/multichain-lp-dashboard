@@ -100,7 +100,7 @@ function pda(seedStr, mint, prog) {
 }
 const PROG_ID = Object.fromEntries(Object.entries(PROGS).map(([k, v]) => [v, k]));
 
-let deps = { prices: () => ({}), symbols: () => ({}), wallets: () => [], log: console.log };
+let deps = { prices: () => ({}), symbols: () => ({}), wallets: () => [], log: console.log, histSol: null };   // histSol(tsMs) → SOL 当时美元价 (0 = 没取到)
 function init(d) { deps = { ...deps, ...d }; }
 function key() { return (process.env.HELIUS_KEY || '').trim(); }
 function enabled() { return !!key(); }
@@ -522,13 +522,45 @@ function histPrice(wallet, mint, ts, sig) {
   const ip = impliedPriceNear(obsByWallet.get(wallet) || {}, mint, ts, sig);
   return ip ? { p: ip.p, approx: ip.d > APPROX_OBS_MS } : null;
 }
+// 2026-10-02: SOL 历史价 (coingecko 小时价, 与充提记录同源). 附近 6h 没有观测的 SOL 以前退用 ±3 天的远观测、再没有就用现价 ——
+//   一笔小额 SOL 转入 (gas 用) 前后 3 天无观测, 按现价入批次, 后面开的仓分到这批 SOL, 已关闭仓成本每轮随 SOL 现价漂几分钱.
+//   computeWallet 是同步的: 缺的小时桶先记进 solNeed, runQueue 拉完再重放一次; 拉不到 (限流) 照旧退观测/现价并标 approx
+const solHist = new Map();   // 小时桶 -> 美元价 (只在内存; 底层 coin-hist-cache.json 落盘, 重启后再取是本地命中)
+let solNeed = null;
+function solHistAt(ts) {
+  const b = Math.floor(ts / 3600000);
+  if (solHist.has(b)) return solHist.get(b);
+  if (solNeed && deps.histSol) solNeed.set(b, ts);
+  return 0;
+}
+async function fetchSolHist(need) {
+  let got = 0;
+  for (const [b, ts] of need) {
+    let p = 0; try { p = Number(await deps.histSol(ts)) || 0; } catch {}
+    if (p > 0) { solHist.set(b, p); got++; }
+  }
+  return got;
+}
 function priceAt(obs, mint, ts, cur, sig) {
   if (STABLES[mint]) return { p: 1, approx: false };
   const ip = impliedPriceNear(obs, mint, ts, sig);
   const c = cur[mint] || 0;
   // 2026-09-28 审计修复: 观测离交易 > 6h 标 approx (旧版 3 天内的观测一律当精确价)
-  if (ip && (!(c > 0) || (ip.p <= c * 100 && ip.p >= c / 100))) return { p: ip.p, approx: ip.d > APPROX_OBS_MS };   // 隐含价与现价差 100 倍以上不可信
+  const ok = ip && (!(c > 0) || (ip.p <= c * 100 && ip.p >= c / 100));   // 隐含价与现价差 100 倍以上不可信
+  if (ok && ip.d <= APPROX_OBS_MS) return { p: ip.p, approx: false };
+  if (mint === WSOL) { const h = solHistAt(ts); if (h > 0) return { p: h, approx: false }; }   // 2026-10-02: SOL 附近没观测 → 当时小时价 (比远观测/现价准)
+  if (ok) return { p: ip.p, approx: true };
   return { p: c, approx: true };
+}
+// 2026-10-02: 重放一遍收集缺的 SOL 小时价, 拉到了再重放一遍 (重放是纯本地计算)
+async function computeWithHist(wallet, livePositions, name) {
+  solNeed = new Map();
+  let need;
+  try { computeWallet(wallet, livePositions); } finally { need = solNeed; solNeed = null; }
+  if (!need.size) return;
+  const got = await fetchSolHist(need);
+  if (got) computeWallet(wallet, livePositions);
+  if (got < need.size) deps.log(`[SOL] pnl-ledger ${name || wallet.slice(0, 6)}: SOL 历史价 ${need.size - got}/${need.size} 个小时没取到, 按附近观测/现价估 (approx), 下轮重试`);
 }
 function computeWallet(wallet, livePositions) {
   const s = state();
@@ -741,7 +773,7 @@ async function runQueue(liveByWallet, opts = {}) {
         await scanTokenAccounts(w.address, deadline, scanStart);
         if (W.partial) { deps.log(`[SOL] pnl-ledger ${w.name}: 高频钱包放弃`); continue; }
         await reparseUnnamed(w.address, deadline);
-        computeWallet(w.address, (liveByWallet && liveByWallet[w.address]) || []);
+        await computeWithHist(w.address, (liveByWallet && liveByWallet[w.address]) || [], w.name);
         save();
         const n = Object.values(W.pos).filter(P => P.c).length, cl = Object.values(W.pos).filter(P => P.c && P.c.status === 'closed').length;
         deps.log(`[SOL] pnl-ledger ${w.name}: ${Object.keys(W.txs).length} tx, ${n} 仓 (已关闭 ${cl})`);
@@ -807,4 +839,4 @@ function walletReport(wallet, liveWallet, useLedger = true) {   // useLedger=fal
   return out;
 }
 
-module.exports = { init, enabled, runQueue, positionPnl, walletStatus, walletReport, histPrice, obsReady, ROUND_MS, _state: state, _test: { parseTx, computeWallet, reparseUnnamed, scanTokenAccounts, buildPriceObs, walletFlow, poolPriceFromAmounts, scanWallet, positionKeysOf, impliedPriceNear, priceAt } };   // 2026-09-28 审计修复: 多导出几个给独立脚本验证
+module.exports = { init, enabled, runQueue, positionPnl, walletStatus, walletReport, histPrice, obsReady, ROUND_MS, _state: state, _test: { parseTx, computeWallet, computeWithHist, reparseUnnamed, scanTokenAccounts, buildPriceObs, walletFlow, poolPriceFromAmounts, scanWallet, positionKeysOf, impliedPriceNear, priceAt } };   // 2026-09-28 审计修复: 多导出几个给独立脚本验证

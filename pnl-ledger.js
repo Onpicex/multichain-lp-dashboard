@@ -777,6 +777,113 @@ async function priceAt(chainId, token, block, ref) {
 }
 
 // =============================================================
+// 3b. 原生币内部转账补查 (2026-10-02)
+//   V4 原生币池 (ETH/xxx) 撤出/领费的 ETH 是 PoolManager 内部转给钱包的, 开仓多付的 ETH 由 PositionManager 内部退回 ——
+//   都不在 ERC20 Transfer / 顶层 value 里, 账本看不到: 领费只剩另一侧 → 手续费少记, 退回的 ETH 算进了成本。
+//   只对碰过原生币池的 tx 补查内部转入, 结果 W.nat[h] = { b, i?: 内部转入 wei, v?: 顶层 value wei (带符号), f?: 失败次数 }:
+//   · Ankr 链 (base/eth/bsc): 归档余额差 —— 内部转入 = 余额(b) − 余额(b−1) + gas + L1 费 + 顶层转出 − 顶层转入
+//     (base 16 笔与 blockscout 逐 wei 一致; 同块还有本钱包别的 tx / 差出负数 = 拆不开, 改走 blockscout)
+//   · rh: RPC 不存历史状态 → blockscout 逐笔 internal-transactions (CF 挡, 走 cf-get.py); base 的 blockscout 缺块 (个别 tx 404), 只当后备
+//   取不到的记失败次数下轮重试, 连败 NATIVE_MAX_FAIL 次放弃 (该 tx 仍按旧口径: 看不见的 ETH 不计)
+//   · rh 的流水只扫 ERC20 日志, 顶层 ETH 转账一笔都没有 → 光补内部转入, 收到的 ETH 进了持仓批次却永远不出 (原生转出看不见),
+//     后面开仓会吃到旧成本; 所以非 Ankr 链再按 blockscout 地址交易补全部顶层 value (W.nat[h].v, 游标 W.natTo), 与 Ankr 链 e['v'] 同口径
+// =============================================================
+const NATIVE_MAX_FAIL = 6;
+const NATIVE_SLICE_MS = 90 * 1000;   // 每钱包每轮补查时长上限 (rh blockscout 一笔 ~4s; 大钱包首查分几轮补完)
+function nativeTxsOf(chainId, W) {
+  const st = ledgerState(chainId);
+  const isNat = spec => !!(st.d.pools[spec] && st.d.pools[spec].native);
+  const want = new Map();
+  for (const [h, t] of Object.entries(W.txs)) if ((t.m || []).some(m => isNat(m[0]) && W.pos[`v4-${m[1]}`])) want.set(low(h), t.b);
+  for (const P of Object.values(W.pos)) {
+    if (P.k !== 'v4' || !P.spec || !isNat(P.spec)) continue;
+    for (const ev of ((st.d.v4[P.spec] || { ev: {} }).ev[P.id] || [])) if (!want.has(low(ev.tx))) want.set(low(ev.tx), ev.b);
+  }
+  return want;
+}
+// blockscout 逐笔: 本 tx 里转给钱包的内部 ETH 合计 (wei 字符串); 取不到 / 没索引 → null (限流/网络等暂时性失败另标 meta.transient)
+async function nativeInFromBlockscout(chainId, addr, h, meta) {
+  const cfg = cfgOf(chainId);
+  if (!cfg.blockscout || !E.cfGetJson) return null;
+  let total = 0n, n = 0, next = null;
+  for (let page = 0; page < 5; page++) {
+    const q = next ? '?' + new URLSearchParams(Object.entries(next).map(([k, v]) => [k, String(v)])).toString() : '';
+    const j = await E.cfGetJson(`${cfg.blockscout}/api/v2/transactions/${h}/internal-transactions${q}`, '账本原生币补查', meta);
+    if (!j || !Array.isArray(j.items)) return null;
+    for (const x of j.items) {
+      n++;
+      if (x.success === false || x.error) continue;
+      const to = low(x.to && x.to.hash), from = low(x.from && x.from.hash);
+      if (to === addr && from !== addr) total += BigInt(x.value || '0');
+    }
+    next = j.next_page_params || null;
+    if (!next) break;
+  }
+  if (!n) return null;   // 走 PositionManager 的 tx 必有内部调用, 一条没有 = blockscout 还没索引这笔
+  return total.toString();
+}
+// Ankr 归档余额差 (见上); 拆不开返回 null
+async function nativeInFromBalance(chainId, addr, h, b, W) {
+  if (Object.values(W.txs).filter(t => t.b === b).length > 1) return null;   // 同块还有本钱包别的 tx
+  const pv = providerFor(chainId);
+  const call = (m, p) => E.withRetry(() => pv.send(m, p), 2, 500).catch(() => null);
+  const [tx, rc, b1, b0] = await Promise.all([call('eth_getTransactionByHash', [h]), call('eth_getTransactionReceipt', [h]), call('eth_getBalance', [addr, '0x' + b.toString(16)]), call('eth_getBalance', [addr, '0x' + (b - 1).toString(16)])]);
+  if (!tx || !rc || b1 == null || b0 == null || Number(rc.blockNumber) !== b) return null;
+  const val = BigInt(tx.value || '0');
+  let d = BigInt(b1) - BigInt(b0);
+  if (low(tx.from) === addr) d += BigInt(rc.gasUsed) * BigInt(rc.effectiveGasPrice || tx.gasPrice || '0') + (rc.l1Fee ? BigInt(rc.l1Fee) : 0n) + val;
+  if (low(tx.to) === addr) d -= val;
+  return d >= 0n ? d.toString() : null;   // 负数 = 同块有没进流水的支出 (如失败 tx 的 gas), 拆不开
+}
+// 非 Ankr 链: blockscout 地址交易 (v2) 补顶层 ETH 转账 (只扫到账本流水游标 W.scannedTo; 回退一段重叠防 blockscout 索引滞后, 写入幂等)
+const NATIVE_TOP_OVERLAP = 50000;
+async function scanTopValues(chainId, addr, W) {
+  const cfg = cfgOf(chainId), st = ledgerState(chainId);
+  if (isAnkr(chainId) || !cfg.blockscout || !E.blockscoutTopTxs || !(W.scannedTo >= 0)) return true;
+  W.nat = W.nat || {};
+  const since = W.natTo >= 0 ? Math.max(0, W.natTo - NATIVE_TOP_OVERLAP) : 0;
+  const to = await E.blockscoutTopTxs(chainId, addr, since, W.scannedTo, W, 'natPend', t => {
+    if (!t.to || t.from === t.to || (t.from !== addr && t.to !== addr)) return;
+    const nn = W.nat[t.hash] || (W.nat[t.hash] = { b: t.b });
+    nn.v = (t.from === addr ? -t.v : t.v).toString();
+    if (t.ts && !st.d.bts[t.b]) st.d.bts[t.b] = t.ts;
+  }, '账本顶层 ETH');
+  if (to == null) return false;   // 取失败 / 没翻完 (翻页位置在 W.natPend): 游标不动, 下轮续
+  W.natTo = to;
+  return true;
+}
+// 返回 true = 该钱包需要的原生币 tx 都查完了 (含放弃的)
+async function scanNative(chainId, addr, W) {
+  W.nat = W.nat || {};
+  const topOk = await scanTopValues(chainId, addr, W).catch(e => { console.error(`[${chainId}] pnl-ledger ${addr.slice(0, 10)}: 顶层 ETH 补扫`, e.message?.slice(0, 80)); return false; });
+  const ankr = isAnkr(chainId);
+  const topReady = ankr || W.natTo >= 0;   // 非 Ankr 链顶层 ETH 流水至少完整扫成过一次
+  if (!ankr && !(cfgOf(chainId).blockscout && E.cfGetJson)) return topOk;   // 两条路都没有 (arc): 不查, 按旧口径
+  const want = nativeTxsOf(chainId, W);
+  if (!want.size) { if (topReady) W.natDone = true; return topOk; }
+  const todo = [...want].filter(([h]) => { const n = W.nat[h]; return !n || (n.i == null && (n.f || 0) < NATIVE_MAX_FAIL); }).sort((x, y) => x[1] - y[1]);
+  if (!todo.length) { if (topReady) W.natDone = true; return topOk; }
+  const stop = Date.now() + NATIVE_SLICE_MS;
+  let done = 0, failed = 0, limited = 0;
+  const one = async ([h, b]) => {
+    const n = W.nat[h] || (W.nat[h] = { b });
+    const meta = {};
+    let i = ankr ? await nativeInFromBalance(chainId, addr, h, b, W).catch(() => null) : null;
+    if (i == null) i = await nativeInFromBlockscout(chainId, addr, h, meta).catch(() => { meta.transient = true; return null; });
+    if (i == null && meta.transient) { limited++; return; }   // 限流/网络: 不计失败次数, 本轮停手下轮再查
+    if (i == null) { n.f = (n.f || 0) + 1; failed++; return; }
+    n.i = i; delete n.f; done++;
+  };
+  const CONC = ankr ? 1 : 2;
+  for (let k = 0; k < todo.length && Date.now() < stop && !limited; k += CONC) await Promise.all(todo.slice(k, k + CONC).map(one));
+  const left = [...want].filter(([h]) => { const n = W.nat[h]; return !n || (n.i == null && (n.f || 0) < NATIVE_MAX_FAIL); }).length;
+  const gaveUp = [...want].filter(([h]) => { const n = W.nat[h]; return n && n.i == null && (n.f || 0) >= NATIVE_MAX_FAIL; }).length;
+  if (!left && topReady) W.natDone = true;   // 首次补全才让 computeWallet 并入 (补一半比旧口径还歪, 实测补到 3/7 时已关闭仓成本虚增数百刀)
+  console.log(`[${chainId}] pnl-ledger ${addr.slice(0, 10)}: 原生币内部转账补查 ${done} 笔${failed ? `, 失败 ${failed}` : ''}${limited ? `, 限流/网络 ${limited}` : ''}${left ? `, 还剩 ${left} 下轮续` : ''}${gaveUp ? `, 放弃 ${gaveUp} (按旧口径)` : ''}`);
+  return !left && topOk;
+}
+
+// =============================================================
 // 4. 按 tx 时间线重放: 持仓批次 (加权平均成本) + 仓位成本/提回/手续费
 // =============================================================
 async function computeWallet(chainId, addr, livePositions) {
@@ -802,6 +909,21 @@ async function computeWallet(chainId, addr, livePositions) {
     // 2026-09-28 审计修复: e 里的原生币条目键是 'v' (非数字), +'v' = NaN 会把 tx.li 污染成 NaN 让排序失序; 非数字键不参与 logIndex 取最小
     for (const [li, [tok, amt]] of Object.entries(t.e || {})) { const n = +li; if (Number.isFinite(n)) tx.li = Math.min(tx.li, n); tx.flows.set(tok, (tx.flows.get(tok) || 0n) + BigInt(amt)); }
     for (const [li, n] of Object.entries(t.n || {})) { tx.li = Math.min(tx.li, +li); tx.nft.push({ k: n[0], id: n[1], dir: n[2] }); }
+  }
+  // 2026-10-02: 原生币池 tx 的内部 ETH 转入 + 非 Ankr 链的顶层 ETH 转账, 按 WETH 并进流水 (见 3b scanNative); Ankr 链顶层 value 已在 e['v'], 不重复加
+  // 首次补全 (W.natDone) 前整段不并, 补一半比旧口径还歪: 非 Ankr 链 (rh) 顶层 ETH 流水没扫成 → 光有内部转入没有转出, 持仓批次只进不出;
+  //   内部转账只查到一部分 → 撤仓退回的 ETH 缺了, 后面花出去的 ETH 找不到批次按市价补成本.
+  //   补全过一次以后照常并: 之后新 tx 一两笔暂缺只差这几笔、下轮补上, 别为它整段退回旧口径来回跳
+  if (W.natDone) {
+    const wn = low(cfg.wrappedNative);
+    for (const [h, n] of Object.entries(W.nat || {})) {
+      const t = W.txs[h];
+      let amt = n.i != null ? BigInt(n.i) : 0n;
+      if (n.v && !(t && t.e && t.e.v)) amt += BigInt(n.v);
+      if (amt === 0n) continue;
+      const tx = getTx(h, n.b);
+      tx.flows.set(wn, (tx.flows.get(wn) || 0n) + amt);
+    }
   }
   // V4 事件: 回执提取 (W.txs[h].m) ∪ 原生币池补扫 (st.d.v4), 按 (块, logIndex) 去重
   const v4FromTx = new Map();
@@ -1083,6 +1205,9 @@ async function runQueue(chainId, livePositionsByWallet, opts = {}) {
       if (!W || W.partial) continue;
       if (!ready.has(addr)) continue;
       if (!v4Ok && Object.values(W.pos).some(P => P.k === 'v4' && st.d.pools[P.spec] && st.d.pools[P.spec].native)) { console.log(`[${chainId}] pnl-ledger ${w.name}: 原生币池 V4 事件未扫完, 本轮不重放`); continue; }
+      // 2026-10-02: 原生币池 tx 补查内部 ETH + 非 Ankr 链顶层 ETH (没查完也照常重放: 没查到的按旧口径, 下轮补上自动收敛)
+      try { await scanNative(chainId, addr, W); save(chainId); }
+      catch (e) { console.error(`[${chainId}] pnl-ledger 原生币补查 ${w.name}:`, e.message?.slice(0, 100)); }
       try {
         await computeWallet(chainId, addr, livePositionsByWallet ? livePositionsByWallet[addr] : undefined);   // 2026-09-28 审计修复: 未就绪传 undefined (同上)
         const n = Object.values(W.pos).filter(P => P.c).length, cl = Object.values(W.pos).filter(P => P.c && P.c.status === 'closed').length;
@@ -1212,4 +1337,4 @@ function applyPnl(pos, src, priceOf) {
 // 充提记录模块 (flows.js) 复用: 同一条 Ankr 串行队列 (与账本不抢限流)、Ankr 归档节点、链配置、coingecko 小时价
 const flowApi = { ankrCall, providerFor, cfgOf, stateOf, coinUsdAt: (id, ts) => E.coinUsdAtTime(id, ts) };
 
-module.exports = { init, registerChain, enabled, isAnkr, flowApi, runQueue, positionPnl, walletStatus, walletReport, applyPnl, ledgerState, ROUND_MS, _test: { computeWallet, scanWallet, ensurePositions, scanV3Events, scanV4Events } };
+module.exports = { init, registerChain, enabled, isAnkr, flowApi, runQueue, positionPnl, walletStatus, walletReport, applyPnl, ledgerState, ROUND_MS, _test: { computeWallet, scanWallet, ensurePositions, scanV3Events, scanV4Events, scanNative, nativeTxsOf, scanTopValues } };

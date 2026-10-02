@@ -2015,7 +2015,7 @@ function filterIdleByWallets(idle, walletsSel) {
 
 // ============================================================
 // 初始资金 (净入金) 回溯 — fundingFromLogs 链 (rh)
-// 口径: 仅 ERC20 Transfer (rh RPC 不支持任何 trace 方法, 原生 ETH 直转链上无日志不可见);
+// 口径: ERC20 Transfer 日志 + 原生 ETH 直转 (2026-10-02 起; rh RPC 不支持任何 trace 方法、原生转账不出日志 → 走 blockscout 地址交易, 见 scanNativeFunding);
 //   对手=合约的转账全部排除 (swap 结算/LP 出入金/router 都是合约对手);
 //   计入: 对手=外部 EOA / 本链监控钱包(标"内部", 聚合视图双向抵消) / 铸入销毁(桥);
 //   计价: 稳定币=1, WETH=转账时点 ETH 价(coingecko 小时级), 股票代币=当前美股行情近似,
@@ -2034,6 +2034,110 @@ function loadFundingCache(chainId) {
 }
 function saveFundingCache(chainId) {
   try { writeJsonAtomic(fundingFile(chainId), chainState(chainId).fundingCache || {}); } catch {}   // 2026-09-28 审计修复: 原子写
+}
+// 2026-10-02: rh 原生 ETH 直转 (EOA↔EOA) 也算充提. 之前只认 ERC20 日志: 从外部地址收的 ETH、转回外部地址的 ETH 全看不见,
+//   净入金少记 → 总体盈亏虚高同样多. 数据源 = blockscout 地址顶层交易 (原生直转都在里面; 合约转出的内部转账对手是合约, 本来就不计), 见 blockscoutTopTxs.
+//   blockscout 在 Cloudflare 后面, node fetch / curl 一律 403 → cf-get.py (curl_cffi 仿 Chrome TLS 指纹) 子进程取
+const CFFI_PY = process.env.CFFI_PYTHON || '/home/ubuntu/.venvs/cffi/bin/python';
+const CF_GET = path.join(__dirname, 'cf-get.py');
+const NATIVE_OVERLAP = 50000;               // 每轮从游标往回重扫的块数 (rh ~10 块/秒 ≈ 1.4h), 盖住 blockscout 落后链头; 以 id 去重
+const NATIVE_MIN_GAP_MS = 4 * 60 * 1000;    // 同一钱包两次原生扫描最小间隔 (强刷也同步跑资金队列, 别每次都多等子进程)
+// blockscout 限流按 IP、两个桶各算各的 (10-02 实测响应头): 旧版 /api 每「整点小时」只给 10 次 (reset 指到下个整点), /api/v2 每整 5 分钟 150 次.
+//   所以地址交易一律走 v2 (blockscoutTopTxs), 旧版 /api 不再用. 回 429 就按头里的 reset 歇到窗口结束 (没给就歇 5 分钟), 期间该桶直接返回 null 不再打.
+const cfBackoff = new Map();
+const CF_BACKOFF_MS = 5 * 60 * 1000;
+const CF_BACKOFF_MAX_MS = 65 * 60 * 1000;
+const cfBucket = url => { try { const u = new URL(url); return u.host + (u.pathname.startsWith('/api/v2/') ? ':v2' : ':api'); } catch { return url; } };
+let cfGetWarned = 0;
+// 失败一律 resolve(null); 传了 meta 时标 meta.transient = 限流/5xx/网络/超时/没装 curl_cffi (下轮能好), 否则是确定性的 (404 等, 账本补查按次数放弃)
+function cfGetJson(url, what = 'rh 原生 ETH 充提', meta) {
+  const bucket = cfBucket(url);
+  if (Date.now() < (cfBackoff.get(bucket) || 0)) { if (meta) meta.transient = true; return Promise.resolve(null); }
+  return new Promise(resolve => {
+    require('child_process').execFile(CFFI_PY, [CF_GET, url], { timeout: 90000, maxBuffer: 64 << 20 }, (err, out, errOut) => {
+      if (err) {
+        const msg = String(errOut || err.message).trim();
+        const http = err.code === 2 && /HTTP (\d+)/.exec(msg);
+        if (http && http[1] === '429') {
+          const reset = Number((/reset=(\d+)/.exec(msg) || [])[1]);
+          cfBackoff.set(bucket, Date.now() + (reset > 0 && reset <= CF_BACKOFF_MAX_MS ? reset + 2000 : CF_BACKOFF_MS));
+        }
+        if (meta) meta.transient = !(http && +http[1] >= 400 && +http[1] < 500 && http[1] !== '429');
+        if (Date.now() - cfGetWarned > 600000) { cfGetWarned = Date.now(); console.error(`[cf-get] 失败 (${err.code === 'ENOENT' ? '没有 ' + CFFI_PY : msg.slice(0, 80)}); ${what}本轮跳过, 下轮重试`); }
+        return resolve(null);
+      }
+      try { resolve(JSON.parse(out)); } catch { if (meta) meta.transient = true; resolve(null); }
+    });
+  });
+}
+// 返回 true = 扫到 latest; false = 失败/没扫完 (游标停在已处理处, 下轮续)
+// 地址顶层交易 (blockscout v2 /addresses/{a}/transactions, 新→旧每页 50; 2026-10-02 起替代旧版 txlist, 旧版每小时只给 10 次):
+//   扫 [since, to] 块区间, 只把成功且 value>0 的交易交给 onTx({ hash, b, ts, from, to, v }). 翻到 since 以下或翻到底 = 扫完, 返回 to (调用方把游标前移到这);
+//   一次最多翻 V2_PAGES_PER_CALL 页, 没翻完 (首扫/大钱包) 或取失败返回 null, 翻页游标记在 holder[key] 下次接着翻 (此时沿用当初的 since/to, 不重头来).
+//   onTx 可能对同一笔调用多次 (区间重叠 / 失败重翻), 调用方须按 hash 去重或幂等写.
+const V2_PAGES_PER_CALL = 8;
+async function blockscoutTopTxs(chainId, addr, since, to, holder, key, onTx, what) {
+  const cfg = EVM_CHAINS[chainId];
+  if (!cfg.blockscout) return null;
+  const p = holder[key] || { since, to, q: null };
+  for (let page = 0; page < V2_PAGES_PER_CALL; page++) {
+    const j = await cfGetJson(`${cfg.blockscout}/api/v2/addresses/${addr}/transactions${p.q ? '?' + new URLSearchParams(p.q) : ''}`, what);
+    if (!j || !Array.isArray(j.items)) return null;
+    for (const x of j.items) {
+      const b = Number(x.block_number ?? x.block);
+      if (!(b > 0) || b > p.to) continue;                            // pending / 超出本次区间 (下次从 to 往回重叠扫时会拿到)
+      if (b < p.since) { delete holder[key]; return p.to; }
+      if (x.status !== 'ok') continue;                               // 回滚的交易 value 没转出去
+      let v; try { v = BigInt(x.value || '0'); } catch { continue; }
+      if (v === 0n) continue;
+      await onTx({ hash: String(x.hash).toLowerCase(), b, ts: Date.parse(x.timestamp) || 0,
+        from: String(x.from?.hash || '').toLowerCase(), to: String(x.to?.hash || '').toLowerCase(), v });
+    }
+    if (!j.next_page_params) { delete holder[key]; return p.to; }
+    p.q = j.next_page_params; holder[key] = p;
+  }
+  return null;
+}
+async function scanNativeFunding(chainId, cur, addr, monitored, latest) {
+  const cfg = EVM_CHAINS[chainId];
+  if (!cfg.blockscout) return true;
+  if (cur.nTo >= 0 && cur.nAt && Date.now() - cur.nAt < NATIVE_MIN_GAP_MS) return !cur.nStopped;
+  const wn = cfg.wrappedNative.toLowerCase();
+  const seen = new Set(cur.events.map(e => e.id));
+  const since = cur.nTo >= 0 ? Math.max(0, cur.nTo - NATIVE_OVERLAP) : 0;
+  const to = await blockscoutTopTxs(chainId, addr, since, latest, cur, 'nPend', async t => {
+    if (!t.to || t.from === t.to) return;                          // 建合约 / 自转
+    const dir = t.to === addr ? 'in' : t.from === addr ? 'out' : null;
+    if (!dir) return;
+    const id = `${t.hash}-v`;                                      // 与 Ankr 链充提记录的原生腿同一 id 形状
+    if (seen.has(id)) return;
+    const cp = dir === 'in' ? t.from : t.to;
+    let ct;
+    if (monitored.has(cp)) ct = 'internal';
+    else if (await isContract(chainId, cp)) return;                // 合约对手 (router 付款 / 买卖) = 交易行为, 排除 (与 ERC20 同口径)
+    else ct = 'external';
+    const amt = Number(t.v) / 1e18;
+    const { price, approx } = await fundingTokenPrice(chainId, wn, t.ts);
+    const ev = { id, b: t.b, ts: t.ts, dir, tok: ethers.ZeroAddress, sym: 'ETH', amt, usd: 0, cp, ct };
+    if (price > 0) ev.usd = amt * price;
+    else { ev.usd = amt * ((chainState(chainId).lastUsdPrices || {})[wn] || 0); ev.rp = 1; }   // coingecko 没取到: 先按现价, 打标下轮重取
+    if (approx || ev.rp) ev.ax = 1;
+    if (ev.usd < 1 && !ev.rp) return;                              // 灰尘
+    seen.add(id);
+    cur.events.push(ev);
+  }, 'rh 原生 ETH 充提');
+  cur.nAt = Date.now();
+  if (to == null) { cur.nStopped = 'rpc'; return false; }          // 取失败 / 没翻完: 游标不动, 翻页位置在 nPend, 下轮续
+  cur.nTo = to; cur.nStopped = null;
+  return true;
+}
+// 上轮按现价顶上的 ETH / WETH 事件 (rp): 再取一次当时价, 拿到就改成精确值
+async function repriceFundingNative(cur) {
+  for (const e of cur.events) {
+    if (!e.rp) continue;
+    const p = await ethUsdAtTime(e.ts);
+    if (p > 0) { e.usd = e.amt * p; delete e.rp; delete e.ax; }
+  }
 }
 const codeCache = {};   // `${chainId}:${addr}` -> 是否合约 (进程级; 判定失败不缓存下轮重试)
 async function isContract(chainId, addr) {
@@ -2100,6 +2204,7 @@ async function scanWalletFunding(chainId, wallet) {
   const addr = wallet.address.toLowerCase();
   const cur = cache[addr] || (cache[addr] = { scannedTo: -1, stopped: null, events: [], inUSD: 0, outUSD: 0 });
   if (cur.stopped === 'budget') return cur;   // bot 钱包已放弃, 不再扫
+  await repriceFundingNative(cur);
   const latest = await st.provider.getBlockNumber();
   const from = cur.scannedTo + 1;
   if (from > latest) return cur;
@@ -2143,18 +2248,23 @@ async function scanWalletFunding(chainId, wallet) {
     if (!(amt > 0)) continue;
     const b = parseInt(l.blockNumber, 16);
     const ts = await fundingBlockTs(chainId, b);
-    const { price, approx } = await fundingTokenPrice(chainId, token, ts);
+    let { price, approx } = await fundingTokenPrice(chainId, token, ts);
+    let rp = 0;
+    // 2026-10-02: WETH 的 coingecko 当时价没取到, 旧版 usd=0 当灰尘丢掉且游标照样前移 = 永久漏记; 改按现价顶上打标, 下轮 repriceFundingNative 重取
+    if (!(price > 0) && token === cfg.wrappedNative.toLowerCase()) { price = (st.lastUsdPrices || {})[token] || 0; rp = 1; }
     const usd = amt * price;
-    if (usd < 1) continue;                                         // 灰尘
+    if (usd < 1 && !rp) continue;                                  // 灰尘
     const ev = { id, b, ts, dir, tok: token, sym: meta?.symbol || token.slice(0, 6), amt, usd, cp, ct };
-    if (approx) ev.ax = 1;                                         // 2026-10-02: 近似价 (现价折算) 打标, 前端充提记录标 *
+    if (approx || rp) ev.ax = 1;                                   // 2026-10-02: 近似价 (现价折算) 打标, 前端充提记录标 *
+    if (rp) ev.rp = 1;
     cur.events.push(ev);
   }
+  await scanNativeFunding(chainId, cur, addr, monitored, latest);   // 2026-10-02: 原生 ETH 直转 (进度另记 nTo / nStopped)
   cur.events.sort((a, b2) => b2.ts - a.ts);
   cur.inUSD = cur.events.filter(e => e.dir === 'in').reduce((s, e) => s + e.usd, 0);
   cur.outUSD = cur.events.filter(e => e.dir === 'out').reduce((s, e) => s + e.usd, 0);
   cur.scannedTo = scannedTo;
-  cur.stopped = (rIn.stopped || rOut.stopped) ? 'rpc' : null;     // rpc 止步: 下轮从 scannedTo+1 续
+  cur.stopped = (rIn.stopped || rOut.stopped) ? 'rpc' : null;     // rpc 止步: 下轮从 scannedTo+1 续 (原生 ETH 的进度另记 nTo / nStopped)
   cur.updatedAt = Date.now();
   saveFundingCache(chainId);
   return cur;
@@ -2165,7 +2275,10 @@ function rhFundingOf(chainId, a) {
   if (!f || (!f.updatedAt && f.stopped !== 'budget')) return null;
   if (f.stopped === 'budget') return { partial: true };
   const exact = new Set([...Object.values(EVM_CHAINS[chainId].stables), 'WETH']);
-  return { inUSD: f.inUSD || 0, outUSD: f.outUSD || 0, netUSD: (f.inUSD || 0) - (f.outUSD || 0), partial: false, catchingUp: f.stopped === 'rpc',
+  // 2026-10-02: 原生 ETH 没扫完 (blockscout 取不到 / 还没扫过) 也算追赶中; 不在充提队列里的钱包 (09-28 前留下的旧条目) 不会再扫, 不标
+  const sel = fundingQueued[chainId];
+  const nPending = !!f.nStopped || (!(f.nTo >= 0) && (!sel || sel.has(a.toLowerCase())));
+  return { inUSD: f.inUSD || 0, outUSD: f.outUSD || 0, netUSD: (f.inUSD || 0) - (f.outUSD || 0), partial: false, catchingUp: f.stopped === 'rpc' || nPending,
     events: (f.events || []).map(e => (e.tok || exact.has(e.sym)) ? e : { ...e, ax: 1 }) };
 }
 // 充提记录 / 净入金从缓存注入 idle (零 RPC, 幂等): 仓位刷新时注入一次, 接口返回时再注一次 —— 后台队列刚扫完的不必等下轮仓位刷新 (重启后首轮刷新常早于扫描)
@@ -2175,15 +2288,17 @@ function injectFunding(chainId, idle) {
   else if (flows.enabled(chainId)) flows.injectIdle(idle, a => flows.fundingOf(chainId, a));
 }
 const fundingRunning = {};
+const fundingQueued = {};   // 链 -> 本轮充提队列的地址集 (rhFundingOf 判「原生 ETH 还没扫」要不要标追赶中)
 async function runFundingQueue(chainId) {
   if (fundingRunning[chainId]) return;
   fundingRunning[chainId] = true;
   try {
     const WALLETS = fundSelected(loadFundCfgEvm(), chainId, loadActiveWallets(chainId));
+    fundingQueued[chainId] = new Set(WALLETS.map(w => w.address.toLowerCase()));
     for (const w of WALLETS) {
       try {
         const r = await scanWalletFunding(chainId, w);
-        console.log(`[${chainId}] funding ${w.name}: ${r.stopped === 'budget' ? '高频钱包放弃' : `${r.events.length} 笔, 净入金 $${(r.inUSD - r.outUSD).toFixed(0)}${r.stopped === 'rpc' ? ' (RPC 止步下轮续)' : ''}`}`);
+        console.log(`[${chainId}] funding ${w.name}: ${r.stopped === 'budget' ? '高频钱包放弃' : `${r.events.length} 笔 (原生 ETH ${r.events.filter(e => e.id.endsWith('-v')).length}), 净入金 $${(r.inUSD - r.outUSD).toFixed(0)}${r.stopped === 'rpc' ? ' (RPC 止步下轮续)' : ''}${r.nStopped ? ' (原生 ETH 未扫完下轮续)' : ''}`}`);
       } catch (e) { console.error(`[${chainId}] funding scan ${w.name}:`, e.message?.slice(0, 80)); }
       await sleep(1200);
     }
@@ -2625,7 +2740,7 @@ function kickLedger(chainId) {
 // 2026-09-28 审计修复: ledger.init 与 module.exports._ledgerApi 曾各写一份键表, init 那份漏了 poolPriceNearBlock (账本里 E.poolPriceNearBlock 直接 TypeError);
 //   统一由 ledgerApi() 产出, 两处永不再漂移 (pnl-ledger.js 用到的 E.* 必须是这里的子集)
 function ledgerApi() {
-  return { EVM_CHAINS, chainState, getTokenInfo, entryPricesAtBlock, entryTokenPrices, poolPriceNearBlock, sqrtPriceX96ToPrice, getTokenAmounts, ethUsdAtTime, coinUsdAtTime, getUSDPrices, loadActiveWallets, withRetry, sleep, findMintEvent, mintBlockFromScan };
+  return { EVM_CHAINS, chainState, getTokenInfo, entryPricesAtBlock, entryTokenPrices, poolPriceNearBlock, sqrtPriceX96ToPrice, getTokenAmounts, ethUsdAtTime, coinUsdAtTime, getUSDPrices, loadActiveWallets, withRetry, sleep, findMintEvent, mintBlockFromScan, cfGetJson, blockscoutTopTxs };
 }
 
 function mountEvmRoutes(app, adminGuard) {
@@ -2834,3 +2949,4 @@ module.exports = { mountEvmRoutes, EVM_CHAINS, kickRefresh, liveByWallet, kickLe
   _ledgerApi: ledgerApi(),   // 2026-09-28 审计修复: 与 ledger.init 同源 (见 ledgerApi)
   _entryTest: { getV3EntryData, getV4EntryData, getV3EntrySubgraph, getV4EntrySubgraph, getTokenInfo } };
 module.exports._collectTest = { fillLastCollect };   // 领费时间的独立验证入口 (tools/collect-check.js)  // 建仓回溯的独立验证入口
+module.exports._fundingTest = { scanWalletFunding, rhFundingOf };   // rh 充提 (含原生 ETH) 的独立验证入口

@@ -1107,6 +1107,7 @@ solLedger.init({
   symbols: solSymbols,
   wallets: solPnlWallets,
   log: console.log,
+  histSol: ts => pnlLedger.flowApi.coinUsdAt('solana', ts),   // 2026-10-02: 附近没观测的 SOL 按当时小时价 (与充提记录同源)
 });
 // 充提记录: 直接读账本落盘的逐笔记录 (没开账本的钱包就没有充提数据)
 flows.initSol({ records: addr => solLedger._state().d.wallets[addr] || null, prices: () => lastPricesSol, symbols: solSymbols, histPrice: solLedger.histPrice, obsReady: solLedger.obsReady });
