@@ -41,8 +41,9 @@ const STABLES = { EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: 'USDC', Es9vMFrz
 const FILE = path.join(__dirname, 'pnl-ledger-sol.json');
 const RAW_LIMIT = 4000;              // 交易数上限, 超过=高频钱包放弃
 const ROUND_MS = 30 * 60 * 1000;
-const PARSE_V = 3;                   // 2026-09-30: 解析层版本; IX 表补了名字就 +1, 下轮扫描把落盘记录里没命名的 LP 指令重解析 (有 d 就本地查表, 没有 d 的旧记录按签名重拉)
+const PARSE_V = 4;                   // 2026-09-30: 解析层版本; IX 表补了名字就 +1, 下轮扫描把落盘记录里没命名的 LP 指令重解析 (有 d 就本地查表, 没有 d 的旧记录按签名重拉)
                                      // v3 (2026-10-02): 记录加 to/from (托管挂单的成本接力), 旧记录里可能带这两项的按签名重拉一次
+                                     // v4 (2026-10-02): to/from 补原生 SOL 挂单 (进出托管名下 WSOL 账户), 有原生 SOL 单向进出的旧记录重拉一次
 const SOL_NOISE = 0.15;              // LP 操作 tx 里 |ΔSOL| 小于此 = 租金/手续费噪声, 不计流水 (SOL 不是池子币时)
                                      // 2026-09-28 审计修复: 只在该 tx 的 LP 指令 xf 里不含 WSOL 时才按它过滤; xf 有 WSOL = SOL 是真实资金腿, 小额也计
 const APPROX_OBS_MS = 6 * 3600 * 1000;   // 2026-09-28 审计修复: 价格观测离交易时刻超过 6h 即标 approx (旧版 ±3 天内都当精确价)
@@ -198,10 +199,24 @@ function parseTx(wallet, t) {
   const xs = (t.tokenTransfers || []).filter(x => x.mint && Number(x.tokenAmount) > 0);
   const sum = (o, a, m, q) => { const e = o[a] || (o[a] = {}); e[m] = +((e[m] || 0) + q).toFixed(12); };
   const to = {}, from = {};
-  if (!lp.length && !xs.some(x => x.toUserAccount === wallet)) for (const x of xs) if (x.fromUserAccount === wallet && x.toUserAccount && x.toUserAccount !== wallet) sum(to, x.toUserAccount, x.mint, Number(x.tokenAmount));
+  //   (v4) 原生 SOL 下的单: 本钱包把 SOL 系统转账进托管名下新建的 WSOL 账户, 撤单时托管关掉该账户、SOL 以原生退回 —— 两头都不在
+  //   tokenTransfers 里, 只能看别人名下 WSOL 账户的余额变动 (他人真实样本 9 笔原生 SOL 挂单: 成交 3 / 撤单退回 6)
+  const wsolAt = {};   // 别人名下的 WSOL 代币账户 → { u: 持有人, d: 本 tx 余额变动 }
+  for (const a of (t.accountData || [])) for (const c of (a.tokenBalanceChanges || [])) {
+    if (c.mint !== WSOL || !c.tokenAccount || !c.userAccount || c.userAccount === wallet) continue;
+    const raw = c.rawTokenAmount || {}, e = wsolAt[c.tokenAccount] || (wsolAt[c.tokenAccount] = { u: c.userAccount, d: 0 });
+    e.d += Number(raw.tokenAmount || 0) / 10 ** Number(raw.decimals != null ? raw.decimals : 9);
+  }
+  if (!lp.length && !xs.some(x => x.toUserAccount === wallet)) {
+    for (const x of xs) if (x.fromUserAccount === wallet && x.toUserAccount && x.toUserAccount !== wallet) sum(to, x.toUserAccount, x.mint, Number(x.tokenAmount));
+    //   原生 SOL 下单: 本钱包系统转账进别人名下的 WSOL 账户、该账户余额同时增加 → 记给账户持有人 (取两者较小: 建账户的租金不算)
+    const sent = {};
+    for (const n of (t.nativeTransfers || [])) if (n.fromUserAccount === wallet && wsolAt[n.toUserAccount]) sent[n.toUserAccount] = (sent[n.toUserAccount] || 0) + Number(n.amount || 0) / 1e9;
+    for (const [acc, q] of Object.entries(sent)) if (wsolAt[acc].d > 0) sum(to, wsolAt[acc].u, WSOL, Math.min(q, wsolAt[acc].d));
+  }
   //   from 记净付出 (转出 − 转入): 托管同时是成交路由的中转站 —— 卖单成交时 USDC 先进托管再转给本钱包, 换路时 USDT/中间币也在托管里过一手,
   //   按转出总额算会把过路的币当成付出, 占掉别的挂单存着的币 (他人真实 366 笔托管 tx 实测)
-  if (!xs.some(x => x.fromUserAccount === wallet) && xs.some(x => x.toUserAccount === wallet)) {
+  if (!xs.some(x => x.fromUserAccount === wallet) && (xs.some(x => x.toUserAccount === wallet) || sol > 0)) {
     const net = {}, gross = {};
     for (const x of xs) {
       const q = Number(x.tokenAmount);
@@ -209,6 +224,17 @@ function parseTx(wallet, t) {
       if (x.toUserAccount && x.toUserAccount !== wallet) sum(net, x.toUserAccount, x.mint, -q);
     }
     for (const [a, ms] of Object.entries(gross)) for (const [m, g] of Object.entries(ms)) if (net[a][m] > g * 1e-9) sum(from, a, m, net[a][m]);
+    //   (v4) 原生 SOL 退回: 别人名下 WSOL 余额减少、又不是作为代币转走的部分 = 关账户解包成了原生 SOL; 本钱包这笔收到原生 SOL 才记, 以收到的为上限
+    //   (撤单 tx 里托管先把 WSOL 转进自己的临时账户再解包, 代币转账一进一出净额为 0, 所以看余额)
+    if (sol > 0) {
+      const unw = {};
+      for (const e of Object.values(wsolAt)) if (e.d < 0) unw[e.u] = (unw[e.u] || 0) - e.d;
+      let left = sol;
+      for (const [u, q] of Object.entries(unw)) {
+        const x = Math.min(q - Math.max(0, (net[u] && net[u][WSOL]) || 0), left);
+        if (x > 1e-9) { sum(from, u, WSOL, x); left -= x; }
+      }
+    }
   }
   if (Object.keys(to).length) rec.to = to;
   if (Object.keys(from).length) rec.from = from;
@@ -349,10 +375,11 @@ async function scanTokenAccounts(wallet, deadline, scanStart) {
 async function reparseUnnamed(wallet, deadline) {
   const W = state().d.wallets[wallet]; if (!W || W.partial || W.pv === PARSE_V) return 0;
   const refetch = []; let renamed = 0;
-  const v3 = (W.pv || 0) < 3;
+  const v3 = (W.pv || 0) < 3, v4 = (W.pv || 0) < 4;
   for (const [sig, rec] of Object.entries(W.txs)) {
     const vs = Object.values(rec.fl || {});
     if (v3 && ((!rec.lp && vs.some(v => v < 0)) || (vs.some(v => v > 0) && !vs.some(v => v < 0)))) { refetch.push(sig); continue; }
+    if (v4 && ((!rec.lp && rec.sol < -0.001 && !vs.some(v => v > 0)) || (rec.sol > 0.001 && !vs.some(v => v < 0)))) { refetch.push(sig); continue; }
     if (!rec.lp || !rec.lp.some(ix => ix.n == null)) continue;
     if (rec.lp.every(ix => ix.n != null || ix.d)) { for (const ix of rec.lp) if (ix.n == null && ix.d) { const n = DISC[`${ix.p}:${ix.d}`]; if (n) { ix.n = n; renamed++; } } }
     else refetch.push(sig);

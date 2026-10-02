@@ -22,7 +22,7 @@
 //     成交时由 Jupiter 付费从托管地址换币、所得直接从池子打进本钱包 (Helius 标 SWAP, solLegs 本来就跳过)。
 //     只认「转回」的话, 成交的单永远等不到转回, 下单那笔会被记成提币, 盈亏虚高同额。签名人靠 getTransaction 取 (增强解析结果里没有), 只对这种转出腿查
 // 内部互转照记 (带对方地址), 前端按当前视图的钱包集合判「内部」并不计合计; 单钱包视图下就是该钱包的充值/提币
-// 缓存 flows-cache-<chain>.json (v2: 合约对手改按发起人判; v3: SOL 加账本价格观测; SOL v4: 自控地址/PDA 判定; SOL v5: 转出时对方联署也算自控 —— 版本不符整体重扫):
+// 缓存 flows-cache-<chain>.json (v2: 合约对手改按发起人判; v3: SOL 加账本价格观测; SOL v4: 自控地址/PDA 判定; SOL v5: 转出时对方联署也算自控; SOL v6: 原生 SOL 进出别人名下 WSOL 账户时对方记持有人 —— 版本不符整体重扫):
 //   { v, wallets: { addr: { scannedTo|chk, stopped, raw, events, inUSD, outUSD, updatedAt } }, code, self (仅 SOL: { 自控地址: 1 }) }
 // =============================================================
 'use strict';
@@ -31,7 +31,7 @@ const path = require('path');
 const ledger = require('./pnl-ledger');
 const { PublicKey } = require('@solana/web3.js');
 
-const CACHE_V = { sol: 5 };         // 按链分版本: 只改 SOL 口径时不逼 EVM 链整体重扫
+const CACHE_V = { sol: 6 };         // 按链分版本: 只改 SOL 口径时不逼 EVM 链整体重扫
 const verOf = chainId => CACHE_V[chainId] || 3;
 const RAW_LIMIT = 8000;            // 单钱包原始转账条数上限, 超过 = 高频 bot 钱包放弃 (同 rh FUNDING_RAW_LIMIT)
 const DUST_USD = 1;
@@ -285,7 +285,27 @@ function solCounterparty(p, wallet, mint, dir) {
   };
   const tok = (p.tokenTransfers || []).filter(x => x.mint === mint);
   if (mint === WSOL) {
+    // 2026-10-02: 原生 SOL 进出的是别人名下的 WSOL 代币账户 → 对方记账户持有人. 实例 = Jupiter 原生 SOL 限价单: 下单把 SOL 直接打进托管名下新建的
+    //   WSOL 账户 (旧口径对方 = 这个代币账户, 有的在曲线上、签名人里没有它 → 记成提币); 撤单关账户原生退回, Helius 的 nativeTransfers
+    //   把代付手续费的 Jupiter 账户列成转出方 (旧口径记成外部充币). 改认托管后, 下单时托管联署 → 自控, 退回跟着标 self
+    const wsolAt = {};
+    for (const a of (p.accountData || [])) for (const c of (a.tokenBalanceChanges || [])) {
+      if (c.mint !== WSOL || !c.tokenAccount || !c.userAccount || c.userAccount === wallet) continue;
+      const e = wsolAt[c.tokenAccount] || (wsolAt[c.tokenAccount] = { u: c.userAccount, d: 0 });
+      e.d += Number((c.rawTokenAmount || {}).tokenAmount || 0);
+    }
     const n = pick(p.nativeTransfers, 'fromUserAccount', 'toUserAccount', 'amount');
+    if (dir === 'out' && n && wsolAt[n] && wsolAt[n].d > 0) return wsolAt[n].u;
+    if (dir === 'in') {
+      // 余额减少却没作为代币转走 (= 解包成原生 SOL) 最多的持有人; 借贷/质押取回走代币转账进本钱包临时账户, 不受影响
+      const netOut = {};
+      for (const x of tok) { const q = Number(x.tokenAmount) * 1e9; if (x.fromUserAccount) netOut[x.fromUserAccount] = (netOut[x.fromUserAccount] || 0) + q; if (x.toUserAccount) netOut[x.toUserAccount] = (netOut[x.toUserAccount] || 0) - q; }
+      const unw = {};
+      for (const e of Object.values(wsolAt)) if (e.d < 0) unw[e.u] = (unw[e.u] || 0) - e.d;
+      let best = null, bv = 0;
+      for (const [u, q] of Object.entries(unw)) { const v = q - Math.max(0, netOut[u] || 0); if (v > bv + 1) { bv = v; best = u; } }
+      if (best) return best;
+    }
     if (n != null) return n;
   }
   return pick(tok, 'fromUserAccount', 'toUserAccount', 'tokenAmount');
