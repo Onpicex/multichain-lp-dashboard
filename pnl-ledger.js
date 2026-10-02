@@ -1007,7 +1007,7 @@ async function computeWallet(chainId, addr, livePositions) {
 
   // 仓位累计
   const C = {};
-  const cOf = P => C[`${P.k}-${P.id}`] || (C[`${P.k}-${P.id}`] = { cost: 0, dep: 0, ret: 0, fees: 0, a: {}, cb: {}, openTs: 0, lastTs: 0, n: 0, approx: false, inc: false, feesUnknown: false, owed0: 0, owed1: 0, liq: 0n });
+  const cOf = P => C[`${P.k}-${P.id}`] || (C[`${P.k}-${P.id}`] = { cost: 0, dep: 0, ret: 0, fees: 0, a: {}, cb: {}, openTs: 0, lastTs: 0, n: 0, approx: false, inc: false, feesUnknown: false, owed0: 0, owed1: 0, liq: 0n, fx: [] });
 
   // 仓位事件 → 数量 (人类单位) + 当块池价
   //   2026-09-28 审计修复: V3/pcs 的数量 (a0/a1/liquidity) 来自事件本身, 不依赖池价 → 缺价时也返回 (px=null), 由调用方只跳过美元部分; V4 数量要靠 sqrtPrice 反推, 缺价仍返回 null
@@ -1123,14 +1123,14 @@ async function computeWallet(chainId, addr, livePositions) {
         if (anyApprox) d.c.approx = true;
       }
       for (const w of wds) { w.c.ret += w.mkt; w.c.a[w.v.meta.t0.address] = (w.c.a[w.v.meta.t0.address] || 0) - w.v.a0; w.c.a[w.v.meta.t1.address] = (w.c.a[w.v.meta.t1.address] || 0) - w.v.a1; }
-      for (const x of cols) if (x.known) x.c.fees += x.fee;
-      if (v4Credit) deps[0].c.fees += v4Credit;
+      for (const x of cols) if (x.known) { x.c.fees += x.fee; x.c.fx.push([ts, x.fee]); }
+      if (v4Credit) { deps[0].c.fees += v4Credit; deps[0].c.fx.push([ts, v4Credit]); }
       for (const i of ins) addLot(i.tok, i.q, i.mkt, i.ax);   // 找零/退回按市值入批次 (已从成本里扣掉)
     } else if (wds.length || cols.length) {
       const wdMkt = wds.reduce((s, w) => s + w.mkt, 0);
       const v3Fee = cols.reduce((s, x) => s + (x.known ? x.fee : 0), 0);
       for (const w of wds) { w.c.ret += w.mkt; w.c.a[w.v.meta.t0.address] = (w.c.a[w.v.meta.t0.address] || 0) - w.v.a0; w.c.a[w.v.meta.t1.address] = (w.c.a[w.v.meta.t1.address] || 0) - w.v.a1; }
-      for (const x of cols) if (x.known) x.c.fees += x.fee;
+      for (const x of cols) if (x.known) { x.c.fees += x.fee; x.c.fx.push([ts, x.fee]); }
       // V4: 实收 − 本金 − (同 tx 的 V3 手续费) = V4 手续费, 按本金份额分给 tx 里的 V4 仓 (纯领费则均分)
       const v4 = [...wds.filter(w => w.P.k === 'v4'), ...cols.filter(x => !x.known)];
       if (v4.length) {
@@ -1147,7 +1147,7 @@ async function computeWallet(chainId, addr, livePositions) {
         } else for (const t of targets) {
           const wdOf = wds.filter(w => w.P === t.P).reduce((s, w) => s + w.mkt, 0);
           const share = v4Wd > 0 ? wdOf / v4Wd : 1 / targets.length;
-          t.c.fees += v4Fee * share;
+          t.c.fees += v4Fee * share; t.c.fx.push([ts, v4Fee * share]);
           if (v4Fee > 0 && inMkt > 0 && ins.some(i => i.ax)) t.c.approx = true;
         }
       }
@@ -1182,7 +1182,7 @@ async function computeWallet(chainId, addr, livePositions) {
     for (const k of Object.keys(c.a)) if (Math.abs(c.a[k]) < 1e-12) c.a[k] = 0;
     if (P.inB) c.approx = true;   // 2026-09-28 审计修复: 转入的仓, 开仓成本没有本钱包的流水对应 (按当时市值补), 一律标 approx
     P.c = {
-      cost: c.cost, dep: c.dep, ret: c.ret, fees: c.fees, a: c.a, cb: c.cb, n: c.n,
+      cost: c.cost, dep: c.dep, ret: c.ret, fees: c.fees, fx: c.fx, a: c.a, cb: c.cb, n: c.n,
       openTs: c.openTs || P.mts || 0, closeTs, status, note, approx: c.approx, inc: c.inc, feesUnknown: !!c.feesUnknown,
       pair: meta ? `${meta.t0.symbol}/${meta.t1.symbol}` : '', fee: meta ? meta.fee : 0, t0: meta ? meta.t0 : null, t1: meta ? meta.t1 : null,
     };
@@ -1298,6 +1298,13 @@ function walletReport(chainId, addr, liveWallet, useLedger = true) {
   for (const [key, p] of liveMap) if (!seen.has(key)) out.positions.push(rowFromLive(key, p));
   return out;
 }
+// 2026-10-02: 已领手续费的时间线 [[ts毫秒, 美元], ...] (同一时刻合并), 给资金快照按时间回写历史点的「手续费累计」; 旧缓存没有 fx → null (快照那边当未知)
+function feeLogOf(fx) {
+  if (!Array.isArray(fx)) return null;
+  const m = new Map();
+  for (const [t, v] of fx) if (v) m.set(t, (m.get(t) || 0) + v);
+  return [...m].sort((a, b) => a[0] - b[0]).map(([t, v]) => [t, Math.round(v * 1e6) / 1e6]);
+}
 function rowFromLedger(key, P, live) {
   const c = P.c;
   // 2026-09-28 审计修复: 看板活跃仓里有它就是 active —— 账本上轮算出的 closed (如算的那轮主流程缓存为空) 不能把活跃仓压成已关闭
@@ -1318,7 +1325,7 @@ function rowFromLedger(key, P, live) {
     status: active ? 'active' : 'closed', note: active ? '' : (transferred ? 'transferred' : (unseen ? 'unseen' : c.note)), inRange: live ? !!live.inRange : null,
     openTs: c.openTs, closeTs, source: 'ledger',
     costUSD: c.cost, costApprox: c.approx, incomplete: c.inc, depositValueUSD: c.dep, adds: c.n, costBy: c.cb || null,
-    valueUSD, pendingFeesUSD: pending, collectedFeesUSD: c.fees, withdrawnUSD: c.ret, feesUnknown: !!c.feesUnknown,
+    valueUSD, pendingFeesUSD: pending, collectedFeesUSD: c.fees, feeLog: feeLogOf(c.fx), withdrawnUSD: c.ret, feesUnknown: !!c.feesUnknown,
     hodlValueUSD: live ? (live.hodlValueUSD ?? null) : null, ilUSD: live ? (live.ilUSD ?? null) : null,
     netProfitUSD: c.cost > 0 && !noNet ? net : null, netProfitPct: c.cost > 0 && !noNet ? net / c.cost * 100 : null,
     tokens: live ? [live.token0, live.token1].map(t => ({ address: t.address, symbol: t.symbol })) : [c.t0, c.t1].filter(Boolean).map(t => ({ address: t.address, symbol: t.symbol })),
