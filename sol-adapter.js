@@ -98,6 +98,7 @@ async function getPrices(mints) {
 // --- Token metadata (symbol) via Jupiter, with fallback map + cache ---
 const solLedger = require('./sol-ledger');    // Solana 钱包盈亏账本 (Helius 数据源)
 const pnlLedger = require('./pnl-ledger');    // 只用它的 applyPnl (盈亏字段注入, 各链同一口径)
+const flows = require('./flows');             // 充提记录 / 净入金 (从账本记录挑单向转账, Helius 补对方地址)
 let lastPricesSol = {};                        // 上轮定价 (mint -> USD), 供账本给已关闭仓/无换币记录的币估值
 const TOKEN_META_FILE = path.join(__dirname, 'token-meta-sol.json');
 let tokenMeta = {};
@@ -701,6 +702,7 @@ async function fetchIdleSol(walletsSel) {
 let inFlight = null;
 
 async function fetchAllSol(force = false) {
+  if (force) setImmediate(kickSolLedger);   // 2026-10-02: 强刷顺带扫账本 (增量, 每钱包一页 Helius), 扫完接着跑充提 → 新充提下次刷新可见
   const fresh = cache.data && Date.now() - cache.timestamp < CACHE_TTL;
   if (!force && fresh) return cache.data;
   // 与 BSC 同架构：有旧数据就先秒回旧数据，后台悄悄刷新（stale-while-revalidate）
@@ -889,6 +891,8 @@ async function _fetchAllSol() {
       lastIdleSol = idle;
     } catch (e) { console.error('[SOL] idle balances failed:', e.message?.slice(0, 100)); }
   }
+  // 充提记录 / 净入金: 从 flows 缓存注入 (零 RPC)
+  if (flows.enabled('sol') && idle && idle.byWallet) flows.injectIdle(idle, a => flows.fundingOf('sol', a));
 
   const result = {
     wallets,
@@ -900,7 +904,11 @@ async function _fetchAllSol() {
     stats: { totalActive, totalInRange, totalOutOfRange, totalFees, walletsWithActiveLP, totalWallets: activeWallets().length, priceMiss },   // 2026-09-28 审计修复: priceMiss
   };
   // 2026-09-28 审计修复: Jupiter 整批为空 (或本轮根本没有 mint 要问) 不覆盖上轮价, 避免把 lastPricesSol 清成空表污染账本估值
-  if (uniqMints.length && !batchEmpty) lastPricesSol = prices;
+  if (uniqMints.length && !batchEmpty) {
+    const firstPrices = !(lastPricesSol[WSOL_MINT] > 0);
+    lastPricesSol = prices;
+    if (firstPrices) setImmediate(kickSolFlows);   // 重启后价表要等首轮刷新才有, 之前那轮充提扫描被价表护栏挡下, 这里补跑 (不等 10 分钟定时)
+  }
   sanitizeCacheSymbols(result);   // 2026-09-28 审计修复 (XSS 上游): 写缓存前再过一遍
   const changed = ledgerPositionsChanged(cache.data, result);   // 比较要在覆盖缓存之前
   cache = { data: result, timestamp: Date.now() };
@@ -984,12 +992,14 @@ function mountSolRoutes(app, adminGuard) {
     if (req.query.refresh === 'true' && solLedger.enabled()) setImmediate(() => kickSolLedger());
     let idleUSD = null;
     for (const [a, wI] of Object.entries(data?.idle?.byWallet || {})) if (a === addr) idleUSD = wI.totalUSD || 0;
-    res.json({ chain: 'sol', wallet: { address: addr, name: wc?.name || lw?.name || addr, enabled: wc ? wc.enabled !== false : true }, ...rep, idleUSD, lpUSD: lw ? (lw.totalUSD || 0) : 0, funding: null, dataTs: data?.timestamp || 0,
+    res.json({ chain: 'sol', wallet: { address: addr, name: wc?.name || lw?.name || addr, enabled: wc ? wc.enabled !== false : true }, ...rep, idleUSD, lpUSD: lw ? (lw.totalUSD || 0) : 0, funding: flows.enabled('sol') ? flows.fundingSummary(flows.fundingOf('sol', addr)) : null, dataTs: data?.timestamp || 0,
       selected, ledgerEnabled: solLedger.enabled() && loadPnlCfgSol().enabled });
   });
   app.get('/api/sol/positions', async (req, res) => {
     try {
-      res.json(await fetchAllSol(req.query.refresh === 'true'));
+      const data = await fetchAllSol(req.query.refresh === 'true');
+      if (flows.enabled('sol') && data && data.idle) flows.injectIdle(data.idle, a => flows.fundingOf('sol', a));   // 后台刚扫完的充提即时可见 (零 RPC, 幂等)
+      res.json(data);
     } catch (e) {
       console.error('[SOL] API error:', e);
       res.status(500).json({ error: '刷新失败，请稍后重试' });   // 2026-09-28 审计修复: 不把含 RPC URL/key 的错误文本回给前端
@@ -1091,12 +1101,16 @@ function solPnlWallets() {
   if (!Array.isArray(pc.wallets.sol)) return on.filter(w => w.own === true || w.ledger === true);   // 未单独设置 = 自有 + 开账本的观察
   const s = new Set(pc.wallets.sol.map(String)); return on.filter(w => s.has(w.address) || w.ledger === true);
 }
+function solSymbols() { const o = {}; for (const [m, sym] of Object.entries(KNOWN_TOKENS)) o[m] = { symbol: sym }; for (const [m, v] of Object.entries(tokenMeta)) if (v && v.symbol) o[m] = v; return o; }
 solLedger.init({
   prices: () => lastPricesSol,
-  symbols: () => { const o = {}; for (const [m, sym] of Object.entries(KNOWN_TOKENS)) o[m] = { symbol: sym }; for (const [m, v] of Object.entries(tokenMeta)) if (v && v.symbol) o[m] = v; return o; },
+  symbols: solSymbols,
   wallets: solPnlWallets,
   log: console.log,
 });
+// 充提记录: 直接读账本落盘的逐笔记录 (没开账本的钱包就没有充提数据)
+flows.initSol({ records: addr => solLedger._state().d.wallets[addr] || null, prices: () => lastPricesSol, symbols: solSymbols, histPrice: solLedger.histPrice, obsReady: solLedger.obsReady });
+function kickSolFlows() { flows.runQueue('sol', WALLETS).catch(e => console.error('[SOL] flows:', e.message)); }
 function liveByWalletSol() { const m = {}; for (const w of (cache.data?.wallets || [])) m[w.address] = (w.positions || []).filter(p => p.liquidityActive); return m; }
 // 2026-09-30 修 (DJT/USDC 加仓后成本/无常/净利润错 40 分钟实例): 账本 30 分钟一轮 + 仓位缓存 5 分钟一轮, 用户加减仓后页面最长要等两轮才对。
 //   ① 本轮仓位刷新发现账本钱包的活跃仓流动性变了 (Raydium/Orca 用 liquidity, Meteora 用 _liqFp) 或多出新仓 → 立即扫账本 (增量, Helius 只拉新签名)
@@ -1141,13 +1155,14 @@ function kickSolLedger() {
   if (!solLedger.enabled()) return;
   if (solLedger._state().busy) { ledgerRerun = true; return; }
   solLedger.runQueue(liveByWalletSol())
-    .then(() => { try { reapplyLedgerToCache(); } catch (e) { console.error('[SOL] pnl-ledger 回填缓存失败:', e.message); } })
+    .then(() => { try { reapplyLedgerToCache(); } catch (e) { console.error('[SOL] pnl-ledger 回填缓存失败:', e.message); } kickSolFlows(); })
     .catch(e => console.error('[SOL] pnl-ledger:', e.message))
     .finally(() => { if (ledgerRerun) { ledgerRerun = false; setImmediate(kickSolLedger); } });
 }
 if (solLedger.enabled()) {
   setTimeout(kickSolLedger, 190 * 1000);
   setInterval(kickSolLedger, solLedger.ROUND_MS);
+  setInterval(kickSolFlows, flows.ROUND_MS);   // 账本每轮扫完会接着跑一次; 这里补「上轮解析/历史价没拿到」的重试
   console.log('[SOL] pnl-ledger 就绪 (Helius)');
 } else console.log('[SOL] pnl-ledger 停用 (未配置 HELIUS_KEY)');
 

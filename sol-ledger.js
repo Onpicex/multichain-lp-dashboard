@@ -240,6 +240,88 @@ async function scanWallet(wallet, deadline) {
   return W;
 }
 
+// ---- 代币账户补扫 (2026-10-02) ----
+// 转进「已经存在的代币账户」的 SPL 转账, 交易账户列表里只有代币账户、没有钱包主地址 → 按主地址拉的历史 (heliusPage) 拉不到,
+//   账本和充提记录都漏 (实例: 三笔 USDC 充值全漏, 盈亏虚高同额). 主扫描追平后补扫:
+//   列出钱包现有代币账户 (Token + Token-2022) → 每个账户 RPC getSignaturesForAddress (游标 W.ta[账户] = 已处理到的最新签名, 首扫翻到底)
+//   → 账本里没有的签名按签名从 Helius 取解析 (POST /v0/transactions) 入库, 解析同 parseTx (tokenBalanceChanges 的 userAccount 仍是钱包)
+//   只收「主扫描起步前 60 秒」之前的签名, 更新的留给下轮 —— 主扫描先走, 免得它把补进来的较新签名当「已知」提前判追平
+//   已关闭的代币账户列不出来: 转进来后又转走并关户的那段历史仍会漏
+const TOKEN_PROGS = ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'];
+async function heliusRpc(method, params) {
+  for (let i = 0; i < 4; i++) {
+    try {
+      const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${key()}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(30000) });
+      if (r.status === 429) { await sleep(2000 * (i + 1)); continue; }
+      if (!r.ok) { await sleep(1500 * (i + 1)); continue; }
+      const j = await r.json();
+      if (j && !j.error) return j.result;
+      await sleep(1500 * (i + 1));
+    } catch { await sleep(1500 * (i + 1)); }
+  }
+  return undefined;
+}
+async function heliusTxs(sigs) {
+  for (let k = 0; k < 4; k++) {
+    try {
+      const r = await fetch(`https://api.helius.xyz/v0/transactions?api-key=${key()}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ transactions: sigs }), signal: AbortSignal.timeout(60000) });
+      if (r.ok) { const j = await r.json(); if (Array.isArray(j)) return j; }
+      await sleep(2000 * (k + 1));
+    } catch { await sleep(2000 * (k + 1)); }
+  }
+  return null;
+}
+async function scanTokenAccounts(wallet, deadline, scanStart) {
+  const W = state().d.wallets[wallet]; if (!W || W.partial || !W.done) return;
+  const cutoff = Math.floor(scanStart / 1000) - 60;
+  const accs = [];
+  for (const prog of TOKEN_PROGS) {
+    const res = await heliusRpc('getTokenAccountsByOwner', [wallet, { programId: prog }, { encoding: 'base64', dataSlice: { offset: 0, length: 0 } }]);
+    if (res === undefined) { deps.log(`[SOL] pnl-ledger 代币账户补扫 ${wallet.slice(0, 6)}: 列代币账户失败, 下轮续`); return; }
+    for (const a of (res && res.value) || []) accs.push(a.pubkey);
+  }
+  W.ta = W.ta || {};
+  const want = [];   // [代币账户, 新游标, [待取签名]]
+  for (const ta of accs) {
+    if (Date.now() > deadline) break;
+    const until = W.ta[ta] || undefined;
+    const got = []; let before, pages = 0, ok = true;
+    while (pages < 5) {
+      const res = await heliusRpc('getSignaturesForAddress', [ta, { limit: 1000, ...(until ? { until } : {}), ...(before ? { before } : {}) }]);
+      if (!Array.isArray(res)) { ok = false; break; }
+      got.push(...res); pages++;
+      if (res.length < 1000) break;
+      before = res[res.length - 1].signature;
+    }
+    if (!ok) continue;   // 这个账户本轮没拉全, 游标不动, 下轮重来
+    if (pages >= 5 && got.length >= 5000) deps.log(`[SOL] pnl-ledger 代币账户补扫 ${wallet.slice(0, 6)}: ${ta.slice(0, 6)} 签名超 5000 条, 只补最近的`);
+    const inWin = got.filter(x => x.blockTime && x.blockTime <= cutoff);   // 新的在前
+    const missing = inWin.filter(x => !x.err && !W.txs[x.signature]).map(x => x.signature);
+    want.push([ta, inWin.length ? inWin[0].signature : null, missing]);
+    await sleep(120);
+  }
+  let added = 0;
+  for (const [ta, cursor, missing] of want) {
+    let fine = true;
+    for (let i = 0; i < missing.length; i += 100) {
+      if (Date.now() > deadline) { fine = false; break; }
+      const arr = await heliusTxs(missing.slice(i, i + 100));
+      if (!arr) { fine = false; break; }
+      for (const t of arr) {
+        if (!t || !t.signature || t.transactionError || W.txs[t.signature]) continue;
+        const rec = parseTx(wallet, t);
+        if (!Object.keys(rec.fl).length && !rec.sol && !rec.lp) continue;   // 与本钱包无关的变动 (理论上不会)
+        W.txs[t.signature] = rec; added++;
+      }
+      await sleep(150);
+    }
+    if (fine && cursor) W.ta[ta] = cursor;   // 取全了才推进游标, 否则下轮从旧游标重来 (已入库的会被 W.txs 去重)
+  }
+  if (Object.keys(W.txs).length > RAW_LIMIT) { W.partial = true; W.txs = {}; W.pos = {}; delete W.resume; delete W.ta; }
+  if (added) deps.log(`[SOL] pnl-ledger 代币账户补扫 ${wallet.slice(0, 6)}: ${accs.length} 个代币账户, 补入 ${added} 笔只经代币账户的交易`);
+  save();
+}
+
 // ---- 重解析 (2026-09-30): IX 表补名字后, 落盘记录里 n=null 的 LP 指令按新表重新命名; 旧记录没存 d 的按签名从 Helius 重拉 (POST /v0/transactions, 100 签名一批) ----
 //   实例: Orca 新版加仓 increase_liquidity_by_token_amounts_v2 之前没命名, DJT/USDC 的 4 笔加仓被当 flow 判, zap 找零记成「已提回」
 async function reparseUnnamed(wallet, deadline) {
@@ -365,6 +447,13 @@ function impliedPriceNear(obs, mint, ts, sig) {
   for (const o of arr) { const d = Math.abs(o.ts - ts); if (d < bd || (d === bd && o.pr < bp)) { bd = d; bp = o.pr; best = o.p; } }
   return best == null ? null : { p: best, d: bd };
 }
+// 充提记录 (flows.js) 用: 每钱包最近一次重放的价格观测 (只在内存, 不落盘; 重启后账本首轮重放完才有)
+const obsByWallet = new Map();
+function obsReady(wallet) { return obsByWallet.has(wallet); }
+function histPrice(wallet, mint, ts, sig) {
+  const ip = impliedPriceNear(obsByWallet.get(wallet) || {}, mint, ts, sig);
+  return ip ? { p: ip.p, approx: ip.d > APPROX_OBS_MS } : null;
+}
 function priceAt(obs, mint, ts, cur, sig) {
   if (STABLES[mint]) return { p: 1, approx: false };
   const ip = impliedPriceNear(obs, mint, ts, sig);
@@ -397,6 +486,7 @@ function computeWallet(wallet, livePositions) {
   const keys = Object.keys(P);
   for (const t of order) { const src = W.txs[t.sig]; src._pos = (t.lp || []).some(ix => keys.some(k => ix.acc.includes(k))) ? 1 : 0; t._pos = src._pos; }
   const obs = buildPriceObs(order, P, keys);
+  obsByWallet.set(wallet, obs);
   // 2. 时间线重放
   const lots = {};
   const consume = (mint, q, ts, sig) => {   // 2026-09-28 审计修复: 带上 tx 签名 (同 tx 观测优先)
@@ -555,8 +645,11 @@ async function runQueue(liveByWallet, opts = {}) {
     for (const w of wallets) {
       if (Date.now() > deadline) break;
       try {
+        const scanStart = Date.now();
         const W = await scanWallet(w.address, deadline);
         if (W.partial || W.stopped) { deps.log(`[SOL] pnl-ledger ${w.name}: ${W.partial ? '高频钱包放弃' : '未扫完 (' + W.stopped + '), 下轮续'}`); continue; }
+        await scanTokenAccounts(w.address, deadline, scanStart);
+        if (W.partial) { deps.log(`[SOL] pnl-ledger ${w.name}: 高频钱包放弃`); continue; }
         await reparseUnnamed(w.address, deadline);
         computeWallet(w.address, (liveByWallet && liveByWallet[w.address]) || []);
         save();
@@ -624,4 +717,4 @@ function walletReport(wallet, liveWallet, useLedger = true) {   // useLedger=fal
   return out;
 }
 
-module.exports = { init, enabled, runQueue, positionPnl, walletStatus, walletReport, ROUND_MS, _state: state, _test: { parseTx, computeWallet, reparseUnnamed, buildPriceObs, walletFlow, poolPriceFromAmounts, scanWallet, positionKeysOf, impliedPriceNear, priceAt } };   // 2026-09-28 审计修复: 多导出几个给独立脚本验证
+module.exports = { init, enabled, runQueue, positionPnl, walletStatus, walletReport, histPrice, obsReady, ROUND_MS, _state: state, _test: { parseTx, computeWallet, reparseUnnamed, scanTokenAccounts, buildPriceObs, walletFlow, poolPriceFromAmounts, scanWallet, positionKeysOf, impliedPriceNear, priceAt } };   // 2026-09-28 审计修复: 多导出几个给独立脚本验证

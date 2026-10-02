@@ -7,7 +7,8 @@
 const path = require('path');
 const fs = require('fs');
 const { ethers } = require('ethers');
-const ledger = require('./pnl-ledger');   // 钱包盈亏账本 (rh/arc 纯日志重建: 真实成本/已提回/已领费/历史仓位)
+const ledger = require('./pnl-ledger');
+const flows = require('./flows');     // 充提记录 / 净入金 (Ankr 链 base/eth; rh 用本文件的 Transfer 日志回溯, 注入形状同一套)   // 钱包盈亏账本 (rh/arc 纯日志重建: 真实成本/已提回/已领费/历史仓位)
 
 // --- 链配置(合约地址均已链上验证 2026-07-31) ---
 const EVM_CHAINS = {
@@ -2142,10 +2143,12 @@ async function scanWalletFunding(chainId, wallet) {
     if (!(amt > 0)) continue;
     const b = parseInt(l.blockNumber, 16);
     const ts = await fundingBlockTs(chainId, b);
-    const { price } = await fundingTokenPrice(chainId, token, ts);
+    const { price, approx } = await fundingTokenPrice(chainId, token, ts);
     const usd = amt * price;
     if (usd < 1) continue;                                         // 灰尘
-    cur.events.push({ id, b, ts, dir, sym: meta?.symbol || token.slice(0, 6), amt, usd, cp, ct });
+    const ev = { id, b, ts, dir, tok: token, sym: meta?.symbol || token.slice(0, 6), amt, usd, cp, ct };
+    if (approx) ev.ax = 1;                                         // 2026-10-02: 近似价 (现价折算) 打标, 前端充提记录标 *
+    cur.events.push(ev);
   }
   cur.events.sort((a, b2) => b2.ts - a.ts);
   cur.inUSD = cur.events.filter(e => e.dir === 'in').reduce((s, e) => s + e.usd, 0);
@@ -2155,6 +2158,21 @@ async function scanWalletFunding(chainId, wallet) {
   cur.updatedAt = Date.now();
   saveFundingCache(chainId);
   return cur;
+}
+// funding 缓存 → 注入形状 (与 flows.fundingOf 一致); 2026-10-02 前的旧事件没有 tok/ax: 稳定币与 WETH 是转账时点价, 其余 (股票/其他代币) 都是现价近似
+function rhFundingOf(chainId, a) {
+  const f = loadFundingCache(chainId)[a.toLowerCase()];
+  if (!f || (!f.updatedAt && f.stopped !== 'budget')) return null;
+  if (f.stopped === 'budget') return { partial: true };
+  const exact = new Set([...Object.values(EVM_CHAINS[chainId].stables), 'WETH']);
+  return { inUSD: f.inUSD || 0, outUSD: f.outUSD || 0, netUSD: (f.inUSD || 0) - (f.outUSD || 0), partial: false, catchingUp: f.stopped === 'rpc',
+    events: (f.events || []).map(e => (e.tok || exact.has(e.sym)) ? e : { ...e, ax: 1 }) };
+}
+// 充提记录 / 净入金从缓存注入 idle (零 RPC, 幂等): 仓位刷新时注入一次, 接口返回时再注一次 —— 后台队列刚扫完的不必等下轮仓位刷新 (重启后首轮刷新常早于扫描)
+function injectFunding(chainId, idle) {
+  if (!idle || !idle.byWallet) return;
+  if (EVM_CHAINS[chainId].fundingFromLogs) flows.injectIdle(idle, a => rhFundingOf(chainId, a));
+  else if (flows.enabled(chainId)) flows.injectIdle(idle, a => flows.fundingOf(chainId, a));
 }
 const fundingRunning = {};
 async function runFundingQueue(chainId) {
@@ -2565,24 +2583,13 @@ async function fetchInner(chainId, forceRefresh) {
   if (cfg.fundingFromLogs && fundSelected(fundCfg, chainId, fundWallets).length && forceRefresh) {
     await runFundingQueue(chainId).catch(e => console.error(`[${chainId}] funding sync:`, e.message?.slice(0, 80)));
   }
-
-  // 初始资金 (净入金): 从 funding 缓存注入 (后台队列独立回填, 此处零 RPC)
-  if (cfg.fundingFromLogs && idle && idle.byWallet) {
-    const fc = loadFundingCache(chainId);
-    let fin = 0, fout = 0; const partialNames = []; let anyData = false;
-    for (const [a, wI] of Object.entries(idle.byWallet)) {
-      const f = fc[a.toLowerCase()];
-      if (!f || (!f.updatedAt && f.stopped !== 'budget')) continue;
-      anyData = true;
-      if (f.stopped === 'budget') { wI.funding = { partial: true }; partialNames.push(wI.name); continue; }
-      wI.funding = {
-        inUSD: f.inUSD, outUSD: f.outUSD, netUSD: f.inUSD - f.outUSD,
-        partial: false, catchingUp: f.stopped === 'rpc', events: f.events,
-      };
-      fin += f.inUSD; fout += f.outUSD;
-    }
-    if (anyData) idle.funding = { inUSD: fin, outUSD: fout, netUSD: fin - fout, partialWallets: partialNames };
+  // Ankr 链的充提扫描走共用串行队列 (可能正被账本占着), 强刷只踢一下不等, 结果下次刷新带上
+  if (!cfg.fundingFromLogs && forceRefresh && flows.enabled(chainId)) {
+    setImmediate(() => flows.runQueue(chainId, loadWallets(chainId)).catch(e => console.error(`[${chainId}] flows:`, e.message?.slice(0, 80))));
   }
+
+  // 充提记录 / 净入金: 从缓存注入 (后台队列独立回填, 此处零 RPC)
+  injectFunding(chainId, idle);
 
   const result = {
     wallets, failedWallets: failedOn, grandTotalUSD, idle, timestamp: Date.now(),   // 2026-09-28 审计修复: 顶层 failedWallets (小写地址)
@@ -2642,10 +2649,8 @@ function mountEvmRoutes(app, adminGuard) {
       let idleUSD = null;
       for (const [a, wI] of Object.entries(data?.idle?.byWallet || {})) if (a.toLowerCase() === addr) idleUSD = wI.totalUSD || 0;
       let funding = null;
-      if (EVM_CHAINS[chainId].fundingFromLogs) {
-        const f = loadFundingCache(chainId)[addr];
-        if (f && (f.updatedAt || f.stopped === 'budget')) funding = { inUSD: f.inUSD || 0, outUSD: f.outUSD || 0, netUSD: (f.inUSD || 0) - (f.outUSD || 0), partial: f.stopped === 'budget', catchingUp: f.stopped === 'rpc' };
-      }
+      if (EVM_CHAINS[chainId].fundingFromLogs) funding = flows.fundingSummary(rhFundingOf(chainId, addr));
+      else if (flows.enabled(chainId)) funding = flows.fundingSummary(flows.fundingOf(chainId, addr));
       res.json({
         chain: chainId, wallet: { address: addr, name: wcfg?.name || liveWallet?.name || addr, enabled: wcfg ? wcfg.enabled !== false : true },
         ...rep, idleUSD, lpUSD: liveWallet ? (liveWallet.totalUSD || 0) : 0, funding, dataTs: data?.timestamp || 0,
@@ -2750,7 +2755,9 @@ function mountEvmRoutes(app, adminGuard) {
         });
       }
       try {
-        res.json(await fetchChainPositions(chainId, req.query.refresh === 'true'));
+        const data = await fetchChainPositions(chainId, req.query.refresh === 'true');
+        injectFunding(chainId, data && data.idle);
+        res.json(data);
       } catch (e) {
         console.error(`[${chainId}] API error:`, e.message);
         res.status(500).json({ error: '刷新失败，请稍后重试' });   // 2026-09-28 审计修复: 不把含 RPC URL/key 的错误文本回给前端
@@ -2794,6 +2801,12 @@ function mountEvmRoutes(app, adminGuard) {
     if (EVM_CHAINS[chainId].fundingFromLogs) {
       setTimeout(() => runFundingQueue(chainId).catch(e => console.error(`[${chainId}] funding queue:`, e.message)), 90 * 1000);
       setInterval(() => runFundingQueue(chainId).catch(e => console.error(`[${chainId}] funding queue:`, e.message)), CACHE_TTL);
+    }
+    // 充提记录 (Ankr 链): 启动 100s 后首跑 (首跑翻全量历史), 之后每 10min 增量
+    else if (flows.enabled(chainId)) {
+      const kick = () => flows.runQueue(chainId, loadWallets(chainId)).catch(e => console.error(`[${chainId}] flows:`, e.message));
+      setTimeout(kick, 100 * 1000);
+      setInterval(kick, flows.ROUND_MS);
     }
     // 启动预热: 重启后缓存陈旧就立即补一轮 (eth 35s / rh 45s, 错开 BSC 和 SOL)
     const delay = ({ eth: 35, rh: 45, base: 55 }[chainId] || 45) * 1000;

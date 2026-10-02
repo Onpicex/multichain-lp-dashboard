@@ -265,7 +265,7 @@
   @media (max-width: 480px) {
     .st-page { padding: 12px 0 30px; gap: 12px; }
   }
-  /* 初始资金 (净入金) 摘要 + 转账明细 */
+  /* 充提记录 (总价值卡点开): 充值 − 提币 = 净入金 摘要条 + 明细表 */
   .fund-bar {
     display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
     padding: 10px; margin-bottom: 4px; font-size: 12px;
@@ -273,11 +273,6 @@
   }
   .fund-bar b { font-family: var(--mono); font-size: 14px; }
   .fund-sub { color: var(--text-muted); font-size: 11px; font-family: var(--mono); }
-  .fund-toggle {
-    margin-left: auto; background: transparent; border: 1px solid var(--accent);
-    color: var(--accent); font-size: 11px; padding: 3px 10px; border-radius: 5px; cursor: pointer;
-  }
-  .fund-toggle:hover { background: var(--accent); color: #fff; }
   .fund-warn { font-size: 10.5px; color: var(--yellow); width: 100%; }
   .fund-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
   .fund-table th { text-align: left; font-size: 10px; font-weight: 500; color: var(--text-muted); padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
@@ -288,6 +283,17 @@
   .fund-dir-out { color: var(--red); font-weight: 600; }
   .fund-ct { font-size: 9px; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; margin-left: 5px; color: var(--text-muted); vertical-align: 1px; }
   .fund-cp { font-family: var(--mono); font-size: 10.5px; color: var(--text-muted); }
+  /* 总价值卡: 净入金 · 盈亏副行 + 充提记录面板 (2026-10-02) */
+  #totalCell.has-flow { cursor: pointer; transition: background 0.15s; }
+  #totalCell.has-flow:hover { background: rgba(99,102,241,0.06); }
+  .flow-sub { display: flex; flex-wrap: wrap; gap: 0 6px; margin-top: 5px; font-family: var(--mono); font-size: 10.5px; line-height: 1.45; color: var(--text-muted); }
+  .flow-sub > span { white-space: nowrap; }
+  .flow-sub .pos, .fund-bar .pos { color: var(--green); }
+  .flow-sub .neg, .fund-bar .neg { color: var(--red); }
+  .fund-table a { color: inherit; text-decoration: none; }
+  .fund-table a:hover { color: var(--accent); text-decoration: underline; }
+  .fund-table tr.flow-intl td { opacity: 0.5; }
+  .fund-cp.known { font-family: inherit; font-size: 11.5px; color: var(--accent); }
 
   /* ── Wallet Manager ── */
   .wallet-mgr {
@@ -638,6 +644,8 @@
     .stat-label { font-size: 11px; }
     .idle-table td, .idle-table th { padding: 7px 6px; font-size: 11.5px; }
     .idle-table .idle-ws { display: none; }  /* 手机: 钱包分布列放不下, 点单钱包筛选看 */
+    .fund-table .idle-ws { display: none; }   /* 充提记录: 手机藏钱包 / 对方地址列 */
+    .fund-table td, .fund-table th { padding: 6px 4px; }
 
     /* Filter: 小按钮可滚动 */
     .filter-row { overflow-x: auto; flex-wrap: nowrap; padding: 8px 0; gap: 6px; -webkit-overflow-scrolling: touch; }
@@ -645,7 +653,6 @@
     .ftag { font-size: 12px; padding: 7px 12px; min-height: 34px; white-space: nowrap; flex-shrink: 0; }
     .filter-row { padding-right: 24px; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent); }
     .refresh-btn { font-size: 12px; padding: 8px 14px; min-height: 34px; }
-    .fund-toggle { padding: 6px 12px; min-height: 32px; }
     .pn-wrow { padding: 6px 10px; }
     .pn-wrow .nm-test-btn { padding: 6px 12px; font-size: 12px; min-height: 32px; }
     /* 钱包管理: 地址换到名字下面整行显示 (此前被截成 "0x7aa5c847…"), 四个小按钮放大到 34px 点得准 */
@@ -909,9 +916,10 @@
   </div>
 
   <div class="stats-strip" id="statsBar" style="display:none;">
-    <div class="stat-cell big" title="钱包余额 + LP 仓位价值（含待领手续费）">
-      <div class="stat-label">总价值（钱包+LP）<span class="px-miss" id="pxMissNote" style="display:none"></span></div>
+    <div class="stat-cell big" id="totalCell" onclick="togFlow()" title="钱包余额 + LP 仓位价值（含待领手续费）">
+      <div class="stat-label">总价值（钱包+LP）<span class="idle-arrow" id="flowArrow" style="display:none">▼</span><span class="px-miss" id="pxMissNote" style="display:none"></span></div>
       <div class="stat-val" id="totalValue" style="color:var(--green);">—</div>
+      <div class="flow-sub" id="flowSub" style="display:none"></div>
     </div>
     <div class="stat-cell big" id="idleCell" onclick="togIdle()" title="LP 头寸之外的钱包代币资产，点击展开代币明细">
       <div class="stat-label">钱包余额 <span class="idle-arrow" id="idleArrow">▼</span></div>
@@ -939,6 +947,7 @@
     </div>
   </div>
 
+  <div class="idle-panel" id="flowPanel" style="display:none;"></div>
   <div class="idle-panel" id="idlePanel" style="display:none;"></div>
 
   <div class="wallet-mgr" id="walletMgr">
@@ -1143,6 +1152,7 @@ document.querySelectorAll('#chainNav .nav-item').forEach(btn => {
     document.getElementById('content').innerHTML = '<div class="state-box"><div class="spinner"></div><div class="state-text">加载链上数据…</div></div>';
     document.getElementById('statsBar').style.display = 'none';
     document.getElementById('idlePanel').style.display = 'none';
+    document.getElementById('flowPanel').style.display = 'none'; lastFlow = null;
     document.getElementById('idleValue').textContent = '—';
     liveEtag = null;   // ETag 按链
     if (!isPending(chain)) loadWallets();   // pending 链不提供钱包管理, 也不发这个请求
@@ -1220,7 +1230,7 @@ function renderPending() {
   const ch = activeChain, date = PENDING_CHAINS[ch] || '', m = PENDING_META[ch] || {};
   const rb = $('refreshBtn');   // 没有数据可刷, 按钮置灰免得看着像能点 (切回正常链时 loadData 的 finally 会恢复)
   if (rb) { rb.disabled = true; rb.title = '该链主网尚未上线，暂无数据可刷新'; }
-  for (const id of ['statsBar', 'filterBar', 'idlePanel', 'walletMgr']) { const el = $(id); if (el) el.style.display = 'none'; }
+  for (const id of ['statsBar', 'filterBar', 'idlePanel', 'flowPanel', 'walletMgr']) { const el = $(id); if (el) el.style.display = 'none'; }
   $('idleValue').textContent = '—';
   $('lastRefresh').textContent = '—';
   $('countdown').textContent = '主网未上线 · 暂不抓取';
@@ -1707,6 +1717,12 @@ function render(data) {
     $('totalFees').textContent=fU2(tf);
   }
 
+  // 充提记录 / 净入金 · 盈亏: 与钱包余额同一钱包集合 (资金查询勾选, 分组/单钱包跟随筛选); 盈亏要各钱包 LP 现值
+  const lpBy={}; for(const w of data.wallets) lpBy[nmNorm(w.address)]=w.totalUSD||0;
+  const tvShown=(curF==='all'?(data.grandTotalUSD||0):ws.reduce((s,w)=>s+(w.totalUSD||0),0))+(idleT||0);
+  lastFlow={d:idleData.idle,f:idleF,lpBy,total:tvShown};
+  renderFlow(lastFlow);
+
   lastIdle={data:idleData,f:idleF};   // 2026-09-28 审计修复: 记下闲置面板入参, 展开/收起面板时只重绘面板不重绘整表 (别把展开的明细行收起)
   renderIdle(idleData,idleF);
 
@@ -1857,7 +1873,7 @@ function renderIdle(data,curF){
   $('idleArrow').textContent=idleOpen?'▲':'▼';
   if(!idleOpen){ panel.style.display='none'; return; }
   panel.style.display='block';
-  let h=mkFund(d,curF);
+  let h='';
   if(!rows.length){
     panel.innerHTML=h+'<div class="idle-empty">'+(curF==='all'?(viewGroup?'该分组':'本链'):'该钱包')+'暂无价值 ≥ $1 的闲置代币</div>';
     return;
@@ -1876,55 +1892,100 @@ function renderIdle(data,curF){
   panel.innerHTML=h;
 }
 
-// --- 初始资金 (净入金) 摘要 + 转账明细 (仅 rh 后端提供 funding 数据) ---
-let fundOpen=false;
-function togFund(){ fundOpen=!fundOpen; if(!curData) return; if(lastIdle) renderIdle(lastIdle.data,lastIdle.f); else render(curData); }   // 2026-09-28 审计修复: 只重绘余额面板
-function fT(ts){ if(!ts) return '—'; const d=new Date(ts); return (d.getMonth()+1)+'-'+d.getDate()+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }
-const FUND_CT={external:'外部',internal:'内部',mint:'铸入',burn:'销毁'};
-function mkFund(d,curF){
-  let fd=null, evs=[], partialNote='';
-  if(curF==='all'){
-    fd=d.funding;
-    if(fd){
-      for(const w of Object.values(d.byWallet||{})){
-        if(w.funding&&w.funding.events) for(const e of w.funding.events) evs.push({...e,wn:w.name});
-      }
-      if(fd.partialWallets&&fd.partialWallets.length) partialNote='高频钱包（'+fd.partialWallets.join('、')+'）交易过密未回溯，未计入合计';
-    }
-  }else{
-    const w=d.byWallet&&d.byWallet[curF];
-    fd=w&&w.funding;
-    if(fd&&fd.partial) return '<div class="fund-bar">初始资金：<span class="fund-warn" style="width:auto">该钱包交易过密（高频 bot），金流未回溯</span></div>';
-    if(fd) evs=(fd.events||[]).map(e=>({...e}));
+// --- 充提记录 (点总价值卡展开): 各钱包 funding.events 汇总 (2026-10-02, 取代钱包余额面板里的「初始资金」块; 后端 rh=Transfer 日志回溯, base/bsc/eth=Ankr, sol=账本+Helius) ---
+// 当前视图内钱包之间的互转 = 内部, 列出但不计合计; 单钱包视图下与其它钱包的往来照算充值/提币
+let flowOpen=false, lastFlow=null;   // lastFlow = 上次 render 的 {d: idle, f, lpBy, total}
+try{ flowOpen=localStorage.getItem('lpFlowOpen')==='1'; }catch{}
+function togFlow(){
+  if(!lastFlow||!flowAgg(lastFlow.d,lastFlow.f)) return;   // 本链 / 本视图没有充提数据: 卡片不可点
+  flowOpen=!flowOpen;
+  try{localStorage.setItem('lpFlowOpen',flowOpen?'1':'0');}catch{}
+  renderFlow(lastFlow);
+}
+function fT(ts){ if(!ts) return '—'; const d=new Date(ts); return (d.getFullYear()!==new Date().getFullYear()?String(d.getFullYear()).slice(2)+'-':'')+(d.getMonth()+1)+'-'+d.getDate()+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }
+const FLOW_EXP={eth:'https://etherscan.io',base:'https://basescan.org',bsc:'https://bscscan.com',rh:'https://robinhoodchain.blockscout.com',sol:'https://solscan.io'};
+function flowTxUrl(id){ const b=FLOW_EXP[activeChain]; const h=String(id||'').split(activeChain==='sol'?':':'-')[0]; return b&&h?b+'/tx/'+h:''; }   // 事件 id: EVM「哈希-logIndex」, sol「签名:mint」
+function flowAddrUrl(a){ const b=FLOW_EXP[activeChain]; return b&&a?b+(activeChain==='sol'?'/account/':'/address/')+a:''; }
+// 紧凑金额 (卡片副行): $1.23M / $12.3K / $1,234 / $12.34
+function fUc(v,sg){ const a=Math.abs(v), s=v<0?'−':(sg?'+':''); return s+'$'+(a>=1e6?(a/1e6).toFixed(2)+'M':a>=1e4?(a/1e3).toFixed(1)+'K':a>=1000?Math.round(a).toLocaleString('en-US'):a.toFixed(2)); }
+function flowAgg(d,f){
+  if(!d||!d.byWallet) return null;
+  const ents=f==='all'?Object.entries(d.byWallet):(d.byWallet[f]?[[f,d.byWallet[f]]]:[]);
+  const has=ents.filter(([,w])=>w.funding);
+  if(!has.length) return null;
+  const ok=has.filter(([,w])=>!w.funding.partial);
+  const view=new Set(ok.map(([a])=>nmNorm(a)));
+  const g={fin:0,fout:0,net:0,ax:false,evs:[],addrs:ok.map(([a])=>a),
+    partial:has.filter(([,w])=>w.funding.partial).map(([,w])=>w.name),
+    catching:ok.filter(([,w])=>w.funding.catchingUp).map(([,w])=>w.name)};
+  for(const [a,w] of ok) for(const e of (w.funding.events||[])){
+    const cp=e.cp?nmNorm(e.cp):'';
+    const intl=!!cp&&cp!==nmNorm(a)&&view.has(cp);
+    g.evs.push({...e,wn:w.name,intl});
+    if(intl) continue;
+    if(e.dir==='in') g.fin+=e.usd||0; else g.fout+=e.usd||0;
+    if(e.ax) g.ax=true;
   }
-  if(!fd||fd.netUSD===undefined) return '';
-  const net=fd.netUSD;
-  const fUF=v=>'$'+v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); // 初始资金不缩写, 保留精确值
-  let h='<div class="fund-bar">初始资金（净入金）<b class="'+(net>=0?'':'')+'">'+fUF(net)+'</b>'
-    +'<span class="fund-sub">= 转入 '+fUF(fd.inUSD)+' − 转出 '+fUF(fd.outUSD)+'</span>'
-    +(fd.catchingUp?'<span class="fund-sub">（历史回补中…）</span>':'')
-    +'<button class="fund-toggle" onclick="togFund()">'+(fundOpen?'收起明细 ▲':'转账明细 ▼')+'</button>'
-    +(partialNote?'<div class="fund-warn">'+escH(partialNote)+'</div>':'')
+  g.net=g.fin-g.fout;
+  g.evs.sort((x,y)=>(y.ts||0)-(x.ts||0));
+  return g;
+}
+function renderFlow(L){
+  const cell=$('totalCell'), sub=$('flowSub'), arrow=$('flowArrow'), panel=$('flowPanel');
+  const g=L?flowAgg(L.d,L.f):null;
+  const baseTitle='钱包余额 + LP 仓位价值（含待领手续费）';
+  cell.classList.toggle('has-flow',!!g);
+  if(!g){ sub.style.display='none'; arrow.style.display='none'; panel.style.display='none'; cell.title=baseTitle; return; }
+  arrow.style.display=''; arrow.textContent=flowOpen?'▲':'▼';
+  sub.style.display='flex';
+  const pnStar='<span class="px-stale" title="含按当前价近似的代币，或有钱包历史记录回补中">*</span>';
+  // 盈亏 = 有充提数据的钱包现值 (余额 + LP) − 净入金; 观察钱包 / 没数据的钱包不进来, 免得现值和净入金对不上
+  const val=g.addrs.reduce((s,a)=>s+((L.d.byWallet[a]||{}).totalUSD||0)+(L.lpBy[nmNorm(a)]||0),0);
+  const pnl=val-g.net, approx=g.ax||g.catching.length>0, sameSet=Math.abs(val-(L.total||0))<0.5;
+  if(!g.addrs.length) sub.innerHTML='<span>充提未回溯（高频钱包）</span>';
+  else sub.innerHTML='<span>净入金 '+fUc(g.net)+'</span><span>· 盈亏 <span class="'+(pnl>=0?'pos':'neg')+'">'+fUc(pnl,1)+'</span>'+(approx?'*':'')+'</span>';
+  cell.title=baseTitle+'\n点击'+(flowOpen?'收起':'展开')+'充提记录'
+    +(g.addrs.length?'\n净入金 = 充值 '+fU2(g.fin)+' − 提币 '+fU2(g.fout)+'（视图内钱包互转不计）'
+      +'\n盈亏 = '+(sameSet?'总价值':g.addrs.length+' 个有充提数据钱包的现值 '+fU2(val))+' − 净入金':'')
+    +(g.ax?'\n* 含按当前价近似的代币':'')+(g.catching.length?'\n* 回补中：'+g.catching.join('、'):'')
+    +(g.partial.length?'\n高频钱包未回溯：'+g.partial.join('、'):'');
+  if(!flowOpen){ panel.style.display='none'; return; }
+  panel.style.display='block';
+  const multi=L.f==='all';
+  let h='<div class="fund-bar"><span>充值 <b>'+fU2(g.fin)+'</b></span><span>− 提币 <b>'+fU2(g.fout)+'</b></span><span>= 净入金 <b>'+fU2(g.net)+'</b>'+(g.ax?pnStar:'')+'</span>'
+    +(g.addrs.length?'<span class="fund-sub">'+(sameSet?'总价值 ':'现值 ')+fU2(val)+' · 盈亏 <span class="'+(pnl>=0?'pos':'neg')+'">'+(pnl>=0?'+':'−')+fU2(Math.abs(pnl))+'</span>'+(approx?pnStar:'')+'</span>':'')
+    +(!sameSet&&g.addrs.length?'<div class="fund-warn" style="color:var(--text-muted)">盈亏只算有充提数据的 '+g.addrs.length+' 个钱包（总价值里的观察钱包 / 无数据钱包不在内）</div>':'')
+    +(g.catching.length?'<div class="fund-warn">'+escH(g.catching.join('、'))+' 历史记录回补中，合计可能偏小</div>':'')
+    +(g.partial.length?'<div class="fund-warn">高频钱包（'+escH(g.partial.join('、'))+'）交易过密未回溯，不计入</div>':'')
     +'</div>';
-  if(fundOpen){
-    evs.sort((a,b)=>(b.ts||0)-(a.ts||0));
-    const MAX=300, cut=evs.length>MAX;
-    if(cut) evs=evs.slice(0,MAX);
-    h+='<table class="fund-table"><thead><tr><th>时间</th>'+(curF==='all'?'<th>钱包</th>':'')+'<th>方向</th><th>代币</th><th style="text-align:right">数量</th><th style="text-align:right">USD</th><th class="idle-ws">对手方</th></tr></thead><tbody>';
+  const MAX=300; let evs=g.evs; const cut=evs.length>MAX; if(cut) evs=evs.slice(0,MAX);
+  if(!evs.length) h+='<div class="idle-empty">暂无充提记录</div>';
+  else{
+    const names={}; for(const w of walletList) names[nmNorm(w.address)]=w.name;
+    h+='<table class="fund-table"><thead><tr><th>时间</th>'+(multi?'<th class="idle-ws">钱包</th>':'')+'<th>充/提</th><th>代币</th><th style="text-align:right">数量</th><th style="text-align:right">金额</th><th class="idle-ws">对方地址</th></tr></thead><tbody>';
     for(const e of evs){
-      h+='<tr><td class="num">'+fT(e.ts)+'</td>'
-        +(curF==='all'?'<td>'+escH(e.wn||'')+'</td>':'')
-        +'<td><span class="fund-dir-'+(e.dir==='in'?'in':'out')+'">'+(e.dir==='in'?'转入':'转出')+'</span><span class="fund-ct">'+escH(FUND_CT[e.ct]||e.ct||'')+'</span></td>'   // 2026-09-28 审计修复: dir 收敛为常量, ct 兜底值 escH
-        +'<td class="idle-sym">'+escH(e.sym)+'</td>'
-        +'<td class="num">'+fN(e.amt)+'</td>'
-        +'<td class="num idle-val">'+fU2(e.usd)+'</td>'
-        +'<td class="fund-cp idle-ws" title="'+escH(e.cp||'')+'">'+escH((e.cp||'').slice(0,10))+'…</td></tr>';
+      const tu=flowTxUrl(e.id), cp=e.cp?nmNorm(e.cp):'', cpName=cp&&names[cp];
+      const tag=e.intl?'内部':(e.ct==='mint'?'铸入':e.ct==='burn'?'销毁':'');
+      const cpCell=cpName?'<span class="fund-cp known" title="'+escH(e.cp)+'">'+escH(cpName)+'</span>'
+        :e.cp?'<a class="fund-cp" href="'+escH(flowAddrUrl(e.cp))+'" target="_blank" rel="noopener" title="'+escH(e.cp)+'">'+escH(sA(String(e.cp)))+'</a>':'<span class="fund-cp">—</span>';
+      h+='<tr'+(e.intl?' class="flow-intl" title="本视图内钱包互转，不计入合计"':'')+'>'
+        +'<td class="num">'+(tu?'<a href="'+escH(tu)+'" target="_blank" rel="noopener" title="在浏览器查看交易">'+fT(e.ts)+'</a>':fT(e.ts))+'</td>'
+        +(multi?'<td class="idle-ws">'+escH(e.wn||'')+'</td>':'')
+        +'<td><span class="fund-dir-'+(e.dir==='in'?'in':'out')+'">'+(e.dir==='in'?'充值':'提币')+'</span>'+(tag?'<span class="fund-ct">'+tag+'</span>':'')+'</td>'
+        +'<td class="idle-sym">'+escH(e.sym||'')+'</td>'
+        +'<td class="num">'+fN(e.amt,Math.abs(e.amt)>=1000?2:4)+'</td>'
+        +'<td class="num idle-val">'+fU2(e.usd)+(e.ax?'<span class="px-stale" title="近似价：按当前价，或离转账超过 6 小时的成交价">*</span>':'')+'</td>'
+        +'<td class="idle-ws">'+cpCell+'</td></tr>';
     }
     h+='</tbody></table>';
-    if(cut) h+='<div class="idle-note">仅显示最近 '+MAX+' 笔</div>';
-    h+='<div class="idle-note">口径：链上 ERC20 转账中对手方为普通地址（EOA）/铸销的部分；与合约的往来（swap/LP 出入金）已排除；原生 ETH 直转链上无日志不可见 · 内部=本页监控钱包间互转 · 稳定币按面值、WETH 按转账时点 ETH 价、股票代币按当前行情近似</div>';
+    if(cut) h+='<div class="idle-note">仅显示最近 '+MAX+' 笔（合计含全部）</div>';
   }
-  return h;
+  const scope=activeChain==='sol'
+    ?'开了账本的钱包里不含 LP / 换币指令的单向转账（SOL 与 WSOL 合并，建 / 关代币账户的租金不算）· 没开账本的钱包无数据'
+    :'钱包与外部地址之间的单向转账（交易所充提、个人转账，含交易所合约热钱包打来的）；同一笔交易有进有出（换币 / LP 存取）、钱包自己发起的合约交互（LP、领费、路由、跨链桥转出）不算'
+      +(activeChain==='rh'?' · 原生 ETH 直转链上无日志，看不见':' · 合约内部转出的原生币（如跨链桥解包后打来的币）看不见');
+  h+='<div class="idle-note">口径：'+scope+' · 视图内钱包互转标「内部」不计合计 · 稳定币按面值、原生币按转账时点价、其他代币'+(activeChain==='sol'?'按该钱包前后 3 天内的换币成交价（离转账超 6 小时或没有成交、改按当前价的标 *）':'按当前价近似（*）')+' · 单笔 &lt;$1 不计 · 盈亏 = 现值（钱包余额 + LP）− 净入金</div>';
+  panel.innerHTML=h;
 }
 
 // 重绘但保留用户已展开的明细行 (实时同步/轻拉时不打断查看)
@@ -2064,7 +2125,7 @@ function stSetChain(ch) {
   loadSeq++;   // 2026-09-28 审计修复: 设置页切链同样推进请求序号
   try { activeF = localStorage.getItem('lpWalletF_' + ch) || 'all'; } catch { activeF = 'all'; }
   $('content').innerHTML = '<div class="state-box"><div class="spinner"></div><div class="state-text">加载链上数据…</div></div>';
-  $('statsBar').style.display = 'none'; $('idlePanel').style.display = 'none'; $('idleValue').textContent = '—';
+  $('statsBar').style.display = 'none'; $('idlePanel').style.display = 'none'; $('flowPanel').style.display = 'none'; lastFlow = null; $('idleValue').textContent = '—';
   walletList = [];
   renderStTabs();
   loadWallets();                                             // 拉完会顺带重绘各项勾选列表
@@ -2453,7 +2514,7 @@ function renderSnap() {
   }
   th += '</tbody></table>';
   $('snTable').innerHTML = th;
-  $('snNote').innerHTML = escH((snSc === 'obs' ? '观察钱包（别人的）：每小时记一点，含余额与 LP；没开账本的钱包未实现/已实现按开仓时价估算或为空，平仓后已实现不计、收益会相应回落 · ' : '') + '口径：总资产 = 钱包余额 + LP 价值（含待领费）· 收益 = 未实现盈亏变动 + 已实现盈亏变动（只看 LP 盈亏，钱包充提不影响；总资产变动与净入金在副行 / 净入金变动列另给参考，净入金来自初始资金回溯，目前只有 Robinhood 链有）· 未实现盈亏 = 活跃仓 现值+手续费−开仓成本 · 已实现盈亏 = 已关闭仓合计 · 自有钱包每 5 分钟记一点，保留 24 小时的 5 分钟级、30 天的小时级、全部的日级（按 ' + (meta0.tz || 'Asia/Shanghai') + ' 零点切日，当天那行随时间更新）· 点击行看各链 / 各钱包明细');
+  $('snNote').innerHTML = escH((snSc === 'obs' ? '观察钱包（别人的）：每小时记一点，含余额与 LP；没开账本的钱包未实现/已实现按开仓时价估算或为空，平仓后已实现不计、收益会相应回落 · ' : '') + '口径：总资产 = 钱包余额 + LP 价值（含待领费）· 收益 = 未实现盈亏变动 + 已实现盈亏变动（只看 LP 盈亏，钱包充提不影响；总资产变动与净入金在副行 / 净入金变动列另给参考，净入金来自充提记录回溯，Robinhood / Base / BSC / ETH / Solana（开了账本的钱包）有，Arc 没有）· 未实现盈亏 = 活跃仓 现值+手续费−开仓成本 · 已实现盈亏 = 已关闭仓合计 · 自有钱包每 5 分钟记一点，保留 24 小时的 5 分钟级、30 天的小时级、全部的日级（按 ' + (meta0.tz || 'Asia/Shanghai') + ' 零点切日，当天那行随时间更新）· 点击行看各链 / 各钱包明细');
 }
 function snTags(e) {
   let t = '';
@@ -2810,7 +2871,7 @@ function renderPnl() {
   let fh = '<span>钱包余额 <b>' + fU(idle) + '</b></span><span>LP 价值 <b>' + fU(lp) + '</b></span><span>总资产 <b>' + fU(idle + lp) + '</b></span>';
   const fund = wallets.filter(w => w.funding && !w.funding.partial && typeof w.funding.netUSD === 'number');
   if (fund.length === wallets.length && wallets.length) { const net = fund.reduce((s, w) => s + w.funding.netUSD, 0); const tot = idle + lp - net; fh += '<span>净入金 <b>' + fU(net) + '</b></span><span>总体盈亏 (总资产−净入金) ' + pnSigned(tot) + pc(tot, net) + '</span>'; }
-  else if (fund.length) fh += '<span class="st-sub-note">净入金只有 ' + fund.length + '/' + wallets.length + ' 个钱包有 (rh 链), 不合计</span>';
+  else if (fund.length) fh += '<span class="st-sub-note">净入金只有 ' + fund.length + '/' + wallets.length + ' 个钱包有（Arc 链、没开账本的 Solana 钱包、高频钱包没有），不合计</span>';
   // 观察范围: 每个钱包一行账本开关; 自有范围只在账本未就绪时提示
   const wRows = wallets.map(w => {
     const st = w.partial ? '高频钱包 · 账本放弃' : (w.ledgerOn ? (w.pending ? '账本待扫' : (w.scanning ? '扫描中' : '账本 ' + (w.updatedAt ? tA(w.updatedAt) : '待算') + (w.priceMiss ? ' · ' + w.priceMiss + ' 处历史价暂缺, 下轮重算' : ''))) : (w.ledgerStale ? '未开账本 · 盘里有旧账本, 开后重算' : '未开账本'));

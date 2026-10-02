@@ -1209,4 +1209,7 @@ function applyPnl(pos, src, priceOf) {
   pos.netProfitPct = pos.netProfitUSD / src.cost * 100;
 }
 
-module.exports = { init, registerChain, enabled, isAnkr, runQueue, positionPnl, walletStatus, walletReport, applyPnl, ledgerState, ROUND_MS, _test: { computeWallet, scanWallet, ensurePositions, scanV3Events, scanV4Events } };
+// 充提记录模块 (flows.js) 复用: 同一条 Ankr 串行队列 (与账本不抢限流)、Ankr 归档节点、链配置、coingecko 小时价
+const flowApi = { ankrCall, providerFor, cfgOf, stateOf, coinUsdAt: (id, ts) => E.coinUsdAtTime(id, ts) };
+
+module.exports = { init, registerChain, enabled, isAnkr, flowApi, runQueue, positionPnl, walletStatus, walletReport, applyPnl, ledgerState, ROUND_MS, _test: { computeWallet, scanWallet, ensurePositions, scanV3Events, scanV4Events } };

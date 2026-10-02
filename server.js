@@ -35,6 +35,7 @@ function sanitizePayloadSymbols(data) {
 // 校验用户名口令并下发 nginx 认识的 cookie —— 见 lp-auth.js 顶部说明。
 const { mountLpAuth } = require("./lp-auth");
 const pnlLedger = require('./pnl-ledger');   // 盈亏字段注入 (applyPnl) + 钱包盈亏报告 (BSC 无账本, 全部退回建仓回溯)
+const flows = require('./flows');            // 充提记录 / 净入金 (BSC 走 Ankr, 与账本共用串行队列)
 mountLpAuth(app);
 const PORT = parseInt(process.env.PORT || '1788');
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
@@ -1831,6 +1832,11 @@ async function _fetchPositionsInner(forceRefresh = false) {
       lastIdleBsc = idle;
     } catch (e) { console.error('[BSC] idle balances failed:', e.message?.slice(0, 100)); }
   }
+  // 充提记录 / 净入金: 从 flows 缓存注入 (后台队列回填, 此处零 RPC); 强刷踢一轮不等 (Ankr 队列可能正被账本占着)
+  if (flows.enabled('bsc')) {
+    if (forceRefresh) setImmediate(() => flows.runQueue('bsc', WALLETS).catch(e => console.error('[bsc] flows:', e.message?.slice(0, 80))));
+    if (idle && idle.byWallet) flows.injectIdle(idle, a => flows.fundingOf('bsc', a));
+  }
 
   const result = {
     wallets,
@@ -2105,7 +2111,7 @@ app.get('/api/pnl/all', async (req, res) => {
   res.json(out);
 });
 
-// 钱包盈亏 (BSC): 无链上账本, 只有活跃仓 (成本按建仓时点价值), 历史仓位不可用
+// 钱包盈亏 (BSC): Ankr 账本 (pnl-ledger registerChain 'bsc'); funding = 充提记录净入金 (flows.js)
 app.get('/api/pnl', (req, res) => {
   const addr = String(req.query.wallet || '').trim().toLowerCase();
   if (!/^0x[0-9a-f]{40}$/.test(addr)) return res.status(400).json({ error: '缺少或无效的 wallet' });
@@ -2116,7 +2122,7 @@ app.get('/api/pnl', (req, res) => {
   const rep = pnlLedger.walletReport('bsc', addr, liveWallet, selected);
   let idleUSD = null;
   for (const [a, wI] of Object.entries(data?.idle?.byWallet || {})) if (a.toLowerCase() === addr) idleUSD = wI.totalUSD || 0;
-  res.json({ chain: 'bsc', wallet: { address: addr, name: wcfg?.name || liveWallet?.name || addr, enabled: wcfg ? wcfg.enabled !== false : true }, ...rep, idleUSD, lpUSD: liveWallet ? (liveWallet.totalUSD || 0) : 0, funding: null, dataTs: data?.timestamp || 0,
+  res.json({ chain: 'bsc', wallet: { address: addr, name: wcfg?.name || liveWallet?.name || addr, enabled: wcfg ? wcfg.enabled !== false : true }, ...rep, idleUSD, lpUSD: liveWallet ? (liveWallet.totalUSD || 0) : 0, funding: flows.enabled('bsc') ? flows.fundingSummary(flows.fundingOf('bsc', addr)) : null, dataTs: data?.timestamp || 0,
     selected, ledgerEnabled: loadPnlCfg().enabled });
 });
 
@@ -2124,6 +2130,7 @@ app.get('/api/positions', async (req, res) => {
   try {
     const forceRefresh = req.query.refresh === 'true';
     const data = await fetchPositions(forceRefresh);
+    if (flows.enabled('bsc') && data && data.idle) flows.injectIdle(data.idle, a => flows.fundingOf('bsc', a));   // 后台刚扫完的充提即时可见 (零 RPC, 幂等)
     res.json(data);
   } catch (err) {
     console.error('API error:', err);
@@ -2196,6 +2203,10 @@ try {
   bscKickLedger = () => { if (!pnlLedger.enabled('bsc')) return; pnlLedger.runQueue('bsc', liveByWalletBsc()).catch(e => console.error('[bsc] pnl-ledger:', e.message)); };
   setTimeout(bscKickLedger, 170 * 1000);
   setInterval(bscKickLedger, pnlLedger.ROUND_MS);
+  // 充提记录: 启动 110s 后首跑 (错开 base 的 100s), 之后每 10min 增量
+  const bscKickFlows = () => flows.runQueue('bsc', WALLETS).catch(e => console.error('[bsc] flows:', e.message));
+  setTimeout(bscKickFlows, 110 * 1000);
+  setInterval(bscKickFlows, flows.ROUND_MS);
   console.log(`BSC pnl-ledger registered (${pnlLedger.enabled('bsc') ? 'Ankr 数据源就绪' : '未配置 ANKR_KEY, 停用'})`);
 } catch (e) {
   console.error('BSC pnl-ledger register failed:', e.message);
