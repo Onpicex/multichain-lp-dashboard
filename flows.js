@@ -14,15 +14,21 @@
 // 口径 (SOL): sol-ledger 账本记录里无 LP 指令、非换币、按 SOL 并入 WSOL 后单向的 tx (有代币腿时 |ΔSOL|<0.01 视为租金/手续费噪声);
 //   其他代币优先用账本的价格观测 (该钱包 ±3 天内的换币成交价, 离转账 >6h 标 *), 没有再用现价 (标 *); 币已卖光又没观测的才丢
 //   对方地址用 Helius 批量解析 (/v0/transactions) 补, 结果落盘不重拉
+//   对方判定 (2026-10-02, 同 EVM「钱包自己发起的合约交互不计」): 本钱包付手续费 + 对方是程序账户 (PDA, 不在 ed25519 曲线上) = 协议存取, 不计;
+//     本钱包付手续费、从普通地址转入 = 对方签了名 (转出必须源地址签名) = 用户自己控制的地址 (未加进钱包列表), 记入 C.self,
+//     与它的往来 (含之前转过去的那笔) 标 self、不计合计。实例: 钱包把代币转到一个未登记的普通地址, 又由该地址签名转回, 两笔都是本钱包付费
 // 内部互转照记 (带对方地址), 前端按当前视图的钱包集合判「内部」并不计合计; 单钱包视图下就是该钱包的充值/提币
-// 缓存 flows-cache-<chain>.json (v2: 合约对手改按发起人判; v3: SOL 加账本价格观测 —— 版本不符整体重扫): { v, wallets: { addr: { scannedTo|chk, stopped, raw, events, inUSD, outUSD, updatedAt } }, code }
+// 缓存 flows-cache-<chain>.json (v2: 合约对手改按发起人判; v3: SOL 加账本价格观测; SOL v4: 自控地址/PDA 判定 —— 版本不符整体重扫):
+//   { v, wallets: { addr: { scannedTo|chk, stopped, raw, events, inUSD, outUSD, updatedAt } }, code, self (仅 SOL: { 自控地址: 1 }) }
 // =============================================================
 'use strict';
 const fs = require('fs');
 const path = require('path');
 const ledger = require('./pnl-ledger');
+const { PublicKey } = require('@solana/web3.js');
 
-const CACHE_V = 3;
+const CACHE_V = { sol: 4 };         // 按链分版本: 只改 SOL 口径时不逼 EVM 链整体重扫
+const verOf = chainId => CACHE_V[chainId] || 3;
 const RAW_LIMIT = 8000;            // 单钱包原始转账条数上限, 超过 = 高频 bot 钱包放弃 (同 rh FUNDING_RAW_LIMIT)
 const DUST_USD = 1;
 const DUST_PRE_USD = 0.2;           // 按现价连这个都不到的腿 (手续费级) 直接丢, 不去排 coingecko 历史价队列 (免费档 2.5s/次, 全进程共用一条)
@@ -52,7 +58,7 @@ function cacheOf(chainId) {
       try { d = JSON.parse(fs.readFileSync(f, 'utf8')); }
       catch (e) { try { fs.renameSync(f, `${f}.bad-${Date.now()}`); } catch {} console.error(`[${chainId}] flows 缓存损坏, 已改名留证重扫:`, e.message?.slice(0, 60)); }
     }
-    if (!d || d.v !== CACHE_V) d = { v: CACHE_V, wallets: {}, code: {} };
+    if (!d || d.v !== verOf(chainId)) d = { v: verOf(chainId), wallets: {}, code: {} };
     caches[chainId] = d;
   }
   return caches[chainId];
@@ -63,8 +69,9 @@ function save(chainId) {
 }
 function finish(W) {
   W.events.sort((a, b) => b.ts - a.ts);
-  W.inUSD = W.events.filter(e => e.dir === 'in').reduce((s, e) => s + e.usd, 0);
-  W.outUSD = W.events.filter(e => e.dir === 'out').reduce((s, e) => s + e.usd, 0);
+  const cnt = W.events.filter(e => e.ct !== 'self');   // 与自控地址的往来列出但不计
+  W.inUSD = cnt.filter(e => e.dir === 'in').reduce((s, e) => s + e.usd, 0);
+  W.outUSD = cnt.filter(e => e.dir === 'out').reduce((s, e) => s + e.usd, 0);
 }
 
 // 钱包资金查询的勾选 (fund-config.json): 未设置 = 只看自有钱包 (与总价值统计同口径)
@@ -279,8 +286,20 @@ function solCounterparty(p, wallet, mint, dir) {
   }
   return pick(tok, 'fromUserAccount', 'toUserAccount', 'tokenAmount');
 }
+function onCurve(a) { try { return PublicKey.isOnCurve(new PublicKey(a).toBytes()); } catch { return true; } }   // 解析不了当普通地址 (走旧口径)
+// 新认出的自控地址: 全部钱包里与它的旧事件 (比如先转出、后来才转回的那笔) 一起改标 self
+function markSelf(C, cp) {
+  if (C.self[cp]) return;
+  C.self[cp] = 1;
+  for (const W of Object.values(C.wallets)) {
+    let hit = false;
+    for (const e of W.events) if (e.cp === cp && e.ct !== 'self') { e.ct = 'self'; hit = true; }
+    if (hit) finish(W);
+  }
+}
 async function scanSolWallet(addr, monitored, deadline) {
   const C = cacheOf('sol');
+  if (!C.self) C.self = {};
   const L = solDeps.records(addr);
   if (!L) return null;   // 没开账本的钱包: 无记录可用
   const W = C.wallets[addr] || (C.wallets[addr] = { chk: {}, stopped: null, events: [], inUSD: 0, outUSD: 0, updatedAt: 0 });
@@ -318,7 +337,10 @@ async function scanSolWallet(addr, monitored, deadline) {
         const usd = amt * price;
         if (!(price > 0) || !(usd >= DUST_USD)) continue;
         const cp = solCounterparty(p, addr, l.mint, dir);
-        const ct = !cp ? (dir === 'in' ? 'mint' : 'burn') : (monitored.has(cp) ? 'internal' : 'external');
+        const selfPaid = p.feePayer === addr, pda = !!cp && !onCurve(cp);
+        if (selfPaid && pda) continue;   // 钱包自己发起、对方是程序账户 = 协议存取 (借贷/质押/跨链桥等), 不是充提
+        if (cp && dir === 'in' && selfPaid && !pda && !monitored.has(cp)) markSelf(C, cp);   // 对方签名转给本钱包、本钱包付费 = 自控地址
+        const ct = !cp ? (dir === 'in' ? 'mint' : 'burn') : (monitored.has(cp) ? 'internal' : C.self[cp] ? 'self' : 'external');
         const sym = l.mint === WSOL ? 'SOL' : (SOL_STABLES[l.mint] || (syms[l.mint] && syms[l.mint].symbol) || l.mint.slice(0, 4));
         const e = { id: `${c.sig}:${l.mint}`, ts: c.t.ts, dir, tok: l.mint, sym, amt, usd, cp: cp || '', ct };
         if (ax) e.ax = 1; if (rp) e.rp = 1;
