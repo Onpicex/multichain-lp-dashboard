@@ -135,7 +135,12 @@ async function scanAdaptive(chainId, filter, fromBlock, toBlock, deadline) {
   const maxChunk = Math.min(5000000, cfg.logChunk || 5000000);
   const gap = cfg.logGapMs || 400;
   const out = [];
-  let f = fromBlock, chunk = maxChunk, stopped = null, fails = 0;
+  // 2026-10-06: rh 官方 RPC 改为单段 ≤ 30000 块 (无 address 过滤; 带 address 10 万), 原来最小只缩到 30 万就止步 →
+  //   落后几天以上的钱包每轮零进展 (游标卡在 09-27). 现从报错 (only N are allowed) 学到上限, 记在链状态 (与 evm-adapter 的充提扫描共用), 单段最小缩到 2000
+  //   带 address 过滤的上限 (10 万) 与不带的 (3 万) 分开记, 别让仓位事件扫描被充提扫描学到的小上限拖慢
+  const capKey = filter.address ? 'logsRangeCapAddr' : 'logsRangeCap';
+  let cap = Math.min(maxChunk, st[capKey] || maxChunk);
+  let f = fromBlock, chunk = cap, stopped = null, fails = 0;
   while (f <= toBlock) {
     if (Date.now() > deadline) { stopped = 'budget'; break; }
     const to = Math.min(f + chunk - 1, toBlock);
@@ -143,11 +148,14 @@ async function scanAdaptive(chainId, filter, fromBlock, toBlock, deadline) {
       const logs = await st.provider.send('eth_getLogs', [{ ...filter, fromBlock: '0x' + f.toString(16), toBlock: '0x' + to.toString(16) }]);
       out.push(...logs);
       f = to + 1; fails = 0;
-      if (chunk < maxChunk) chunk = Math.min(chunk * 2, maxChunk);
+      if (chunk < cap) chunk = Math.min(chunk * 2, cap);
       if (f <= toBlock) await E.sleep(gap);
     } catch (e) {
-      // rh: 5M 块窗口间歇 "log query timed out"; 缩段 (÷4) 直到 300k, 再不行本轮放弃 (下轮续)
-      if (chunk > 300000) { chunk = Math.max(300000, Math.floor(chunk / 4)); await E.sleep(1200); continue; }
+      const msg = String(e?.error?.message || e?.info?.error?.message || e?.message || '');
+      const m = /only (\d+) (?:blocks )?are allowed/i.exec(msg);
+      if (m && Number(m[1]) > 0 && Number(m[1]) < chunk) { cap = chunk = Number(m[1]); st[capKey] = cap; await E.sleep(300); continue; }   // RPC 明说上限: 照它走
+      // rh: 大窗口间歇 "log query timed out"; 缩段 (÷4) 直到 2000, 再不行同段退避重试 3 次, 本轮放弃 (下轮续)
+      if (chunk > 2000) { chunk = Math.max(2000, Math.floor(chunk / 4)); await E.sleep(1200); continue; }
       if (++fails < 3) { await E.sleep(1500 * fails); continue; }
       stopped = 'rpc'; break;
     }

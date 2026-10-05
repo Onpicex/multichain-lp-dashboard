@@ -892,7 +892,7 @@ async function _fetchAllSol() {
     } catch (e) { console.error('[SOL] idle balances failed:', e.message?.slice(0, 100)); }
   }
   // 充提记录 / 净入金: 从 flows 缓存注入 (零 RPC)
-  if (flows.enabled('sol') && idle && idle.byWallet) flows.injectIdle(idle, a => flows.fundingOf('sol', a));
+  if (flows.enabled('sol') && idle && idle.byWallet) flows.injectIdle(idle, a => flows.fundingOf('sol', a, WALLETS));
 
   const result = {
     wallets,
@@ -992,13 +992,13 @@ function mountSolRoutes(app, adminGuard) {
     if (req.query.refresh === 'true' && solLedger.enabled()) setImmediate(() => kickSolLedger());
     let idleUSD = null;
     for (const [a, wI] of Object.entries(data?.idle?.byWallet || {})) if (a === addr) idleUSD = wI.totalUSD || 0;
-    res.json({ chain: 'sol', wallet: { address: addr, name: wc?.name || lw?.name || addr, enabled: wc ? wc.enabled !== false : true }, ...rep, idleUSD, lpUSD: lw ? (lw.totalUSD || 0) : 0, funding: flows.enabled('sol') ? flows.fundingSummary(flows.fundingOf('sol', addr)) : null, dataTs: data?.timestamp || 0,
+    res.json({ chain: 'sol', wallet: { address: addr, name: wc?.name || lw?.name || addr, enabled: wc ? wc.enabled !== false : true }, ...rep, idleUSD, lpUSD: lw ? (lw.totalUSD || 0) : 0, funding: flows.enabled('sol') ? flows.fundingSummary(flows.fundingOf('sol', addr, WALLETS)) : null, dataTs: data?.timestamp || 0,
       selected, ledgerEnabled: solLedger.enabled() && loadPnlCfgSol().enabled });
   });
   app.get('/api/sol/positions', async (req, res) => {
     try {
       const data = await fetchAllSol(req.query.refresh === 'true');
-      if (flows.enabled('sol') && data && data.idle) flows.injectIdle(data.idle, a => flows.fundingOf('sol', a));   // 后台刚扫完的充提即时可见 (零 RPC, 幂等)
+      if (flows.enabled('sol') && data && data.idle) flows.injectIdle(data.idle, a => flows.fundingOf('sol', a, WALLETS));   // 后台刚扫完的充提即时可见 (零 RPC, 幂等)
       res.json(data);
     } catch (e) {
       console.error('[SOL] API error:', e);

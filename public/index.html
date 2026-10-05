@@ -1798,15 +1798,15 @@ function groupColor(name){ let h=0; for(const c of String(name)) h=(h*31+c.charC
 // 分组视图: 只保留组内钱包的闲置余额/资金, 合计与 funding 汇总就地重算 (键=钱包地址, 与仓位数据同格式)
 function idleSubset(idle,sel){
   if(!idle||!idle.byWallet) return idle;
-  const byWallet={}; let totalUSD=0, fin=0, fout=0, any=false; const partial=[];
+  const byWallet={}; let totalUSD=0, fin=0, fout=0, any=false; const partial=[], stale=[];
   for(const [a,w] of Object.entries(idle.byWallet)){
     if(!sel.has(a)) continue;
     byWallet[a]=w; totalUSD+=w.totalUSD||0;
-    if(w.funding){ any=true; if(w.funding.partial) partial.push(w.name); else { fin+=w.funding.inUSD||0; fout+=w.funding.outUSD||0; } }
+    if(w.funding){ any=true; if(w.funding.partial) partial.push(w.name); else if(w.funding.stale) stale.push(w.name); else { fin+=w.funding.inUSD||0; fout+=w.funding.outUSD||0; } }
   }
   if(!Object.keys(byWallet).length) return null;   // 组内无人参与资金查询 → 与「未参与」同处理 (卡显 —)
   const out={totalUSD,byWallet};
-  if(any&&idle.funding) out.funding={inUSD:fin,outUSD:fout,netUSD:fin-fout,partialWallets:partial};
+  if(any&&idle.funding) out.funding={inUSD:fin,outUSD:fout,netUSD:fin-fout,partialWallets:partial,staleWallets:stale};
   return out;
 }
 function idleAllowedSet(){
@@ -1914,10 +1914,12 @@ function flowAgg(d,f){
   const ents=f==='all'?Object.entries(d.byWallet):(d.byWallet[f]?[[f,d.byWallet[f]]]:[]);
   const has=ents.filter(([,w])=>w.funding);
   if(!has.length) return null;
-  const ok=has.filter(([,w])=>!w.funding.partial);
+  // 2026-10-06: stale = 钱包不在当前充提队列 (勾选 / 账本关掉后留下的旧条目), 后端不再续扫, 停在 staleAt → 不计合计、不算盈亏
+  const ok=has.filter(([,w])=>!w.funding.partial&&!w.funding.stale);
   const view=new Set(ok.map(([a])=>nmNorm(a)));
   const g={fin:0,fout:0,net:0,ax:false,evs:[],addrs:ok.map(([a])=>a),
     partial:has.filter(([,w])=>w.funding.partial).map(([,w])=>w.name),
+    stale:has.filter(([,w])=>w.funding.stale).map(([,w])=>w.name+'（停在 '+fT(w.funding.staleAt)+'）'),
     catching:ok.filter(([,w])=>w.funding.catchingUp).map(([,w])=>w.name)};
   for(const [a,w] of ok) for(const e of (w.funding.events||[])){
     const cp=e.cp?nmNorm(e.cp):'';
@@ -1950,7 +1952,8 @@ function renderFlow(L){
     +(g.addrs.length?'\n净入金 = 充值 '+fU2(g.fin)+' − 提币 '+fU2(g.fout)+'（视图内钱包互转'+(g.self?'、与自控地址往来':'')+'不计）'
       +'\n盈亏 = '+(sameSet?'总价值':g.addrs.length+' 个有充提数据钱包的现值 '+fU2(val))+' − 净入金':'')
     +(g.ax?'\n* 含按当前价近似的代币':'')+(g.catching.length?'\n* 回补中：'+g.catching.join('、'):'')
-    +(g.partial.length?'\n高频钱包未回溯：'+g.partial.join('、'):'');
+    +(g.partial.length?'\n高频钱包未回溯：'+g.partial.join('、'):'')
+    +(g.stale.length?'\n充提过期不计：'+g.stale.join('、'):'');
   if(!flowOpen){ panel.style.display='none'; return; }
   panel.style.display='block';
   const multi=L.f==='all';
@@ -1959,6 +1962,7 @@ function renderFlow(L){
     +(!sameSet&&g.addrs.length?'<div class="fund-warn" style="color:var(--text-muted)">盈亏只算有充提数据的 '+g.addrs.length+' 个钱包（总价值里的观察钱包 / 无数据钱包不在内）</div>':'')
     +(g.catching.length?'<div class="fund-warn">'+escH(g.catching.join('、'))+' 历史记录回补中，合计可能偏小</div>':'')
     +(g.partial.length?'<div class="fund-warn">高频钱包（'+escH(g.partial.join('、'))+'）交易过密未回溯，不计入</div>':'')
+    +(g.stale.length?'<div class="fund-warn">'+escH(g.stale.join('、'))+' 的充提记录已过期（钱包不在当前扫描范围，之后的充提没记），不计入</div>':'')
     +'</div>';
   const MAX=300; let evs=g.evs; const cut=evs.length>MAX; if(cut) evs=evs.slice(0,MAX);
   if(!evs.length) h+='<div class="idle-empty">暂无充提记录</div>';
@@ -2872,16 +2876,24 @@ function renderPnl() {
   // 资金对照 + 各钱包账本状态
   const idle = wallets.reduce((s, w) => s + (typeof w.idleUSD === 'number' ? w.idleUSD : 0), 0), lp = wallets.reduce((s, w) => s + (w.lpUSD || 0), 0);
   let fh = '<span>钱包余额 <b>' + fU(idle) + '</b></span><span>LP 价值 <b>' + fU(lp) + '</b></span><span>总资产 <b>' + fU(idle + lp) + '</b></span>';
-  const fund = wallets.filter(w => w.funding && !w.funding.partial && typeof w.funding.netUSD === 'number');
-  if (fund.length === wallets.length && wallets.length) { const net = fund.reduce((s, w) => s + w.funding.netUSD, 0); const tot = idle + lp - net; fh += '<span>净入金 <b>' + fU(net) + '</b></span><span>总体盈亏 (总资产−净入金) ' + pnSigned(tot) + pc(tot, net) + '</span>'; }
-  else if (fund.length) fh += '<span class="st-sub-note">净入金只有 ' + fund.length + '/' + wallets.length + ' 个钱包有（Arc 链、没开账本的 Solana 钱包、高频钱包没有），不合计</span>';
+  // 2026-10-06: stale = 充提缓存是旧条目 (钱包不在当前充提队列, 后端不再续扫, 停在 staleAt): 不计净入金也不出「总体盈亏」, 免得停扫后的提币全算成亏损
+  const fund = wallets.filter(w => w.funding && !w.funding.partial && !w.funding.stale && typeof w.funding.netUSD === 'number');
+  const staleW = wallets.filter(w => w.funding && w.funding.stale);
+  if (fund.length === wallets.length && wallets.length) {
+    const net = fund.reduce((s, w) => s + w.funding.netUSD, 0); const tot = idle + lp - net;
+    const cu = fund.filter(w => w.funding.catchingUp);   // 2026-10-06: 回补中 = 充提还没追到链头 (落后一个月的钱包要追几十分钟), 净入金/总体盈亏会变: 标 * 并点名 (与总览充提面板同一约定)
+    fh += '<span>净入金 <b>' + fU(net) + (cu.length ? '*' : '') + '</b></span><span>总体盈亏 (总资产−净入金) ' + pnSigned(tot) + pc(tot, net) + (cu.length ? '*' : '') + '</span>';
+    if (cu.length) fh += '<span class="st-sub-note">* 充提回补中，净入金还没追到链头，数字会变：' + escH(cu.map(w => w.name).join('、')) + '</span>';
+  }
+  else if (fund.length || staleW.length) fh += '<span class="st-sub-note">' + (fund.length ? '净入金只有 ' + fund.length + '/' + wallets.length + ' 个钱包有（Arc 链、没开账本的 Solana 钱包、高频钱包没有），不合计' : '净入金没有可用的（Arc 链、没开账本的 Solana 钱包、高频钱包没有）') + (staleW.length ? '；充提过期不计：' + escH(staleW.map(w => w.name + '（停在 ' + fT(w.funding.staleAt) + '）').join('、')) : '') + '</span>';
   // 观察范围: 每个钱包一行账本开关; 自有范围只在账本未就绪时提示
   const wRows = wallets.map(w => {
     const st = w.partial ? '高频钱包 · 账本放弃' : (w.ledgerOn ? (w.pending ? '账本待扫' : (w.scanning ? '扫描中' : '账本 ' + (w.updatedAt ? tA(w.updatedAt) : '待算') + (w.priceMiss ? ' · ' + w.priceMiss + ' 处历史价暂缺, 下轮重算' : ''))) : (w.ledgerStale ? '未开账本 · 盘里有旧账本, 开后重算' : '未开账本'));
+    const fst = w.funding && w.funding.stale ? ' · 充提过期（停在 ' + fT(w.funding.staleAt) + '）' : (w.funding && w.funding.catchingUp ? ' · 充提回补中' : '');
     const btn = pnScope === 'obs' && !w.own ? ' <button class="nm-test-btn" data-ch="' + escH(w.chain) + '" data-addr="' + escH(w.address) + '" onclick="pnToggleLedger(this.dataset.ch, this.dataset.addr, ' + (w.ledger ? 'false' : 'true') + ')">' + (w.ledger ? '关账本' : '开账本') + '</button>' : '';
-    return '<span class="pn-wrow"><b>' + escH(w.name) + '</b> <span class="st-sub-note">' + CHAIN_NAMES[w.chain] + ' · ' + st + '</span>' + btn + '</span>';
+    return '<span class="pn-wrow"><b>' + escH(w.name) + '</b> <span class="st-sub-note">' + CHAIN_NAMES[w.chain] + ' · ' + st + fst + '</span>' + btn + '</span>';
   });
-  if (pnScope === 'obs' || wallets.some(w => !w.ledgerOn || w.pending || w.scanning)) fh += '<span style="flex-basis:100%"></span>' + wRows.join('');
+  if (pnScope === 'obs' || wallets.some(w => !w.ledgerOn || w.pending || w.scanning || (w.funding && (w.funding.stale || w.funding.catchingUp)))) fh += '<span style="flex-basis:100%"></span>' + wRows.join('');
   $('pnFund').innerHTML = fh; $('pnFund').style.display = wallets.length ? 'flex' : 'none';
   if (!wallets.length) { $('pnTable').innerHTML = '<div class="sn-empty">' + (pnScope === 'own' ? '该范围没有标「自有」的钱包<br>到总览页「💼 管理钱包」里把你自己的钱包点成「自有」' : '没有观察钱包') + '</div>'; $('pnNote').textContent = ''; return; }
   if (!rows.length) { $('pnTable').innerHTML = '<div class="sn-empty">这些钱包没有仓位记录' + (pnScope === 'obs' && !ledgerOn ? '<br>观察钱包默认只看活跃仓; 要历史仓位和真实成本, 在上方给它「开账本」' : '') + '</div>'; $('pnNote').textContent = ''; return; }

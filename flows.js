@@ -89,6 +89,37 @@ function fundSelected(chainId, wallets) {
   const s = new Set(sel.map(a => normAddr(chainId, a)));
   return on.filter(w => s.has(normAddr(chainId, w.address)));
 }
+// 钱包盈亏账本的钱包 (pnl-config.json, 与各链 pnlSelected 同语义): 未设置 = 自有 + 开账本的观察; 数组 = 勾选子集 ∪ 开账本的; 停用 = 无
+function pnlSelected(chainId, wallets) {
+  let c = { enabled: true, wallets: {} };
+  try { const j = JSON.parse(fs.readFileSync(path.join(__dirname, 'pnl-config.json'), 'utf8')); c = { enabled: j.enabled !== false, wallets: (j.wallets && typeof j.wallets === 'object') ? j.wallets : {} }; } catch {}
+  if (!c.enabled) return [];
+  const on = wallets.filter(w => w.enabled !== false);
+  const sel = c.wallets[chainId];
+  if (!Array.isArray(sel)) return on.filter(w => w.own === true || w.ledger === true);
+  const s = new Set(sel.map(a => normAddr(chainId, a)));
+  return on.filter(w => s.has(normAddr(chainId, w.address)) || w.ledger === true);
+}
+// 充提队列 = 资金查询勾选 ∪ 账本钱包 (2026-10-06: 盈亏页「总体盈亏」要每个账本钱包都有净入金; 此前只开账本的观察钱包不进队列, 旧条目冻结却仍当完整数据)
+function scanWallets(chainId, wallets) {
+  let on = true;
+  try { on = JSON.parse(fs.readFileSync(path.join(__dirname, 'fund-config.json'), 'utf8')).enabled !== false; } catch {}
+  if (!on) return [];   // 「钱包资金查询」总开关关着: 充提也不扫 (与 fundSelected 同)
+  const seen = new Set(), out = [];
+  for (const w of [...fundSelected(chainId, wallets), ...pnlSelected(chainId, wallets)]) {
+    const k = normAddr(chainId, w.address);
+    if (!seen.has(k)) { seen.add(k); out.push(w); }
+  }
+  return out;
+}
+const scanMemo = {};   // 链 -> { ts, set }: fundingOf 每钱包都要查「在不在当前队列」, 5s 内复用免得反复读两份配置
+function scanSet(chainId, wallets) {
+  const m = scanMemo[chainId];
+  if (m && Date.now() - m.ts < 5000) return m.set;
+  const set = new Set(scanWallets(chainId, wallets).map(w => normAddr(chainId, w.address)));
+  scanMemo[chainId] = { ts: Date.now(), set };
+  return set;
+}
 
 // ---- 计价 ----
 function curPrice(chainId, token) {
@@ -404,14 +435,17 @@ async function scanSolWallet(addr, monitored, deadline) {
 
 // ---- 队列 ----
 const running = {};
-// wallets: 该链全部钱包配置 (含停用/观察, 用来判「内部」); 只扫资金查询勾选的 (默认自有)
+const queued = {};   // 链 -> 上一轮充提队列的地址集 (fundingOf 没带钱包表时判旧条目用)
+// wallets: 该链全部钱包配置 (含停用/观察, 用来判「内部」); 只扫 资金查询勾选 ∪ 账本钱包 (scanWallets; 2026-10-06 前只有前者)
 async function runQueue(chainId, wallets, opts = {}) {
   if (!enabled(chainId) || running[chainId]) return;
   running[chainId] = true;
   const deadline = Date.now() + (opts.budgetMs || 180 * 1000);
   try {
     const monitored = new Set(wallets.map(w => normAddr(chainId, w.address)));
-    for (const w of fundSelected(chainId, wallets)) {
+    const queue = scanWallets(chainId, wallets);
+    queued[chainId] = new Set(queue.map(w => normAddr(chainId, w.address)));
+    for (const w of queue) {
       if (Date.now() > deadline) break;
       const a = normAddr(chainId, w.address);
       try {
@@ -425,32 +459,41 @@ async function runQueue(chainId, wallets, opts = {}) {
 }
 
 // ---- 只读: 注入 /positions 的 idle 与 /pnl ----
-function fundingOf(chainId, addr) {
-  const W = cacheOf(chainId).wallets[normAddr(chainId, addr)];
+// wallets (可选, 该链钱包表): 给了就判「还在不在当前充提队列」, 不在的旧条目 (勾选 / 账本关掉后留下) 不会再续扫 → stale + 停扫时间, 消费端不计入净入金;
+//   没给就按上一轮队列判 (2026-10-06; 此前旧条目一律 partial:false 当完整数据, 停扫后的提币没记, 盈亏页「总体盈亏」离谱)
+function fundingOf(chainId, addr, wallets) {
+  const k = normAddr(chainId, addr);
+  const W = cacheOf(chainId).wallets[k];
   if (!W || (!W.updatedAt && W.stopped !== 'budget')) return null;
   if (W.stopped === 'budget') return { partial: true };
-  return { inUSD: W.inUSD || 0, outUSD: W.outUSD || 0, netUSD: (W.inUSD || 0) - (W.outUSD || 0), partial: false, catchingUp: W.stopped === 'rpc',
+  const out = { inUSD: W.inUSD || 0, outUSD: W.outUSD || 0, netUSD: (W.inUSD || 0) - (W.outUSD || 0), partial: false, catchingUp: W.stopped === 'rpc',
     events: W.events.map(({ rp, ...e }) => e) };
+  const sel = wallets ? scanSet(chainId, wallets) : queued[chainId];
+  if (sel && !sel.has(k)) { out.stale = true; out.staleAt = W.updatedAt || 0; out.catchingUp = false; }
+  return out;
 }
 function fundingSummary(f) {
   if (!f) return null;
   if (f.partial) return { inUSD: 0, outUSD: 0, netUSD: 0, partial: true, catchingUp: false };
-  return { inUSD: f.inUSD, outUSD: f.outUSD, netUSD: f.netUSD, partial: false, catchingUp: !!f.catchingUp };
+  const s = { inUSD: f.inUSD, outUSD: f.outUSD, netUSD: f.netUSD, partial: false, catchingUp: !!f.catchingUp };
+  if (f.stale) { s.stale = true; s.staleAt = f.staleAt || 0; }   // 旧条目: 数字留着给前端标「停在 X」, 不计净入金
+  return s;
 }
 // idle.byWallet[a].funding + idle.funding 汇总 (fOf: 地址 → fundingOf 形状 | null)
 function injectIdle(idle, fOf) {
   if (!idle || !idle.byWallet) return;
-  let fin = 0, fout = 0, anyData = false; const partialNames = [];
+  let fin = 0, fout = 0, anyData = false; const partialNames = [], staleNames = [];
   for (const [a, wI] of Object.entries(idle.byWallet)) {
     const f = fOf(a);
     if (!f) { delete wI.funding; continue; }
     anyData = true;
     wI.funding = f;
     if (f.partial) { partialNames.push(wI.name); continue; }
+    if (f.stale) { staleNames.push(wI.name); continue; }   // 2026-10-06: 过期条目不进合计
     fin += f.inUSD; fout += f.outUSD;
   }
-  if (anyData) idle.funding = { inUSD: fin, outUSD: fout, netUSD: fin - fout, partialWallets: partialNames };
+  if (anyData) idle.funding = { inUSD: fin, outUSD: fout, netUSD: fin - fout, partialWallets: partialNames, staleWallets: staleNames };
   else delete idle.funding;
 }
 
-module.exports = { initSol, enabled, runQueue, fundingOf, fundingSummary, injectIdle, fundSelected, ROUND_MS, _test: { solLegs, solCounterparty, scanEvmWallet, scanSolWallet, cacheOf } };
+module.exports = { initSol, enabled, runQueue, fundingOf, fundingSummary, injectIdle, fundSelected, scanWallets, ROUND_MS, _test: { solLegs, solCounterparty, scanEvmWallet, scanSolWallet, cacheOf } };

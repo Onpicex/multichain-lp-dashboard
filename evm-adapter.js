@@ -982,18 +982,37 @@ async function poolPriceNearBlock(chainId, spec, targetBlock) {
 
 // 分段 getLogs: rh RPC 对全范围/大窗口扫描会间歇性 -32000/超时 (2026-09-03 实测),
 // 一律分段扫+段间小憩; 任一段重试后仍失败则抛出, 由调用方按「本轮拿不到」处理
+// 2026-10-06: rh 官方 RPC 收紧 —— 单段 getLogs 块跨度 (无 address 3 万 / 有 address 10 万) 或命中条数 (1 万条) 超限即报错,
+// 以前固定 100 万/500 万块一段, 热门池 (V4 领费扫描) 每 5 分钟撞一次 "logs matched by query exceeds limit", 游标卡死不前进;
+// 现在撞到上限就缩窗重扫同一段 (RPC 明说的块上限照它走, 否则 ÷4), 成功后逐段放大回原窗; 其它错误仍重试 3 次后抛出 (与原 withRetry 一致)。
 async function scanLogsChunked(chainId, baseFilter, fromBlock, chunk = 5000000, toBlock = null) {
   const st = chainState(chainId);
-  chunk = Math.min(chunk, EVM_CHAINS[chainId].logChunk || Infinity);   // arc: 单段 ≤ 9999
+  const cap = Math.min(chunk, EVM_CHAINS[chainId].logChunk || Infinity);   // arc: 单段 ≤ 9999
+  chunk = cap;
   const latest = toBlock != null ? toBlock : await st.provider.getBlockNumber();
   const all = [];
-  for (let f = fromBlock; f <= latest; f += chunk) {
+  let f = fromBlock, tries = 0;
+  while (f <= latest) {
     const to = Math.min(f + chunk - 1, latest);
-    const logs = await withRetry(() => st.provider.send('eth_getLogs', [{
-      ...baseFilter, fromBlock: '0x' + f.toString(16), toBlock: '0x' + to.toString(16),
-    }]), 3, 1000);
+    let logs;
+    try {
+      logs = await st.provider.send('eth_getLogs', [{
+        ...baseFilter, fromBlock: '0x' + f.toString(16), toBlock: '0x' + to.toString(16),
+      }]);
+    } catch (e) {
+      const msg = String(e?.error?.message || e?.info?.error?.message || e?.message || '');
+      const m = /only (\d+) (?:blocks )?are allowed/i.exec(msg);
+      if (chunk > 1000 && (m || /exceeds limit|block range|query returned more than|too many results|response size/i.test(msg))) {
+        chunk = (m && Number(m[1]) > 0 && Number(m[1]) < chunk) ? Number(m[1]) : Math.max(1000, Math.floor(chunk / 4));
+        tries = 0; await sleep(300); continue;
+      }
+      if (++tries >= 3) throw e;
+      await sleep(1000 * tries); continue;
+    }
     all.push(...logs);
-    if (f + chunk <= latest) await sleep(EVM_CHAINS[chainId].logGapMs || 120);
+    f = to + 1; tries = 0;
+    if (chunk < cap) chunk = Math.min(chunk * 2, cap);
+    if (f <= latest) await sleep(EVM_CHAINS[chainId].logGapMs || 120);
   }
   return all;
 }
@@ -2001,6 +2020,28 @@ function pnlSelected(chainId, WALLETS) {
   if (Array.isArray(pc.wallets[chainId])) return pick(pc.wallets[chainId]).concat(WALLETS.filter(w => w.ledger === true && !pc.wallets[chainId].some(a => String(a).toLowerCase() === w.address.toLowerCase())));
   return ledgerWallets(WALLETS);   // 未单独设置 = 自有 + 手动开了账本的观察钱包
 }
+// 充提队列 (fundingFromLogs 链) = 钱包资金查询勾选 ∪ 盈亏账本钱包 (启用中的)
+//   2026-10-06: 盈亏页「总体盈亏 = 总资产 − 净入金」要每个账本钱包都有净入金; 此前只开了账本的观察钱包不进队列,
+//   它在勾选口径收窄前留下的旧缓存条目冻结在最后一次扫描, 却仍以 partial:false 交给前端 → 停扫后的大额提币没记, 盈亏算成巨亏
+function fundingWallets(chainId) {
+  const fundCfg = loadFundCfgEvm();
+  if (!fundCfg.enabled) return [];   // 「钱包资金查询」总开关关着: 余额都不查, 充提也不扫
+  const active = loadActiveWallets(chainId);
+  const seen = new Set(), out = [];
+  for (const w of [...fundSelected(fundCfg, chainId, active), ...pnlSelected(chainId, active)]) {
+    const k = w.address.toLowerCase();
+    if (!seen.has(k)) { seen.add(k); out.push(w); }
+  }
+  return out;
+}
+const fundingSetMemo = {};   // 链 -> { ts, set }: rhFundingOf 每钱包都要查「在不在当前队列」, 5s 内复用免得反复读配置文件
+function fundingScanSet(chainId) {
+  const m = fundingSetMemo[chainId];
+  if (m && Date.now() - m.ts < 5000) return m.set;
+  const set = new Set(fundingWallets(chainId).map(w => w.address.toLowerCase()));
+  fundingSetMemo[chainId] = { ts: Date.now(), set };
+  return set;
+}
 // 兜底快照按当前勾选过滤 (配置变更后旧快照可能含未勾选钱包)
 function filterIdleByWallets(idle, walletsSel) {
   if (!idle || !idle.byWallet) return idle;
@@ -2161,10 +2202,15 @@ async function fundingBlockTs(chainId, block) {
   return 0;
 }
 // 自适应分段单方向扫描; stopped: null=完成 | 'budget'=量超限(bot) | 'rpc'=段失败(下轮续)
+//   2026-10-06: rh 官方 RPC 现在限 eth_getLogs 单段 ≤ 30000 块 (无 address 过滤), 原来最小只缩到 15 万块就止步 →
+//   落后一个月的钱包每轮零进展, 永远「回补中」. 现从报错 (only N are allowed) 直接学到上限并记在链状态里 (下次不必再撞),
+//   429 / 瞬时错误同段退避重试 3 次, 单段最小缩到 2000 块才止步
 async function scanTransfersAdaptive(chainId, topics, fromBlock, toBlock, budget) {
   const st = chainState(chainId);
   const out = [];
-  let f = fromBlock, chunk = Math.min(5000000, EVM_CHAINS[chainId].logChunk || 5000000), stopped = null;
+  const cfgMax = Math.min(5000000, EVM_CHAINS[chainId].logChunk || 5000000);
+  let cap = Math.min(cfgMax, st.logsRangeCap || cfgMax);
+  let f = fromBlock, chunk = cap, stopped = null, retries = 0;
   while (f <= toBlock) {
     if (out.length > budget) { stopped = 'budget'; break; }
     const to = Math.min(f + chunk - 1, toBlock);
@@ -2173,11 +2219,15 @@ async function scanTransfersAdaptive(chainId, topics, fromBlock, toBlock, budget
         fromBlock: '0x' + f.toString(16), toBlock: '0x' + to.toString(16), topics,
       }]);
       for (const l of logs) out.push(l);
-      f = to + 1;
-      if (chunk < 5000000) chunk = Math.min(chunk * 2, 5000000);
+      f = to + 1; retries = 0;
+      if (chunk < cap) chunk = Math.min(chunk * 2, cap);
       await sleep(700);
     } catch (e) {
-      if (chunk > 150000) { chunk = Math.floor(chunk / 4); await sleep(1500); continue; }
+      const msg = String(e?.error?.message || e?.info?.error?.message || e?.message || '');
+      const m = /only (\d+) (?:blocks )?are allowed/i.exec(msg);
+      if (m && Number(m[1]) > 0 && Number(m[1]) < chunk) { cap = chunk = Number(m[1]); st.logsRangeCap = cap; await sleep(300); continue; }   // RPC 明说上限: 照它走
+      if (retries < 3 && /429|too many requests|rate ?limit|timeout|timed out|ECONNRESET|socket hang up|fetch failed/i.test(msg)) { retries++; await sleep(3000 * retries); continue; }
+      if (chunk > 2000) { chunk = Math.max(2000, Math.floor(chunk / 4)); retries = 0; await sleep(1500); continue; }
       stopped = 'rpc'; break;
     }
   }
@@ -2275,26 +2325,27 @@ function rhFundingOf(chainId, a) {
   if (!f || (!f.updatedAt && f.stopped !== 'budget')) return null;
   if (f.stopped === 'budget') return { partial: true };
   const exact = new Set([...Object.values(EVM_CHAINS[chainId].stables), 'WETH']);
-  // 2026-10-02: 原生 ETH 没扫完 (blockscout 取不到 / 还没扫过) 也算追赶中; 不在充提队列里的钱包 (09-28 前留下的旧条目) 不会再扫, 不标
-  const sel = fundingQueued[chainId];
-  const nPending = !!f.nStopped || (!(f.nTo >= 0) && (!sel || sel.has(a.toLowerCase())));
-  return { inUSD: f.inUSD || 0, outUSD: f.outUSD || 0, netUSD: (f.inUSD || 0) - (f.outUSD || 0), partial: false, catchingUp: f.stopped === 'rpc' || nPending,
+  const base = { inUSD: f.inUSD || 0, outUSD: f.outUSD || 0, netUSD: (f.inUSD || 0) - (f.outUSD || 0), partial: false,
     events: (f.events || []).map(e => (e.tok || exact.has(e.sym)) ? e : { ...e, ax: 1 }) };
+  // 2026-10-06: 不在当前充提队列里的钱包 (勾选 / 账本关掉后留下的旧条目) 不会再续扫 → 标 stale 带停扫时间, 各消费端不计入净入金
+  //   (此前当完整数据交出去, 盈亏页「总体盈亏」拿冻结的净入金减现值, 停扫后的提币全算成亏损)
+  if (!fundingScanSet(chainId).has(a.toLowerCase())) return { ...base, stale: true, staleAt: f.updatedAt || 0, catchingUp: false };
+  // 2026-10-02: 原生 ETH 没扫完 (blockscout 取不到 / 还没扫过) 也算追赶中
+  const nPending = !!f.nStopped || !(f.nTo >= 0);
+  return { ...base, catchingUp: f.stopped === 'rpc' || nPending };
 }
 // 充提记录 / 净入金从缓存注入 idle (零 RPC, 幂等): 仓位刷新时注入一次, 接口返回时再注一次 —— 后台队列刚扫完的不必等下轮仓位刷新 (重启后首轮刷新常早于扫描)
 function injectFunding(chainId, idle) {
   if (!idle || !idle.byWallet) return;
   if (EVM_CHAINS[chainId].fundingFromLogs) flows.injectIdle(idle, a => rhFundingOf(chainId, a));
-  else if (flows.enabled(chainId)) flows.injectIdle(idle, a => flows.fundingOf(chainId, a));
+  else if (flows.enabled(chainId)) { const ws = loadWallets(chainId); flows.injectIdle(idle, a => flows.fundingOf(chainId, a, ws)); }   // 带钱包表: 不在扫描范围的旧条目标 stale
 }
 const fundingRunning = {};
-const fundingQueued = {};   // 链 -> 本轮充提队列的地址集 (rhFundingOf 判「原生 ETH 还没扫」要不要标追赶中)
 async function runFundingQueue(chainId) {
   if (fundingRunning[chainId]) return;
   fundingRunning[chainId] = true;
   try {
-    const WALLETS = fundSelected(loadFundCfgEvm(), chainId, loadActiveWallets(chainId));
-    fundingQueued[chainId] = new Set(WALLETS.map(w => w.address.toLowerCase()));
+    const WALLETS = fundingWallets(chainId);   // 资金查询勾选 ∪ 账本钱包 (2026-10-06)
     for (const w of WALLETS) {
       try {
         const r = await scanWalletFunding(chainId, w);
@@ -2695,7 +2746,7 @@ async function fetchInner(chainId, forceRefresh) {
   }
 
   // 强刷时同步跑一轮初始资金增量续扫 (每钱包 1 段×2 方向, 秒级), 让刷新按钮把资金数据一并带新
-  if (cfg.fundingFromLogs && fundSelected(fundCfg, chainId, fundWallets).length && forceRefresh) {
+  if (cfg.fundingFromLogs && forceRefresh && fundingWallets(chainId).length) {
     await runFundingQueue(chainId).catch(e => console.error(`[${chainId}] funding sync:`, e.message?.slice(0, 80)));
   }
   // Ankr 链的充提扫描走共用串行队列 (可能正被账本占着), 强刷只踢一下不等, 结果下次刷新带上
@@ -2765,7 +2816,7 @@ function mountEvmRoutes(app, adminGuard) {
       for (const [a, wI] of Object.entries(data?.idle?.byWallet || {})) if (a.toLowerCase() === addr) idleUSD = wI.totalUSD || 0;
       let funding = null;
       if (EVM_CHAINS[chainId].fundingFromLogs) funding = flows.fundingSummary(rhFundingOf(chainId, addr));
-      else if (flows.enabled(chainId)) funding = flows.fundingSummary(flows.fundingOf(chainId, addr));
+      else if (flows.enabled(chainId)) funding = flows.fundingSummary(flows.fundingOf(chainId, addr, loadWallets(chainId)));
       res.json({
         chain: chainId, wallet: { address: addr, name: wcfg?.name || liveWallet?.name || addr, enabled: wcfg ? wcfg.enabled !== false : true },
         ...rep, idleUSD, lpUSD: liveWallet ? (liveWallet.totalUSD || 0) : 0, funding, dataTs: data?.timestamp || 0,

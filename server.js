@@ -1835,7 +1835,7 @@ async function _fetchPositionsInner(forceRefresh = false) {
   // 充提记录 / 净入金: 从 flows 缓存注入 (后台队列回填, 此处零 RPC); 强刷踢一轮不等 (Ankr 队列可能正被账本占着)
   if (flows.enabled('bsc')) {
     if (forceRefresh) setImmediate(() => flows.runQueue('bsc', WALLETS).catch(e => console.error('[bsc] flows:', e.message?.slice(0, 80))));
-    if (idle && idle.byWallet) flows.injectIdle(idle, a => flows.fundingOf('bsc', a));
+    if (idle && idle.byWallet) flows.injectIdle(idle, a => flows.fundingOf('bsc', a, WALLETS));
   }
 
   const result = {
@@ -2101,7 +2101,7 @@ app.get('/api/pnl/all', async (req, res) => {
       for (const r of (rep.positions || [])) out.positions.push({ ...r, chain: ch, wallet: w.name, walletAddress: w.address, wk });
       out.lpUSD += rep.lpUSD || 0;
       if (typeof rep.idleUSD === 'number') out.idleUSD += rep.idleUSD;
-      if (rep.funding && !rep.funding.partial && typeof rep.funding.netUSD === 'number') { fin += rep.funding.netUSD; anyFund = true; }
+      if (rep.funding && !rep.funding.partial && !rep.funding.stale && typeof rep.funding.netUSD === 'number') { fin += rep.funding.netUSD; anyFund = true; }   // stale (2026-10-06): 旧条目不计
       if (rep.scanning) out.ledgerScanning = true;
       if (rep.dataTs > out.dataTs) out.dataTs = rep.dataTs;
     }
@@ -2122,7 +2122,7 @@ app.get('/api/pnl', (req, res) => {
   const rep = pnlLedger.walletReport('bsc', addr, liveWallet, selected);
   let idleUSD = null;
   for (const [a, wI] of Object.entries(data?.idle?.byWallet || {})) if (a.toLowerCase() === addr) idleUSD = wI.totalUSD || 0;
-  res.json({ chain: 'bsc', wallet: { address: addr, name: wcfg?.name || liveWallet?.name || addr, enabled: wcfg ? wcfg.enabled !== false : true }, ...rep, idleUSD, lpUSD: liveWallet ? (liveWallet.totalUSD || 0) : 0, funding: flows.enabled('bsc') ? flows.fundingSummary(flows.fundingOf('bsc', addr)) : null, dataTs: data?.timestamp || 0,
+  res.json({ chain: 'bsc', wallet: { address: addr, name: wcfg?.name || liveWallet?.name || addr, enabled: wcfg ? wcfg.enabled !== false : true }, ...rep, idleUSD, lpUSD: liveWallet ? (liveWallet.totalUSD || 0) : 0, funding: flows.enabled('bsc') ? flows.fundingSummary(flows.fundingOf('bsc', addr, WALLETS)) : null, dataTs: data?.timestamp || 0,
     selected, ledgerEnabled: loadPnlCfg().enabled });
 });
 
@@ -2130,7 +2130,7 @@ app.get('/api/positions', async (req, res) => {
   try {
     const forceRefresh = req.query.refresh === 'true';
     const data = await fetchPositions(forceRefresh);
-    if (flows.enabled('bsc') && data && data.idle) flows.injectIdle(data.idle, a => flows.fundingOf('bsc', a));   // 后台刚扫完的充提即时可见 (零 RPC, 幂等)
+    if (flows.enabled('bsc') && data && data.idle) flows.injectIdle(data.idle, a => flows.fundingOf('bsc', a, WALLETS));   // 后台刚扫完的充提即时可见 (零 RPC, 幂等)
     res.json(data);
   } catch (err) {
     console.error('API error:', err);

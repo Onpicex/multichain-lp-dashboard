@@ -105,7 +105,7 @@ async function summarizeChain(chain, data, sel, prevChain, tls) {
       if (!allow.has(normAddr(chain, addr))) continue;
       const e = get(addr, w.name);
       e.idle += w.totalUSD || 0;
-      if (w.funding && typeof w.funding.netUSD === 'number' && !w.funding.partial) e.netIn = w.funding.netUSD;
+      if (w.funding && typeof w.funding.netUSD === 'number' && !w.funding.partial && !w.funding.stale) e.netIn = w.funding.netUSD;   // stale (2026-10-06): 不再续扫的旧条目不当净入金
     }
   }
   // 已实现盈亏 / 累计已领费: 各钱包 /pnl 报告 (全在内存, 便宜)
@@ -123,7 +123,7 @@ async function summarizeChain(chain, data, sel, prevChain, tls) {
       wallets[k].realized = any ? realized : 0;
       wallets[k].collected = collected;
       if (tls) { const tl = timelineOf(rep); if (tl) tls.set(`${chain}:${k}`, tl); }
-      if (wallets[k].netIn == null && rep.funding && typeof rep.funding.netUSD === 'number' && !rep.funding.partial) wallets[k].netIn = rep.funding.netUSD;
+      if (wallets[k].netIn == null && rep.funding && typeof rep.funding.netUSD === 'number' && !rep.funding.partial && !rep.funding.stale) wallets[k].netIn = rep.funding.netUSD;
     } catch (e) {
       // 2026-09-28 审计修复: /pnl 失败不再静默记 0 (已实现盈亏曲线会掉零): 沿用上一点该钱包的 realized/collected(/netIn) 并标 pnlStale。
       //   cost/np 来自本轮 /positions 的活跃仓字段, 与 /pnl 无关, 保留本轮值不用旧的
