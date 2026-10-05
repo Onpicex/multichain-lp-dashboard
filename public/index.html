@@ -534,8 +534,9 @@
   .d-val.fees { color: var(--yellow); }
   .d-val.gain { color: var(--green); }
   .d-val.loss { color: var(--red); }
-  /* 建仓至今差价副行/钱包名副行: 仅手机卡片显示(480 媒体块开启) */
-  .val-diff { display: none; }
+  /* 钱包名副行: 仅手机卡片显示(480 媒体块开启) */
+  /* 2026-10-06 用户要求: 桌面版仓位表「价值」数字下方也显示净利润及百分比 (原只在 ≤480px 手机版显示, 桌面 display:none) */
+  .val-diff { display: block; font-family: var(--mono); font-size: 10.5px; font-weight: 600; margin-top: 2px; }
   .val-diff.gain { color: var(--green); }
   .val-diff.loss { color: var(--red); }
   .pair-wallet { display: none; }
