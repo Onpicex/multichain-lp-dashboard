@@ -388,6 +388,7 @@
   .ftag.fgrp .fcount { font-family: var(--mono); font-size: 10px; opacity: 0.8; }
   #stTabs .ftag .fcount { margin-left: 7px; font-family: var(--mono); font-size: 10px; opacity: 0.75; }
   .ftag.fgrp .farrow { font-size: 10px; opacity: 0.7; margin-left: -2px; }
+  .ftag.hist { border-style: dashed; color: var(--text-muted); }   /* 2026-10-09 快照页: 已不在当前范围的历史钱包 */
   .ftag.fgrp.open { background: color-mix(in srgb, var(--gc) 10%, transparent); }
   .ftag.fgrp.active { background: color-mix(in srgb, var(--gc) 18%, transparent); font-weight: 600; }
   .fsub { display: inline-flex; align-items: center; gap: 6px; padding: 3px 6px 3px 8px; margin-left: -4px; border-radius: 8px; border: 1px dashed var(--gc); border-left: none; }
@@ -2487,6 +2488,9 @@ function snGainBetween(za, zb) {
   const dNet = (za.netIn != null && zb.netIn != null) ? zb.netIn - za.netIn : null;
   return { gain: (zb.np + zb.realized) - (za.np + za.realized), dTotal, dNet, flowKnown: dNet != null };
 }
+// 2026-10-09: 历史点里出现过、但已不在当前范围的钱包 (改了自有/观察标记, 或被移出快照参与名单) → 筛选按钮/明细行打「已移出」. 范围由后端 nowScope 给 (地址已按链规范化, 与记录点的 key 同一套)
+function snHist(ch, a) { const ns = snData && snData.nowScope && snData.nowScope[snSc]; if (!ns || !Array.isArray(ns[ch])) return false; return !ns[ch].includes(a); }
+const SN_HIST_TAG = '<span class="sn-tag" title="已不在当前范围 (管理钱包里改了标记, 或被移出快照的参与名单), 只出现在旧记录点">已移出</span>';
 function renderSnap() {
   if (!snData) return;
   const d = snSrc(); const meta0 = snData;
@@ -2515,12 +2519,13 @@ function renderSnap() {
         const open = openG === g, col = groupColor(g), mem = snGI.byG[g];
         h += '<button class="ftag fgrp' + (snWallet === 'g:' + g ? ' active' : '') + (open ? ' open' : '') + '" style="--gc:' + col + '" data-f="' + escH(open ? 'all' : 'g:' + g) + '" onclick="snSetWallet(this.dataset.f)"><span class="fdot"></span>' + escH(g) + '<span class="fcount">' + mem.length + '</span><span class="farrow">' + (open ? '▾' : '▸') + '</span></button>';
         // 2026-09-28 审计修复: 地址走 data 属性 (escH 进 onclick 的 JS 字符串挡不住: 属性值先 HTML 解码, &#39; 又变回单引号)
-        if (open) { h += '<span class="fsub" style="--gc:' + col + '">'; for (const [a, n] of mem) h += '<button class="ftag fwal' + (snWallet === a ? ' active' : '') + '" data-f="' + escH(a) + '" onclick="snSetWallet(this.dataset.f)" title="' + escH(n) + '">' + escH(groupRest(n) || n) + '</button>'; h += '</span>'; }
+        if (open) { h += '<span class="fsub" style="--gc:' + col + '">'; for (const [a, n] of mem) h += '<button class="ftag fwal' + (snWallet === a ? ' active' : '') + (snHist(snChain, a) ? ' hist' : '') + '" data-f="' + escH(a) + '" onclick="snSetWallet(this.dataset.f)" title="' + escH(n + (snHist(snChain, a) ? ' · 已移出当前范围, 只在旧记录点出现' : '')) + '">' + escH(groupRest(n) || n) + (snHist(snChain, a) ? ' · 已移出' : '') + '</button>'; h += '</span>'; }
       }
-      for (const [a, n] of snGI.singles) h += '<button class="ftag ' + (snWallet === a ? 'active' : '') + '" data-f="' + escH(a) + '" onclick="snSetWallet(this.dataset.f)">' + escH(n) + '</button>';
+      for (const [a, n] of snGI.singles) h += '<button class="ftag ' + (snWallet === a ? 'active' : '') + (snHist(snChain, a) ? ' hist' : '') + '" data-f="' + escH(a) + '" onclick="snSetWallet(this.dataset.f)" title="' + escH(snHist(snChain, a) ? '已移出当前范围, 只在旧记录点出现' : '') + '">' + escH(n) + (snHist(snChain, a) ? ' · 已移出' : '') + '</button>';
       h += '</div>';
     }
     tb.innerHTML = h; tb.classList.add('two-rows'); tb.style.display = 'block';
+    if (snChain !== 'all') { const nh = Object.keys(wmap[snChain] || {}).filter(a => snHist(snChain, a)).length; if (nh) $('snMeta').textContent += ' · ' + nh + ' 个钱包已移出当前范围 (虚线框, 只在旧记录点出现)'; }   // 2026-10-09
   }
 
   // 日级序列: 每日日切, 最新一条 = 今天 (随时间更新); 统计条只用改版后的记录 (旧版钱包范围不同, 不可比)
@@ -2630,11 +2635,11 @@ function snDetail(e, pe) {
   for (const blk of blocks) {
     const st = '--gc:' + groupColor(blk.g);
     b += snSubRow('<span class="sn-gdot"></span>' + escH(blk.g), '<span class="sn-gcount">' + blk.mem.length + ' 个钱包</span>', blk.z, blk.pz, 'sn-grp', st);
-    for (const [a, w] of blk.mem) b += snSubRow(escH(groupRest(w.name || '') || w.name || a), escH(sA(a)), one(w), pw && pw[a] ? one(pw[a]) : null, 'sn-gmem', st);
+    for (const [a, w] of blk.mem) b += snSubRow(escH(groupRest(w.name || '') || w.name || a) + (snHist(snChain, a) ? SN_HIST_TAG : ''), escH(sA(a)), one(w), pw && pw[a] ? one(pw[a]) : null, 'sn-gmem', st);
   }
   if (!selG) {
     const singles = ents.filter(([a]) => !inG.has(a)).sort((x, y) => (y[1].total || 0) - (x[1].total || 0));
-    for (const [a, w] of singles) b += snSubRow(escH(w.name || a), escH(sA(a)), one(w), pw && pw[a] ? one(pw[a]) : null);
+    for (const [a, w] of singles) b += snSubRow(escH(w.name || a) + (snHist(snChain, a) ? SN_HIST_TAG : ''), escH(sA(a)), one(w), pw && pw[a] ? one(pw[a]) : null);
   }
   return b ? head + b + '</tbody></table>' : empty;
 }

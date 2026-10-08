@@ -397,7 +397,10 @@ function mountSnapshot(app, adminGuard) {
     // 观察作用域: 日级全部 + 小时级只带最近 7 天 (钱包多, 省流量)
     const okeys = Object.keys(data.obs.days).sort();
     const obs = { days: okeys.map(k => data.obs.days[k]), hourly: data.obs.hourly.filter(e => Date.now() - e.ts <= 7 * 86400000) };
-    res.json({ days, hourly: data.hourly, m5, obs, totalDays: keys.length, ...statusPayload() });
+    // 2026-10-09: 当前范围 (自有 = 快照页签单独设置 ∪ 否则管理钱包标自有; 观察 = 其余). 前端拿它给「只在旧记录点出现、已不在范围」的钱包打「已移出」
+    const cfg = loadCfg(); const nowScope = { own: {}, obs: {} };
+    for (const ch of CHAINS) { nowScope.own[ch] = (Array.isArray(cfg.wallets[ch]) ? cfg.wallets[ch] : ownAddrs(ch)).map(a => normAddr(ch, a)); nowScope.obs[ch] = obsAddrs(ch).map(a => normAddr(ch, a)); }
+    res.json({ days, hourly: data.hourly, m5, obs, totalDays: keys.length, nowScope, ...statusPayload() });
   });
   app.post('/api/snapshot/now', adminGuard, async (req, res) => {
     try { res.json(await takeSnapshot()); } catch (e) { res.status(500).json({ error: e.message }); }

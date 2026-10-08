@@ -981,6 +981,7 @@ function dropSolWalletFromCache(addr) {
 }
 
 function mountSolRoutes(app, adminGuard) {
+  const bustPnl = () => { if (typeof app.locals.pnlCacheBust === 'function') app.locals.pnlCacheBust(); };   // 2026-10-09: 钱包增删改后清盈亏合并缓存 (server.js)
   // 钱包盈亏 (SOL): 无成本/无常损失来源 (仓位账户不存入金历史, 钱包换币史需逐笔解析交易), 只给活跃仓现值/手续费; 历史仓位不可用
   app.get('/api/sol/pnl', (req, res) => {
     const addr = String(req.query.wallet || '').trim();
@@ -1019,6 +1020,7 @@ function mountSolRoutes(app, adminGuard) {
     if (WALLETS.length >= 30) return res.status(400).json({ error: '最多支持 30 个地址' });
     WALLETS.push({ address: addr, name: name.trim() });
     saveWallets(WALLETS);
+    bustPnl();
     cache = { data: null, timestamp: 0 };
     console.log(`[SOL] Wallet added: ${name.trim()} (${addr})`);
     res.json({ ok: true, wallets: WALLETS });
@@ -1029,6 +1031,7 @@ function mountSolRoutes(app, adminGuard) {
     if (idx === -1) return res.status(404).json({ error: '地址不存在' });
     const removed = WALLETS.splice(idx, 1)[0];
     saveWallets(WALLETS);
+    bustPnl();
     ownSync.syncOwnFlag('sol', removed.address, false);   // 2026-10-09: 删除 = 从四项功能的显式「参与」名单剔除
     cache = { data: null, timestamp: 0 };
     console.log(`[SOL] Wallet removed: ${removed.name}`);
@@ -1070,6 +1073,7 @@ function mountSolRoutes(app, adminGuard) {
     if (newLedger !== undefined) { if (newLedger) WALLETS[idx].ledger = true; else delete WALLETS[idx].ledger; }
     if (newLedger === true) setImmediate(kickSolLedger);
     saveWallets(WALLETS);
+    bustPnl();
     // 2026-10-09: 自有/观察标记或地址变了 → 同步四项功能 (资金查询/盈亏/快照/通知) 的显式「参与」名单, 以标记为准 (own-sync.js; 此前切「观察」后名单里还留着, 它仍出现在「自有」范围)
     if (addrChanged) ownSync.syncAddrChange('sol', old.address, WALLETS[idx].address, WALLETS[idx].own === true);
     else if (newOwn !== undefined && newOwn !== (old.own === true)) ownSync.syncOwnFlag('sol', old.address, newOwn);

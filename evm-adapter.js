@@ -2796,6 +2796,7 @@ function ledgerApi() {
 }
 
 function mountEvmRoutes(app, adminGuard) {
+  const bustPnl = () => { if (typeof app.locals.pnlCacheBust === 'function') app.locals.pnlCacheBust(); };   // 2026-10-09: 钱包增删改后清盈亏合并缓存 (server.js)
   ledger.init({ ...ledgerApi(),
     ledgerWallets: chainId => pnlSelected(chainId, loadActiveWallets(chainId)), ledgerEnabled: () => loadPnlCfgEvm().enabled });
   for (const chainId of Object.keys(EVM_CHAINS)) {
@@ -2834,6 +2835,7 @@ function mountEvmRoutes(app, adminGuard) {
       if (wallets.length >= 30) return res.status(400).json({ error: '最多支持 30 个地址' });
       wallets.push({ address: addr, name: name.trim() });
       saveWallets(chainId, wallets);
+      bustPnl();
       // 不清缓存: 老数据继续对外显示, 后台立刻补一轮把新钱包带进来
       // (曾经清空整链缓存 → 页面数据瞬间消失, 且 RPC 抖动时连兜底都没有)
       kickRefresh(chainId);
@@ -2847,6 +2849,7 @@ function mountEvmRoutes(app, adminGuard) {
       if (idx === -1) return res.status(404).json({ error: '地址不存在' });
       const removed = wallets.splice(idx, 1)[0];
       saveWallets(chainId, wallets);
+      bustPnl();
       ownSync.syncOwnFlag(chainId, addr, false);   // 2026-10-09: 删除 = 从四项功能的显式「参与」名单剔除
       // 从缓存里剔除该钱包立即生效 (合计/统计就地重算), 其余数据保留; 后台补一轮刷新
       dropWalletFromCache(chainId, addr);
@@ -2891,6 +2894,7 @@ function mountEvmRoutes(app, adminGuard) {
       if (newLedger !== undefined) { if (newLedger) wallets[idx].ledger = true; else delete wallets[idx].ledger; }
       if (newLedger === true) kickLedger(chainId);
       saveWallets(chainId, wallets);
+      bustPnl();
       // 2026-10-09: 自有/观察标记或地址变了 → 同步四项功能 (资金查询/盈亏/快照/通知) 的显式「参与」名单, 以标记为准 (own-sync.js; 此前切「观察」后名单里还留着, 它仍出现在「自有」范围)
       if (addrChanged) ownSync.syncAddrChange(chainId, cur, wallets[idx].address, wallets[idx].own === true);
       else if (newOwn !== undefined && newOwn !== (old.own === true)) ownSync.syncOwnFlag(chainId, cur, newOwn);

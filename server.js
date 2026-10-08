@@ -1993,6 +1993,7 @@ app.post('/api/wallets', adminGuard, (req, res) => {
   if (WALLETS.length >= 30) return res.status(400).json({ error: '最多支持 30 个地址' });
   WALLETS.push({ address: addr, name: nm });
   saveWallets(WALLETS);
+  pnlCacheBust();   // 2026-10-09: 钱包变更后盈亏合并缓存立刻失效
   // 2026-09-28 审计修复: 不再 cache.data=null 整链空窗; 后台补一轮把新钱包带进来, 老数据照常可看
   kickBscRefresh();
   console.log(`Wallet added: ${nm} (${addr})`);
@@ -2005,6 +2006,7 @@ app.delete('/api/wallets/:address', adminGuard, (req, res) => {
   if (idx === -1) return res.status(404).json({ error: '地址不存在' });
   const removed = WALLETS.splice(idx, 1)[0];
   saveWallets(WALLETS);
+  pnlCacheBust();   // 2026-10-09: 钱包变更后盈亏合并缓存立刻失效
   ownSync.syncOwnFlag('bsc', addr, false);   // 2026-10-09: 删除 = 从四项功能的显式「参与」名单剔除
   dropBscWalletFromCache(addr);   // 2026-09-28 审计修复: 就地剔出缓存 (含 savePosCache), 不再整链空窗
   console.log(`Wallet removed: ${removed.name} (${addr})`);
@@ -2046,6 +2048,7 @@ app.patch('/api/wallets/:address', adminGuard, (req, res) => {
   if (newLedger !== undefined) { if (newLedger) WALLETS[idx].ledger = true; else delete WALLETS[idx].ledger; }
   if (newLedger === true && bscKickLedger) setImmediate(bscKickLedger);
   saveWallets(WALLETS);
+  pnlCacheBust();   // 2026-10-09: 钱包变更后盈亏合并缓存立刻失效
   // 2026-10-09: 自有/观察标记或地址变了 → 同步四项功能 (资金查询/盈亏/快照/通知) 的显式「参与」名单, 以标记为准 (own-sync.js; 此前切「观察」后名单里还留着, 它仍出现在「自有」范围)
   if (addrChanged) ownSync.syncAddrChange('bsc', cur, WALLETS[idx].address, WALLETS[idx].own === true);
   else if (newOwn !== undefined && newOwn !== (old.own === true)) ownSync.syncOwnFlag('bsc', cur, newOwn);
@@ -2083,6 +2086,9 @@ function fetchLocalJson(pathname, timeoutMs = 30000) {
   return fetch(`http://127.0.0.1:${PORT}${pathname}`, { signal: AbortSignal.timeout(timeoutMs) }).then(r => r.ok ? r.json() : null).catch(() => null);
 }
 const pnlAllCache = {};   // `${scope}:${chain}` -> { ts, data }
+// 2026-10-09: 钱包增删改 / 盈亏参与名单一变就清掉合并缓存. 原来只按 60s 过期: 用户在设置页关掉某钱包的「参与」后, 盈亏页一分钟内仍回旧名单 (07:15 实例)
+function pnlCacheBust() { for (const k of Object.keys(pnlAllCache)) delete pnlAllCache[k]; }
+app.locals.pnlCacheBust = pnlCacheBust;   // evm-adapter / sol-adapter 的钱包增删改也要调
 app.get('/api/pnl/all', async (req, res) => {
   const scope = req.query.scope === 'obs' ? 'obs' : 'own';
   const chainQ = String(req.query.chain || '');
@@ -2306,6 +2312,7 @@ app.post('/api/pnl/config', adminGuard, (req, res) => {
   } catch (e) { console.error('[config] 写入失败:', e.message); return res.status(500).json({ error: '写入失败, 请查看服务日志' }); }   // 2026-09-28 审计修复: 不把含文件路径的错误文本回给前端
   const ch = String(body._chain || '');
   try { if (next.enabled && evmKickLedger && ['rh', 'arc', 'base', 'eth'].includes(ch)) evmKickLedger(ch); if (next.enabled && ch === 'bsc' && bscKickLedger) bscKickLedger(); if (next.enabled && ch === 'sol' && solKickLedger) solKickLedger(); } catch {}
+  pnlCacheBust();   // 2026-10-09
   console.log(`[pnl] config saved: enabled=${next.enabled}, chains=${Object.keys(next.wallets).join(',') || '(沿用资金查询)'}`);
   res.json(loadPnlCfg());
 });
