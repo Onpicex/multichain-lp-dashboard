@@ -232,7 +232,16 @@
   .st-eff-name { font-size: 11.5px; font-weight: 600; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; }
   .st-eff-name.off { color: var(--text-muted); text-decoration: line-through; }
   .st-eff .nm-test-btn { margin-left: 6px; }
-  .st-table th:nth-child(2), .st-table td.st-addr, .st-table th:nth-child(3), .st-table td.st-state { text-align: left; }
+  .st-table th:nth-child(2), .st-table td.st-addr, .st-table th:nth-child(3), .st-table td.st-own, .st-table th:nth-child(4), .st-table td.st-state { text-align: left; }
+  .st-table td.st-own { width: 56px; }
+  .st-table td.st-own .wm-own-btn { margin-right: 0; }
+  .st-own-tag { display: inline-block; font-family: var(--font); font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 9px; border: 1px solid var(--border); color: var(--text-muted); }
+  .st-own-tag.on { color: var(--green); border-color: rgba(34,197,94,0.45); background: var(--green-dim); }
+  @media (max-width: 480px) {   /* 手机: 五列放不下 → 地址截断、隐藏「状态」列 (停用已由整行变淡+删除线表达), 开关列别被挤出屏幕 */
+    .st-table td.st-addr { max-width: 92px; overflow: hidden; text-overflow: ellipsis; }
+    .st-table th:nth-child(4), .st-table td.st-state { display: none; }
+    .st-table td.st-own, .st-table td.st-sw { width: auto; }
+  }
   .st-table td.st-name { font-family: var(--font); font-weight: 600; color: var(--text); }
   .st-table td.st-addr { font-size: 11.5px; color: var(--text-dim); user-select: all; }
   .st-table td.st-sw { width: 60px; }
@@ -1005,11 +1014,13 @@
       <div class="st-head">
         <div class="st-head-main">
           <div class="st-title">管理钱包 <span class="st-badge" id="wmStCount">0</span></div>
-          <div class="st-desc">在总览页显示「💼 管理钱包」面板（添加 / 编辑 / 删除钱包）· 关闭后面板隐藏，防止误删误改，需要增删钱包时再打开</div>
+          <div class="st-desc">在总览页显示「💼 管理钱包」面板（添加 / 编辑 / 删除钱包）· 关闭后面板隐藏，防止误删误改，需要增删钱包时再打开 · 下表可直接切换每个钱包的「自有 / 观察」与「启用 / 停用」</div>
         </div>
         <label class="switch" title="显示/隐藏总览页的管理钱包面板"><input type="checkbox" id="wmEnabled" onchange="saveUiCfg()"><span class="switch-track"></span></label>
       </div>
       <div class="nm-status" id="wmStStatus"></div>
+      <div class="st-sub">本链钱包 <span class="st-sub-note">自有 = 你自己的，资金查询 / 快照 / 盈亏 / 通知默认都看它；观察 = 别人的，默认只看仓位，要让它参与哪项功能，到对应功能页打开它的「参与」开关</span></div>
+      <div class="sn-tw" id="wmStList"></div>
       <div class="wm-error" id="wmStError"></div>
     </section>
     <section class="st-sub-page" data-st="fund" style="display:none">
@@ -1020,7 +1031,7 @@
         </div>
         <label class="switch" title="启用/关闭本功能"><input type="checkbox" id="fdEnabled" onchange="saveFdCfg()"><span class="switch-track"></span></label>
       </div>
-      <div class="st-sub">生效的钱包 <span class="st-sub-note">默认 = 管理钱包里标「自有」的；观察钱包不查余额、不计入总价值</span></div>
+      <div class="st-sub">参与的钱包 <span class="st-sub-note">默认 = 管理钱包里标「自有」的；观察钱包默认不计入余额与总价值，要算进来就打开它的开关（本链即改为单独设置）</span></div>
       <div class="sn-tw" id="fdList"></div>
       <div class="wm-error" id="fdError"></div>
     </section>
@@ -1028,11 +1039,11 @@
       <div class="st-head">
         <div class="st-head-main">
           <div class="st-title">钱包盈亏</div>
-          <div class="st-desc">左侧「钱包盈亏」页只列自有钱包，账本（真实开仓成本与历史仓位）也只给自有钱包扫；自有 / 观察在总览页「管理钱包」里标</div>
+          <div class="st-desc">左侧「钱包盈亏」页的「自有」范围与账本（真实开仓成本与历史仓位）默认只看自有钱包；在下表打开观察钱包的开关，它就与自有钱包同列并扫账本；只想在「观察」范围看某个钱包的真实成本，用那里的「开账本」即可</div>
         </div>
         <label class="switch" title="启用/关闭钱包盈亏账本"><input type="checkbox" id="pnEnabled" onchange="savePnCfg()"><span class="switch-track"></span></label>
       </div>
-      <div class="st-sub">生效的钱包 <span class="st-sub-note" id="pnSubNote">默认 = 管理钱包里标「自有」的；观察钱包不扫账本、不在盈亏页显示</span> <button class="nm-test-btn" id="pnFollowBtn" onclick="pnFollowFund()" style="display:none">改为跟随自有</button></div>
+      <div class="st-sub">参与的钱包 <span class="st-sub-note" id="pnSubNote">默认 = 管理钱包里标「自有」的</span> <button class="nm-test-btn" id="pnFollowBtn" onclick="pnFollowFund()" style="display:none">改为跟随自有</button></div>
       <div class="sn-tw" id="pnList"></div>
       <div class="wm-error" id="pnError"></div>
     </section>
@@ -1046,7 +1057,7 @@
       </div>
       <div class="st-opts"><label class="nm-opt"><input type="checkbox" id="spObserve" onchange="saveSpCfg()"> 观察钱包也记录（每小时一点，含余额与 LP，在快照页「观察」范围查看）</label></div>
       <div class="nm-status" id="spStatus"></div>
-      <div class="st-sub">自有范围生效的钱包 <span class="st-sub-note">默认 = 管理钱包里标「自有」的</span></div>
+      <div class="st-sub">「自有」范围参与的钱包 <span class="st-sub-note">默认 = 管理钱包里标「自有」的；打开观察钱包的开关可把它并入自有范围的曲线与统计（「观察」范围另由上方「观察钱包也记录」控制）</span></div>
       <div class="sn-tw" id="spList"></div>
       <div class="wm-error" id="spError"></div>
     </section>
@@ -1066,7 +1077,7 @@
         <button class="nm-test-btn" id="nmTestBtn" onclick="testNotify()">发送测试</button>
       </div>
       <div class="nm-status" id="nmStatus"></div>
-      <div class="st-sub">生效的钱包 <span class="st-sub-note">默认 = 管理钱包里标「自有」的；只有这些钱包的仓位出区间才通知</span></div>
+      <div class="st-sub">参与的钱包 <span class="st-sub-note">默认 = 管理钱包里标「自有」的；要盯别人的仓位，打开那个观察钱包的开关即可</span></div>
       <div class="sn-tw" id="nmList"></div>
       <div class="wm-error" id="nmError"></div>
     </section>
@@ -1337,6 +1348,8 @@ function renderWalletList() {
   if (notifyCfg) renderNotify();
   if (fdCfg) renderFd();
   if (pnCfg) renderPnCfg();
+  if (spCfg) renderSp();   // 2026-10-09: 快照块的参与钱包表也依赖 walletList (此前漏了, 钱包列表晚到时快照块停在「还没有钱包」)
+  renderWmSt();
   applyUiCfg();
 }
 
@@ -1422,18 +1435,21 @@ for (const id of ['wmAddr', 'wmName']) {
 const EYE_ON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
 const EYE_OFF = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
 function wOn(w) { return w.enabled !== false; }
+// 管理钱包的错误提示: 总览面板与设置页各一个, 两处同写 (设置页里总览面板可能隐藏); 2026-10-09
+function wmErr(msg) {
+  for (const id of ['wmError', 'wmStError']) { const el = $(id); if (!el) continue; if (msg) { el.textContent = msg; el.style.display = 'block'; } else el.style.display = 'none'; }
+}
 async function toggleWalletOwn(addr, own) {
-  const errEl = $('wmError'); errEl.style.display = 'none';
+  wmErr('');
   try {
     const d = await apiJson(apiBase() + '/wallets/' + encodeURIComponent(addr), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ own: !!own }) });   // 2026-09-28 审计修复: 走 apiFetch
     walletList = d.wallets;
     renderWalletList();
     if (typeof renderStTabs === 'function') renderStTabs();
-  } catch (e) { errEl.textContent = e.message; errEl.style.display = 'block'; }
+  } catch (e) { wmErr(e.message); renderWmSt(); }
 }
 async function toggleWalletEnabled(addr, enable) {
-  const errEl = $('wmError');
-  errEl.style.display = 'none';
+  wmErr('');
   try {
     // 2026-09-28 审计修复: 走 apiFetch
     const d = await apiJson(apiBase() + '/wallets/' + encodeURIComponent(addr), {
@@ -1444,7 +1460,7 @@ async function toggleWalletEnabled(addr, enable) {
     renderWalletList();
     // 停用: 服务端已就地剔出缓存, 轻拉即可; 启用: 数据靠后台刷新, 实时同步 (10s 轻探) 自动带回
     loadData(false);
-  } catch (e) { errEl.textContent = e.message; errEl.style.display = 'block'; }
+  } catch (e) { wmErr(e.message); renderWmSt(); }   // 失败时重绘设置页的表, 把拨杆拨回去
 }
 
 async function delWallet(addr) {
@@ -1526,19 +1542,45 @@ function protoTag(p) {
   return `<span class="protocol-tag ${escH(proto.toLowerCase())}">${escH(proto)}</span>`;
 }
 
-// 设置页各功能的「生效钱包」(四处共用): 默认 = 管理钱包里标了「自有」的; 本链有单独设置 (例外) 时列出并给「改为跟随自有」
-//   explicitArr: 本链单独设置的地址数组 (无则 null); followFn: 点「改为跟随自有」时调用的函数名
-function stEffective(explicitArr, followFn) {
+// 设置页各功能的「参与钱包」(四处共用): 摘要行 + 本链全部钱包的开关表
+//   默认 (本链无单独设置) = 管理钱包里标了「自有」的; 任一开关一动, 先把当前生效集合物化成本链单独设置 (fdToggleWallet 等), 之后增删都在该数组上; 「改为跟随自有」删掉单独设置
+//   explicitArr: 本链单独设置的地址数组 (无则 null); followFn: 「改为跟随自有」调用的函数名; toggleFn: 开关 onchange 调用的函数名 (addr, on)
+//   2026-10-09: 09-28 把勾选表换成只读摘要后, 观察钱包再也没法加进四项功能 (设置页只剩「改为跟随自有」能删例外, 没有入口能建例外) → 把开关表加回来
+function stEffective(explicitArr, followFn, toggleFn) {
   if (!walletList.length) return wmHint();
   const own = walletList.filter(w => w.own === true && wOn(w));
-  const eff = Array.isArray(explicitArr) ? walletList.filter(w => explicitArr.some(a => nmNorm(a) === nmNorm(w.address))) : own;
+  const explicit = Array.isArray(explicitArr);
+  const sel = explicit ? new Set(explicitArr.map(nmNorm)) : null;
+  const isOn = w => explicit ? sel.has(nmNorm(w.address)) : (w.own === true && wOn(w));
+  const eff = walletList.filter(isOn);
   const names = eff.map(w => '<span class="st-eff-name' + (wOn(w) ? '' : ' off') + '">' + escH(w.name) + '</span>').join('') || '<span class="st-sub-note">无</span>';
   let h = '<div class="st-eff">';
-  if (Array.isArray(explicitArr)) h += '<div class="st-eff-row"><span class="st-eff-label">本链单独设置 · ' + eff.length + ' 个</span>' + names + '<button class="nm-test-btn" onclick="' + followFn + '()">改为跟随自有</button></div>';
-  else h += '<div class="st-eff-row"><span class="st-eff-label">自有钱包 · ' + eff.length + ' 个</span>' + names + '</div>';
-  if (!own.length && !Array.isArray(explicitArr)) h += '<div class="st-sub-note" style="margin-top:6px">本链还没有标「自有」的钱包 — 到总览页「💼 管理钱包」里把你自己的钱包点成「自有」</div>';
+  if (explicit) h += '<div class="st-eff-row"><span class="st-eff-label">本链单独设置 · ' + eff.length + ' 个</span>' + names + '<button class="nm-test-btn" onclick="' + followFn + '()">改为跟随自有</button></div>';
+  else h += '<div class="st-eff-row"><span class="st-eff-label">跟随自有 · ' + eff.length + ' 个</span>' + names + '</div>';
+  if (!own.length && !explicit) h += '<div class="st-sub-note" style="margin-top:6px">本链还没有标「自有」的钱包 — 在「管理钱包」里把你自己的钱包点成「自有」，或直接在下表打开要参与的钱包</div>';
   h += '</div>';
+  if (toggleFn) h += stWalletRows(w => isOn(w), w => `<label class="switch sm"><input type="checkbox" ${isOn(w) ? 'checked' : ''} data-addr="${escH(w.address)}" onchange="${toggleFn}(this.dataset.addr, this.checked)"><span class="switch-track"></span></label>`, '参与');
   return h;
+}
+// 设置页钱包表 (五处共用): 钱包 | 地址 | 标记 (自有/观察) | 状态 | 最后一列由调用方给 (参与开关 / 启用开关)
+//   自有在前、观察在后, 已停用的沉底 (后端只认启用中的钱包, 停用的开关留着, 启用后即生效); markCell: 标记列的渲染 (不给 = 只读胶囊)
+function stWalletRows(isOn, lastCell, lastTh, markCell) {
+  const rows = walletList.slice().sort((a, b) => (wOn(b) - wOn(a)) || ((b.own === true) - (a.own === true)));
+  const mark = markCell || (w => `<span class="st-own-tag${w.own ? ' on' : ''}">${w.own ? '自有' : '观察'}</span>`);
+  return '<table class="sn-table st-table"><thead><tr><th>钱包</th><th>地址</th><th>标记</th><th>状态</th><th>' + lastTh + '</th></tr></thead><tbody>'
+    + rows.map(w => `<tr class="${wOn(w) ? '' : 'off'}"><td class="st-name">${escH(w.name)}</td><td class="st-addr">${escH(w.address)}</td><td class="st-own">${mark(w)}</td><td class="st-state">${wOn(w) ? '<span class="pn-st act">启用</span>' : '<span class="pn-st cls">已停用</span>'}</td><td class="st-sw">${lastCell(w)}</td></tr>`).join('')
+    + '</tbody></table>';
+}
+// 四项功能「跟随自有」时的生效集合 (开关首次改动时物化用): 自有且启用中的钱包地址
+function stOwnAddrs() { return walletList.filter(w => w.own === true && wOn(w)).map(w => nmNorm(w.address)); }
+// 设置页「管理钱包」: 本链钱包表, 自有/观察 与 启用/停用 可直接切 (增删改仍在总览面板) —— 2026-10-09 此前总览面板一隐藏就无处切「自有/观察」
+function renderWmSt() {
+  const el = $('wmStList'); if (!el) return;
+  el.innerHTML = walletList.length ? stWalletRows(wOn,
+    w => `<label class="switch sm" title="${wOn(w) ? '已启用 · 点击停用（不再抓取此钱包的仓位与余额）' : '已停用 · 点击启用（恢复抓取）'}"><input type="checkbox" ${wOn(w) ? 'checked' : ''} data-addr="${escH(w.address)}" onchange="toggleWalletEnabled(this.dataset.addr, this.checked)"><span class="switch-track"></span></label>`,
+    '启用',
+    w => `<button class="wm-own-btn${w.own ? ' on' : ''}" data-addr="${escH(w.address)}" onclick="toggleWalletOwn(this.dataset.addr, ${w.own ? 'false' : 'true'})" title="${w.own ? '自有钱包 · 资金查询/快照/盈亏/通知默认都看它 · 点击改为观察' : '观察钱包 (别人的) · 默认只看仓位 · 点击改为自有'}">${w.own ? '自有' : '观察'}</button>`)
+    : wmHint();
 }
 async function pnToggleLedgerFromSettings(addr) {
   try { const d = await apiJson(apiBase() + '/wallets/' + encodeURIComponent(addr), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ledger: false }) }); walletList = d.wallets; renderWalletList(); } catch (e) { console.error('关账本失败:', e); }   // 2026-09-28 审计修复: 走 apiFetch
@@ -2080,7 +2122,7 @@ function showView(name) {
 }
 // 设置 = 标签页: 每个功能一个标签 (#settings/<key>), 只显示当前标签那块; 上次选的标签记在 localStorage
 const ST_PAGES = [
-  { key: 'wallets', ico: 'wm', icon: '💼', title: '管理钱包', desc: '总览页「管理钱包」面板的显示 / 隐藏；添加、编辑、停用钱包在总览页面板里操作' },
+  { key: 'wallets', ico: 'wm', icon: '💼', title: '管理钱包', desc: '总览页「管理钱包」面板的显示 / 隐藏；本页可直接切换每个钱包的自有 / 观察、启用 / 停用；添加、编辑、删除在总览页面板里操作' },
   { key: 'fund', ico: 'fund', icon: '💰', title: '钱包资金查询', desc: '统计条显示钱包余额与初始资金；按链勾选参与查询的钱包' },
   { key: 'pnl', ico: 'pnl', icon: '盈', title: '钱包盈亏', desc: '「钱包盈亏」页与账本只看勾选的钱包；未单独勾选的链沿用资金查询的勾选' },
   { key: 'snapshot', ico: 'snap', icon: '📷', title: '资金快照', desc: '每天到点记录一次「钱包余额 + LP 价值」；快照时间与参与的钱包' },
@@ -2237,11 +2279,12 @@ function renderFd() {
   if (!fdCfg) return;
   $('fdEnabled').checked = fdCfg.enabled !== false;
   const sel = fdSelSet();
-  $('fdList').innerHTML = stEffective(Array.isArray((fdCfg.wallets || {})[activeChain]) ? fdCfg.wallets[activeChain] : null, 'fdFollowOwn');
+  $('fdList').innerHTML = stEffective(Array.isArray((fdCfg.wallets || {})[activeChain]) ? fdCfg.wallets[activeChain] : null, 'fdFollowOwn', 'fdToggleWallet');
 }
 function fdToggleWallet(addr, on) {
-  // 未设置(全选)状态下首次改动: 先物化为全量列表再增删
-  if (!Array.isArray(fdCfg.wallets[activeChain])) fdCfg.wallets[activeChain] = walletList.map(w => nmNorm(w.address));
+  // 跟随自有状态下首次改动: 先把当前生效集合 (自有) 物化为本链单独设置再增删 (2026-10-09: 原物化为全部钱包, 是 09-28 改默认只看自有之前的遗留)
+  if (!fdCfg.wallets || typeof fdCfg.wallets !== 'object') fdCfg.wallets = {};
+  if (!Array.isArray(fdCfg.wallets[activeChain])) fdCfg.wallets[activeChain] = stOwnAddrs();
   const arr = fdCfg.wallets[activeChain], n = nmNorm(addr);
   const i = arr.findIndex(a => nmNorm(a) === n);
   if (on && i < 0) arr.push(n);
@@ -2287,7 +2330,7 @@ function renderNotify() {
   $('nmRecover').checked = notifyCfg.notifyRecover !== false;
   $('nmInterval').value = String(notifyCfg.intervalMin || 5);
   const sel = new Set(nmSelArr().map(nmNorm));
-  $('nmList').innerHTML = stEffective(Array.isArray((notifyCfg.wallets || {})[activeChain]) ? notifyCfg.wallets[activeChain] : null, 'nmFollowOwn');
+  $('nmList').innerHTML = stEffective(Array.isArray((notifyCfg.wallets || {})[activeChain]) ? notifyCfg.wallets[activeChain] : null, 'nmFollowOwn', 'nmToggleWallet');
   const ch = notifyCfg.channelReady
     ? '<span style="color:var(--green)">哨兵 Telegram ●</span>'
     : '<span style="color:var(--red)">哨兵 Telegram ● 服务器未配置</span>';
@@ -2295,7 +2338,10 @@ function renderNotify() {
   $('nmStatus').innerHTML = `通知渠道: ${ch} · 监控中 ${escH(notifyCfg.tracked || 0)} 仓 · ${escH(last)}`;   // 2026-09-28 审计修复: 服务端字段插值也 escH
 }
 function nmToggleWallet(addr, on) {
-  const arr = nmSelArr(), n = nmNorm(addr);
+  // 跟随自有状态下 nmSelArr() 返回的是临时数组, 改了存不进配置: 先物化为本链单独设置 (2026-10-09)
+  if (!notifyCfg.wallets || typeof notifyCfg.wallets !== 'object') notifyCfg.wallets = {};
+  if (!Array.isArray(notifyCfg.wallets[activeChain])) notifyCfg.wallets[activeChain] = stOwnAddrs();
+  const arr = notifyCfg.wallets[activeChain], n = nmNorm(addr);
   const i = arr.findIndex(a => nmNorm(a) === n);
   if (on && i < 0) arr.push(n);
   if (!on && i >= 0) arr.splice(i, 1);
@@ -2669,7 +2715,16 @@ function renderSp() {
   $('spObserve').checked = spCfg.observe !== false;
   $('spCount').textContent = (spCfg.totalDays || 0) + ' 天';
   $('spStatus').textContent = (spCfg.enabled === false ? '自动记录已停用' : '每 ' + (spCfg.intervalMin || 5) + ' 分钟自动记录') + (spCfg.lastTs ? ' · 最近 ' + tA(spCfg.lastTs) : ' · 尚无记录') + ' · 今日 ' + (spCfg.todayPoints || 0) + ' 个点 · 时区 ' + (spCfg.tz || '') + (spCfg.lastError ? ' · 上次失败: ' + spCfg.lastError : '');
-  $('spList').innerHTML = stEffective(Array.isArray((spCfg.wallets || {})[activeChain]) ? spCfg.wallets[activeChain] : null, 'spFollowOwn');
+  $('spList').innerHTML = stEffective(Array.isArray((spCfg.wallets || {})[activeChain]) ? spCfg.wallets[activeChain] : null, 'spFollowOwn', 'spToggleWallet');
+}
+function spToggleWallet(addr, on) {   // 2026-10-09 加回 (09-28 随勾选表一起删了)
+  if (!spCfg.wallets || typeof spCfg.wallets !== 'object') spCfg.wallets = {};
+  if (!Array.isArray(spCfg.wallets[activeChain])) spCfg.wallets[activeChain] = stOwnAddrs();
+  const arr = spCfg.wallets[activeChain], n = nmNorm(addr);
+  const i = arr.findIndex(a => nmNorm(a) === n);
+  if (on && i < 0) arr.push(n);
+  if (!on && i >= 0) arr.splice(i, 1);
+  saveSpCfg();
 }
 async function saveSpCfg() {
   if (!spCfg) return;
@@ -2709,16 +2764,13 @@ function renderPnCfg() {
   const sel = pnCfgSel(activeChain);
   $('pnSubNote').textContent = explicit ? '本链单独设置' : '跟随管理钱包里的「自有」标记';
   $('pnFollowBtn').style.display = 'none';
-  $('pnList').innerHTML = stEffective(Array.isArray((pnCfg.wallets || {})[activeChain]) ? pnCfg.wallets[activeChain] : null, 'pnFollowFund')
+  $('pnList').innerHTML = stEffective(Array.isArray((pnCfg.wallets || {})[activeChain]) ? pnCfg.wallets[activeChain] : null, 'pnFollowFund', 'pnCfgToggleWallet')
     + (() => { const obs = walletList.filter(w => w.own !== true && wOn(w)); const on = obs.filter(w => w.ledger === true); return '<div class="st-eff"><div class="st-eff-row"><span class="st-eff-label">观察钱包已开账本 · ' + on.length + '/' + obs.length + '</span>' + (on.map(w => '<span class="st-eff-name">' + escH(w.name) + ' <a href="#" data-addr="' + escH(w.address) + '" onclick="event.preventDefault(); pnToggleLedgerFromSettings(this.dataset.addr)" title="关掉该钱包的账本">✕</a></span>').join('') || '<span class="st-sub-note">无 · 在左侧「钱包盈亏 → 观察」里按钱包开启</span>') + '</div></div>'; })();
 }
 function pnCfgToggleWallet(addr, on) {
   if (!pnCfg.wallets || typeof pnCfg.wallets !== 'object') pnCfg.wallets = {};
-  // 沿用态下首次改动: 先把当前解析出的勾选物化为本链列表再增删
-  if (!Array.isArray(pnCfg.wallets[activeChain])) {
-    const sel = pnCfgSel(activeChain);
-    pnCfg.wallets[activeChain] = walletList.filter(w => sel === null || sel.has(nmNorm(w.address))).map(w => nmNorm(w.address));
-  }
+  // 跟随自有状态下首次改动: 先把当前生效集合 (自有) 物化为本链单独设置再增删 (2026-10-09: 原按 pnCfgSel 为 null 物化成全部钱包, 09-28 改默认只看自有后已不对)
+  if (!Array.isArray(pnCfg.wallets[activeChain])) pnCfg.wallets[activeChain] = stOwnAddrs();
   const arr = pnCfg.wallets[activeChain], n = nmNorm(addr);
   const i = arr.findIndex(a => nmNorm(a) === n);
   if (on && i < 0) arr.push(n);
