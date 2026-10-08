@@ -435,6 +435,26 @@ function positionKeysOf(ix) {
   if (ix.p === 'Orca') { const k = a[3] ? pda('position', a[3], PROG_ID.Orca) : null; return k ? [k] : (a[2] ? [a[2]] : []); }
   return [];
 }
+// 2026-10-08: LP 指令账户表里池子两枚 mint 的槽位 (按线上 132 个仓的真值逐指令反查, 列出的全部 100% 命中; Orca increaseLiquidityV2 与 decreaseLiquidityV2 账户表同构).
+//   没列的变体 (v1 增减 / 领费等) 走「钱包流水 mints」兜底. 用途: 账本仓的 mints/pair 不再靠钱包流水猜 —— 单边仓只有一边币进出 (之前 pair 只剩一个名字),
+//   开仓付的 SOL 租金会按金额排进 pair (之前一个 CBRS/USDC 仓标成了 SOL/USDC)
+const MINT_SLOTS = {
+  'Orca:increaseLiquidityV2': [7, 8], 'Orca:increaseLiquidityByTokenAmountsV2': [7, 8], 'Orca:decreaseLiquidityV2': [7, 8], 'Orca:collectFeesV2': [4, 5],
+  'Meteora:addLiquidityByStrategy2': [7, 8], 'Meteora:removeLiquidityByRange2': [7, 8], 'Meteora:claimFee2': [7, 8], 'Meteora:rebalanceLiquidity': [7, 8],
+  'Raydium:openPositionWithToken22Nft': [18, 19], 'Raydium:increaseLiquidityV2': [13, 14], 'Raydium:decreaseLiquidityV2': [14, 15],
+};
+function poolMintsOf(ix) {
+  const sl = MINT_SLOTS[`${ix.p}:${ix.n}`]; if (!sl) return null;
+  const a = ix.acc[sl[0]], b = ix.acc[sl[1]];
+  return a && b && a !== b ? [a, b] : null;
+}
+// 仓位 NFT mint → 它对应的仓位键 (Orca/Raydium 仓位键 = PDA("position", NFT mint)); PDA 推导不便宜, 每轮每钱包都查, 结果缓存
+const NFT_KEY_CACHE = new Map();
+function nftKeysOf(m) {
+  let v = NFT_KEY_CACHE.get(m);
+  if (!v) { v = [pda('position', m, PROG_ID.Orca), pda('position', m, PROG_ID.Raydium)].filter(Boolean); NFT_KEY_CACHE.set(m, v); }
+  return v;
+}
 // 价格观测表 obs[mint] = [{ts, p(稳定币计), pr 优先级}], 给「按当时价折算」用. 三种来源:
 //   pr 0 = 本钱包双边存/取 + 该仓 tick 区间反推的池价 (Orca/Raydium): CLMM 双边数量比只由价格决定, 与流动性无关, 精确中间价
 //   pr 1 = 纯换币 tx (不碰本钱包仓位) 的钱包净流向隐含价: 原有口径, 聚合器实际成交价
@@ -604,6 +624,28 @@ function computeWallet(wallet, livePositions) {
   for (const k of staleBase) if (P[k] && !liveKeys.has(k)) delete P[k];
   const keys = Object.keys(P);
   for (const t of order) { const src = W.txs[t.sig]; src._pos = (t.lp || []).some(ix => keys.some(k => ix.acc.includes(k))) ? 1 : 0; t._pos = src._pos; }
+  // 2026-10-08: 仓位 NFT 的 mint 集合 (开仓 +1 / 关仓 −1 的钱包流水不是资金): 开仓指令账户里的 NFT mint + 所有 0 精度 mint 里反推 PDA 命中本钱包仓位键的.
+  //   之前这些 NFT 混进 c.mints (盈亏页 tokens 多出第三个 "Bveb…"); 一平一开的调仓 tx 里 NFT ±1 还会当残差均分给新仓, 按无价 consume 带出 approx 星
+  const keySet = new Set(keys);
+  const nftMints = new Set();
+  for (const t of order) for (const ix of (t.lp || [])) {
+    if (IX[ix.p][ix.n] !== 'open') continue;
+    if (ix.p === 'Raydium' && ix.acc[2]) nftMints.add(ix.acc[2]);
+    if (ix.p === 'Orca' && ix.acc[3]) nftMints.add(ix.acc[3]);
+  }
+  for (const [m, x] of Object.entries(s.d.tok)) if (x && x.decimals === 0 && !nftMints.has(m) && nftKeysOf(m).some(k => keySet.has(k))) nftMints.add(m);
+  // 池子两枚 mint (按指令槽位, 见 MINT_SLOTS); 同一仓多条指令取到不一致的 → 不信 (置 null, 收官时走流水兜底)
+  const poolMints = {};
+  for (const t of order) for (const ix of (t.lp || [])) {
+    const pm = poolMintsOf(ix); if (!pm) continue;
+    for (const k of keys) {
+      if (!ix.acc.includes(k) || P[k].p !== ix.p) continue;
+      if (pm.includes(k) || nftMints.has(pm[0]) || nftMints.has(pm[1])) continue;
+      const prev = poolMints[k];
+      if (prev === undefined) poolMints[k] = pm;
+      else if (prev && (prev[0] !== pm[0] || prev[1] !== pm[1])) poolMints[k] = null;
+    }
+  }
   const obs = buildPriceObs(order, P, keys);
   obsByWallet.set(wallet, obs);
   // 2. 时间线重放
@@ -653,6 +695,7 @@ function computeWallet(wallet, livePositions) {
     }
     // 钱包流水 (人类单位), 原生 SOL 折进 WSOL: 规则见 walletFlow (2026-10-01 与价格观测表共用)
     const fl = walletFlow(t);
+    for (const m of nftMints) if (m in fl) delete fl[m];   // 2026-10-08: 仓位 NFT 不是资金流 (见上)
     const outs = Object.entries(fl).filter(([, v]) => v < 0).map(([m, v]) => [m, -v]);
     const ins = Object.entries(fl).filter(([, v]) => v > 0);
     if (ops.size) {
@@ -764,9 +807,14 @@ function computeWallet(wallet, livePositions) {
   for (const k of keys) {
     const c = C[k]; const p = P[k];
     if (!c) { p.c = null; continue; }
-    const mints = Object.keys(c.mints).filter(m => m !== WSOL || Math.abs(c.a[m] || 0) > 0 || c.mints[m]);
-    const top = Object.entries(c.mints).map(([m]) => [m, Math.abs(c.a[m] || 0)]).sort((x, y) => y[1] - x[1]).slice(0, 2).map(x => x[0]);
     const nm = m => (sym[m] && sym[m].symbol) || STABLES[m] || (m === WSOL ? 'SOL' : m.slice(0, 4) + '…');
+    // 2026-10-08: mints/pair 优先用指令槽位取到的池子两枚 mint (须与本仓流水对得上一枚, 防没验证过的指令变体读错槽); 取不到 → 钱包流水 mints (已剔 NFT), pair 按金额取前二 (原口径).
+    //   pair 顺序: 池子顺序, 稳定币在前 / SOL 在前且另一边非稳定币 → 翻转 (同 sol-adapter 活跃仓的归一规则, 同一池的活跃行与已关闭行名字一致)
+    const flowMints = Object.keys(c.mints).filter(m => !nftMints.has(m));
+    const pm = poolMints[k];
+    const usePool = !!pm && (!flowMints.length || flowMints.some(m => pm.includes(m)));
+    const mints = usePool ? (STABLES[pm[0]] || (pm[0] === WSOL && !STABLES[pm[1]]) ? [pm[1], pm[0]] : pm.slice()) : flowMints;
+    const top = usePool ? mints : flowMints.map(m => [m, Math.abs(c.a[m] || 0)]).sort((x, y) => y[1] - x[1]).slice(0, 2).map(x => x[0]);
     const live = liveKeys.has(k);
     let status = live ? 'active' : (c.closed ? 'closed' : (c.ret > 0 || c.evs > 1 ? 'closed' : 'active'));
     // 2026-09-28 审计修复: 不在活跃缓存、却既没提回也没领过费 = 退出 tx 没被捕获 (或刚开仓还没进缓存) → note 'unseen' (报告里净利润置空, 不记 −成本 的假亏)
@@ -797,6 +845,12 @@ async function runQueue(liveByWallet, opts = {}) {
         await reparseUnnamed(w.address, deadline);
         await fillBlockOrder(w.address, deadline);
         await computeWithHist(w.address, (liveByWallet && liveByWallet[w.address]) || [], w.name);
+        // 2026-10-08: 只在已关闭仓出现过的池子 mint (活跃仓缓存没见过, 没查过 symbol) 补查一次; 查到新的就重算 (pair 名是算的时候定的; 重算是纯本地)
+        if (deps.ensureSymbols) {
+          const sym = deps.symbols() || {};
+          const miss = [...new Set(Object.values(W.pos).flatMap(P => (P.c && P.c.mints) || []))].filter(m => !STABLES[m] && m !== WSOL && (!sym[m] || /…$/.test(String(sym[m].symbol || ''))));
+          if (miss.length && await deps.ensureSymbols(miss)) computeWallet(w.address, (liveByWallet && liveByWallet[w.address]) || []);
+        }
         save();
         const n = Object.values(W.pos).filter(P => P.c).length, cl = Object.values(W.pos).filter(P => P.c && P.c.status === 'closed').length;
         deps.log(`[SOL] pnl-ledger ${w.name}: ${Object.keys(W.txs).length} tx, ${n} 仓 (已关闭 ${cl})`);

@@ -1108,6 +1108,8 @@ solLedger.init({
   wallets: solPnlWallets,
   log: console.log,
   histSol: ts => pnlLedger.flowApi.coinUsdAt('solana', ts),   // 2026-10-02: 附近没观测的 SOL 按当时小时价 (与充提记录同源)
+  // 2026-10-08: 账本仓的池子 mint 补查 symbol (只在已关闭仓出现过的币, 活跃仓那条路没查过); 返回是否查到了新的. 查不到的走 getTokenSymbols 自己的 10 分钟重试
+  ensureSymbols: async mints => { const known = ms => ms.filter(m => tokenMeta[m] && !tokenMeta[m]._fallbackAt).length; const before = known(mints); try { await getTokenSymbols(mints); } catch {} return known(mints) > before; },
 });
 // 充提记录: 直接读账本落盘的逐笔记录 (没开账本的钱包就没有充提数据)
 flows.initSol({ records: addr => solLedger._state().d.wallets[addr] || null, prices: () => lastPricesSol, symbols: solSymbols, histPrice: solLedger.histPrice, obsReady: solLedger.obsReady });
