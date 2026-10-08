@@ -8,6 +8,7 @@ const path = require('path');
 const fs = require('fs');
 const { ethers } = require('ethers');
 const ledger = require('./pnl-ledger');
+const ownSync = require('./own-sync');   // 自有/观察标记变更 → 同步四项功能的显式「参与」名单 (2026-10-09)
 const flows = require('./flows');     // 充提记录 / 净入金 (Ankr 链 base/eth; rh 用本文件的 Transfer 日志回溯, 注入形状同一套)   // 钱包盈亏账本 (rh/arc 纯日志重建: 真实成本/已提回/已领费/历史仓位)
 
 // --- 链配置(合约地址均已链上验证 2026-07-31) ---
@@ -2846,6 +2847,7 @@ function mountEvmRoutes(app, adminGuard) {
       if (idx === -1) return res.status(404).json({ error: '地址不存在' });
       const removed = wallets.splice(idx, 1)[0];
       saveWallets(chainId, wallets);
+      ownSync.syncOwnFlag(chainId, addr, false);   // 2026-10-09: 删除 = 从四项功能的显式「参与」名单剔除
       // 从缓存里剔除该钱包立即生效 (合计/统计就地重算), 其余数据保留; 后台补一轮刷新
       dropWalletFromCache(chainId, addr);
       kickRefresh(chainId);
@@ -2889,6 +2891,9 @@ function mountEvmRoutes(app, adminGuard) {
       if (newLedger !== undefined) { if (newLedger) wallets[idx].ledger = true; else delete wallets[idx].ledger; }
       if (newLedger === true) kickLedger(chainId);
       saveWallets(chainId, wallets);
+      // 2026-10-09: 自有/观察标记或地址变了 → 同步四项功能 (资金查询/盈亏/快照/通知) 的显式「参与」名单, 以标记为准 (own-sync.js; 此前切「观察」后名单里还留着, 它仍出现在「自有」范围)
+      if (addrChanged) ownSync.syncAddrChange(chainId, cur, wallets[idx].address, wallets[idx].own === true);
+      else if (newOwn !== undefined && newOwn !== (old.own === true)) ownSync.syncOwnFlag(chainId, cur, newOwn);
       const st = chainState(chainId);
       if (addrChanged) {
         // 旧地址就地剔出缓存, 新地址靠后台刷新补进来 (与删除+添加同语义); 停用中的钱包不抓

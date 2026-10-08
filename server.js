@@ -36,6 +36,7 @@ function sanitizePayloadSymbols(data) {
 const { mountLpAuth } = require("./lp-auth");
 const pnlLedger = require('./pnl-ledger');   // 盈亏字段注入 (applyPnl) + 钱包盈亏报告 (BSC 无账本, 全部退回建仓回溯)
 const flows = require('./flows');            // 充提记录 / 净入金 (BSC 走 Ankr, 与账本共用串行队列)
+const ownSync = require('./own-sync');       // 自有/观察标记变更 → 同步四项功能的显式「参与」名单 (2026-10-09)
 mountLpAuth(app);
 const PORT = parseInt(process.env.PORT || '1788');
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
@@ -2004,6 +2005,7 @@ app.delete('/api/wallets/:address', adminGuard, (req, res) => {
   if (idx === -1) return res.status(404).json({ error: '地址不存在' });
   const removed = WALLETS.splice(idx, 1)[0];
   saveWallets(WALLETS);
+  ownSync.syncOwnFlag('bsc', addr, false);   // 2026-10-09: 删除 = 从四项功能的显式「参与」名单剔除
   dropBscWalletFromCache(addr);   // 2026-09-28 审计修复: 就地剔出缓存 (含 savePosCache), 不再整链空窗
   console.log(`Wallet removed: ${removed.name} (${addr})`);
   res.json({ ok: true, wallets: WALLETS });
@@ -2044,6 +2046,9 @@ app.patch('/api/wallets/:address', adminGuard, (req, res) => {
   if (newLedger !== undefined) { if (newLedger) WALLETS[idx].ledger = true; else delete WALLETS[idx].ledger; }
   if (newLedger === true && bscKickLedger) setImmediate(bscKickLedger);
   saveWallets(WALLETS);
+  // 2026-10-09: 自有/观察标记或地址变了 → 同步四项功能 (资金查询/盈亏/快照/通知) 的显式「参与」名单, 以标记为准 (own-sync.js; 此前切「观察」后名单里还留着, 它仍出现在「自有」范围)
+  if (addrChanged) ownSync.syncAddrChange('bsc', cur, WALLETS[idx].address, WALLETS[idx].own === true);
+  else if (newOwn !== undefined && newOwn !== (old.own === true)) ownSync.syncOwnFlag('bsc', cur, newOwn);
   if (addrChanged) {
     // 2026-09-28 审计修复: 换地址 = 剔旧 + 后台补一轮带新地址进来, 不再 cache.data=null 整链空窗
     dropBscWalletFromCache(cur);

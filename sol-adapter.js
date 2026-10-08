@@ -99,6 +99,7 @@ async function getPrices(mints) {
 const solLedger = require('./sol-ledger');    // Solana 钱包盈亏账本 (Helius 数据源)
 const pnlLedger = require('./pnl-ledger');    // 只用它的 applyPnl (盈亏字段注入, 各链同一口径)
 const flows = require('./flows');             // 充提记录 / 净入金 (从账本记录挑单向转账, Helius 补对方地址)
+const ownSync = require('./own-sync');        // 自有/观察标记变更 → 同步四项功能的显式「参与」名单 (2026-10-09)
 let lastPricesSol = {};                        // 上轮定价 (mint -> USD), 供账本给已关闭仓/无换币记录的币估值
 const TOKEN_META_FILE = path.join(__dirname, 'token-meta-sol.json');
 let tokenMeta = {};
@@ -1028,6 +1029,7 @@ function mountSolRoutes(app, adminGuard) {
     if (idx === -1) return res.status(404).json({ error: '地址不存在' });
     const removed = WALLETS.splice(idx, 1)[0];
     saveWallets(WALLETS);
+    ownSync.syncOwnFlag('sol', removed.address, false);   // 2026-10-09: 删除 = 从四项功能的显式「参与」名单剔除
     cache = { data: null, timestamp: 0 };
     console.log(`[SOL] Wallet removed: ${removed.name}`);
     res.json({ ok: true, wallets: WALLETS });
@@ -1068,6 +1070,9 @@ function mountSolRoutes(app, adminGuard) {
     if (newLedger !== undefined) { if (newLedger) WALLETS[idx].ledger = true; else delete WALLETS[idx].ledger; }
     if (newLedger === true) setImmediate(kickSolLedger);
     saveWallets(WALLETS);
+    // 2026-10-09: 自有/观察标记或地址变了 → 同步四项功能 (资金查询/盈亏/快照/通知) 的显式「参与」名单, 以标记为准 (own-sync.js; 此前切「观察」后名单里还留着, 它仍出现在「自有」范围)
+    if (addrChanged) ownSync.syncAddrChange('sol', old.address, WALLETS[idx].address, WALLETS[idx].own === true);
+    else if (newOwn !== undefined && newOwn !== (old.own === true)) ownSync.syncOwnFlag('sol', old.address, newOwn);
     if (addrChanged) {
       cache = { data: null, timestamp: 0 };
       delete raydiumInstances[old.address];
