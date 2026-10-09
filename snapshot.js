@@ -15,7 +15,7 @@ const PORT = parseInt(process.env.PORT || '1788');
 
 const CHAIN_API = { bsc: '/api', sol: '/api/sol', eth: '/api/eth', rh: '/api/rh', base: '/api/base', arc: '/api/arc' };
 const CHAINS = Object.keys(CHAIN_API);
-const DEFAULT_CFG = { enabled: true, tz: 'Asia/Shanghai', wallets: {}, observe: true };   // observe: 观察钱包也记 (小时级 + 日级)
+const DEFAULT_CFG = { enabled: true, tz: 'Asia/Shanghai', observe: true };   // observe: 观察钱包也记 (小时级 + 日级). 2026-10-09 重设计: 原 wallets.<chain> 显式名单废弃, 自有范围 = 标「自有」的钱包
 const TICK_MS = 5 * 60 * 1000;
 const M5_KEEP_MS = 24 * 3600 * 1000;
 const HOURLY_KEEP_MS = 30 * 86400000;
@@ -33,7 +33,7 @@ function validTz(tz) { try { new Intl.DateTimeFormat('en-CA', { timeZone: tz });
 function loadCfg() {
   const c = { ...DEFAULT_CFG, ...readJson(CFG_FILE, {}) };
   if (!validTz(c.tz)) c.tz = DEFAULT_CFG.tz;
-  if (!c.wallets || typeof c.wallets !== 'object') c.wallets = {};
+  delete c.wallets;   // 旧文件残留的显式名单读时丢弃
   c.enabled = c.enabled !== false;
   c.observe = c.observe !== false;
   delete c.time;
@@ -63,7 +63,7 @@ function chainWallets(chain) {
   const file = chain === 'bsc' ? 'wallets.json' : `wallets-${chain}.json`;
   try { return JSON.parse(fs.readFileSync(path.join(__dirname, file), 'utf8')).filter(w => w.enabled !== false); } catch { return []; }
 }
-function ownAddrs(chain) { return chainWallets(chain).filter(w => w.own === true).map(w => w.address); }      // 自有 (wallets.<chain> 未设置时的默认快照范围)
+function ownAddrs(chain) { return chainWallets(chain).filter(w => w.own === true).map(w => w.address); }      // 自有 (「自有」范围)
 function obsAddrs(chain) { return chainWallets(chain).filter(w => w.own !== true).map(w => w.address); }      // 观察 (别人的)
 function fetchLocal(pathname, timeoutMs = 60 * 1000) {
   return new Promise((resolve, reject) => {
@@ -167,7 +167,7 @@ async function _take() {
   // 「上一条」只用来沿用失败链 / 失败钱包的数值: 自有取最近的 m5 (退而 hourly / days), 观察取最近的 obs.hourly (退而 obs.days)
   const before = loadData();
   const tls = new Map();   // 本轮各钱包的账本时间线 (两个作用域共用: 同一钱包的报告与作用域无关)
-  const own = await collect(cfg, posData, ch => Array.isArray(cfg.wallets[ch]) ? cfg.wallets[ch] : ownAddrs(ch), lastEntry(before.m5, before.hourly, before.days), tls);
+  const own = await collect(cfg, posData, ch => ownAddrs(ch), lastEntry(before.m5, before.hourly, before.days), tls);
   // 观察钱包: 小时级 + 日级 (5 分钟级省掉), 字段一样 (余额也查; 开了账本的还有盈亏)
   const obs = cfg.observe ? await collect(cfg, posData, ch => obsAddrs(ch), lastEntry(before.obs.hourly, [], before.obs.days), tls) : null;
   if (!own && !obs) throw new Error('没有可记录的钱包 (没有标「自有」的钱包, 观察钱包也没数据)');
@@ -366,7 +366,7 @@ function statusPayload() {
   const lastKey = keys[keys.length - 1];
   const today = localParts(Date.now(), cfg.tz).date;
   return {
-    enabled: cfg.enabled, observe: cfg.observe, tz: cfg.tz, wallets: cfg.wallets, intervalMin: TICK_MS / 60000,
+    enabled: cfg.enabled, observe: cfg.observe, tz: cfg.tz, intervalMin: TICK_MS / 60000,
     obsDays: Object.keys(data.obs.days).length,
     lastRun: lastKey ? { date: lastKey, ts: data.days[lastKey].ts, mode: data.days[lastKey].mode } : null,
     lastTs: lastTs || (lastKey ? data.days[lastKey].ts : null), todayPoints: data.m5.filter(e => e.date === today).length,
@@ -379,12 +379,10 @@ function mountSnapshot(app, adminGuard) {
   app.post('/api/snapshot/config', adminGuard, (req, res) => {
     const body = req.body || {};
     const cur = loadCfg();
-    const next = { enabled: body.enabled !== false, observe: body.observe === undefined ? cur.observe : body.observe !== false, tz: cur.tz, wallets: {} };
+    const next = { enabled: body.enabled !== false, observe: body.observe === undefined ? cur.observe : body.observe !== false, tz: cur.tz };
     if (body.tz !== undefined) { if (!validTz(body.tz)) return res.status(400).json({ error: '无效时区' }); next.tz = body.tz; }
-    const src = (body.wallets && typeof body.wallets === 'object') ? body.wallets : cur.wallets;
-    for (const [ch, arr] of Object.entries(src)) { if (!CHAINS.includes(ch)) continue; if (Array.isArray(arr)) next.wallets[ch] = arr.slice(0, 60).map(a => String(a).slice(0, 64)); }
     try { writeJson(CFG_FILE, next, true); } catch (e) { console.error('[snapshot] 配置写入失败:', e.message); return res.status(500).json({ error: '写入失败, 请查看服务日志' }); }   // 2026-09-28 审计修复: 不回显文件路径
-    console.log(`[snapshot] config saved: enabled=${next.enabled}, overrides=${Object.keys(next.wallets).join(',') || '(none, 跟随自有)'}`);
+    console.log(`[snapshot] config saved: enabled=${next.enabled}, observe=${next.observe}`);
     res.json(statusPayload());
   });
   // 列表: days (全部) + hourly (30d) + m5 (24h); 明细 (chains.wallets) 只随 days/hourly 带, m5 精简为总量以省流量
@@ -397,9 +395,9 @@ function mountSnapshot(app, adminGuard) {
     // 观察作用域: 日级全部 + 小时级只带最近 7 天 (钱包多, 省流量)
     const okeys = Object.keys(data.obs.days).sort();
     const obs = { days: okeys.map(k => data.obs.days[k]), hourly: data.obs.hourly.filter(e => Date.now() - e.ts <= 7 * 86400000) };
-    // 2026-10-09: 当前范围 (自有 = 快照页签单独设置 ∪ 否则管理钱包标自有; 观察 = 其余). 前端拿它给「只在旧记录点出现、已不在范围」的钱包打「已移出」
-    const cfg = loadCfg(); const nowScope = { own: {}, obs: {} };
-    for (const ch of CHAINS) { nowScope.own[ch] = (Array.isArray(cfg.wallets[ch]) ? cfg.wallets[ch] : ownAddrs(ch)).map(a => normAddr(ch, a)); nowScope.obs[ch] = obsAddrs(ch).map(a => normAddr(ch, a)); }
+    // 2026-10-09: 当前范围 (自有 = 管理钱包标「自有」的; 观察 = 其余). 前端拿它给「只在旧记录点出现、已不在范围」的钱包打「已移出」
+    const nowScope = { own: {}, obs: {} };
+    for (const ch of CHAINS) { nowScope.own[ch] = ownAddrs(ch).map(a => normAddr(ch, a)); nowScope.obs[ch] = obsAddrs(ch).map(a => normAddr(ch, a)); }
     res.json({ days, hourly: data.hourly, m5, obs, totalDays: keys.length, nowScope, ...statusPayload() });
   });
   app.post('/api/snapshot/now', adminGuard, async (req, res) => {

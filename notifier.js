@@ -19,7 +19,7 @@ const CONFIRM = 2;                    // 连续 N 轮同向观测才确认翻转
 const STALE_MS = 45 * 60 * 1000;      // 链缓存超过 45min 视为过旧, 本轮跳过该链
 const TG_MAX = 3500;                  // 单条消息长度上限(TG 4096 留余量)
 
-const DEFAULT_CFG = { enabled: true, channel: 'sentinel', intervalMin: 5, notifyRecover: true, wallets: {} };
+const DEFAULT_CFG = { enabled: true, channel: 'sentinel', intervalMin: 5, notifyRecover: true };   // 2026-10-09 重设计: 原 wallets.<chain> 显式名单废弃, 监控范围 = 标「自有」的钱包
 
 function readJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
@@ -30,7 +30,7 @@ function writeJson(file, data) {
   try { fs.chmodSync(tmp, 0o600); } catch {}
   fs.renameSync(tmp, file);
 }
-function loadCfg() { return { ...DEFAULT_CFG, ...readJson(CFG_FILE, {}) }; }
+function loadCfg() { const c = { ...DEFAULT_CFG, ...readJson(CFG_FILE, {}) }; delete c.wallets; return c; }   // 旧文件残留的 wallets 读时丢弃
 function loadState() {
   const st = readJson(STATE_FILE, {});
   if (!st.keys) st.keys = {};       // "<chain>:<addr>:<proto>:<tokenId>" → {out, pend?, n?, ts}
@@ -39,7 +39,7 @@ function loadState() {
 }
 
 function normAddr(chain, a) { return chain === 'sol' ? String(a) : String(a).toLowerCase(); }
-// 该链标了「自有」且启用的钱包地址 (wallets.<chain> 未设置时的默认监控范围)
+// 该链标了「自有」且启用的钱包地址 = 监控范围
 function ownAddrs(chain) {
   const file = chain === 'bsc' ? 'wallets.json' : `wallets-${chain}.json`;
   try { return JSON.parse(fs.readFileSync(path.join(__dirname, file), 'utf8')).filter(w => w.own === true && w.enabled !== false).map(w => w.address); } catch { return []; }
@@ -122,7 +122,7 @@ async function _checkInner() {
   const events = [];       // 待发送的事件 [{ text, rec, out }]; 哪段发送成功, 哪段的翻转才落实 (2026-09-28 按段提交)
 
   for (const [chain, apiBase] of Object.entries(CHAIN_API)) {
-    const sel = (cfg.wallets && Array.isArray(cfg.wallets[chain])) ? cfg.wallets[chain] : ownAddrs(chain);   // 未单独设置 = 自有钱包
+    const sel = ownAddrs(chain);   // 自有钱包
     if (!sel.length) continue;
     const selSet = new Set(sel.map(a => normAddr(chain, a)));
 
@@ -217,7 +217,8 @@ function mountNotifier(app, adminGuard) {
     const st = loadState();
     return {
       enabled: cfg.enabled, channel: cfg.channel, intervalMin: cfg.intervalMin,
-      notifyRecover: cfg.notifyRecover, wallets: cfg.wallets,
+      notifyRecover: cfg.notifyRecover,
+      ownCount: Object.fromEntries(Object.keys(CHAIN_API).map(ch => [ch, ownAddrs(ch).length])),   // 各链监控中的自有钱包数 (设置页角标)
       channelReady: !!(TG_TOKEN && TG_CHAT),
       lastRun: st.lastRun || 0,
       tracked: Object.keys(st.keys).length,
@@ -235,18 +236,6 @@ function mountNotifier(app, adminGuard) {
       const m = parseInt(b.intervalMin);
       if (!Number.isFinite(m) || m < 1 || m > 120) return res.status(400).json({ error: 'intervalMin 须为 1-120' });
       cfg.intervalMin = m;
-    }
-    if (b.wallets !== undefined) {
-      if (typeof b.wallets !== 'object' || Array.isArray(b.wallets)) return res.status(400).json({ error: 'wallets 格式错误' });
-      const w = {};
-      for (const [chain, arr] of Object.entries(b.wallets)) {
-        if (!CHAIN_API[chain]) continue;
-        if (!Array.isArray(arr)) return res.status(400).json({ error: `wallets.${chain} 须为数组` });
-        const clean = [...new Set(arr.filter(a => typeof a === 'string' && a.length > 0 && a.length <= 64).map(a => normAddr(chain, a.trim())))];
-        if (clean.length > 200) return res.status(400).json({ error: `wallets.${chain} 超过 200 个` });
-        if (clean.length) w[chain] = clean;
-      }
-      cfg.wallets = w;
     }
     writeJson(CFG_FILE, cfg);
     schedule();   // 间隔可能变了, 重排定时器

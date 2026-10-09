@@ -99,7 +99,6 @@ async function getPrices(mints) {
 const solLedger = require('./sol-ledger');    // Solana 钱包盈亏账本 (Helius 数据源)
 const pnlLedger = require('./pnl-ledger');    // 只用它的 applyPnl (盈亏字段注入, 各链同一口径)
 const flows = require('./flows');             // 充提记录 / 净入金 (从账本记录挑单向转账, Helius 补对方地址)
-const ownSync = require('./own-sync');        // 自有/观察标记变更 → 同步四项功能的显式「参与」名单 (2026-10-09)
 let lastPricesSol = {};                        // 上轮定价 (mint -> USD), 供账本给已关闭仓/无换币记录的币估值
 const TOKEN_META_FILE = path.join(__dirname, 'token-meta-sol.json');
 let tokenMeta = {};
@@ -629,14 +628,11 @@ const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqC
 const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 let lastIdleSol = null;   // 上轮成功快照, RPC 抖动时兜底
 
-// 钱包资金查询配置 (fund-config.json, 路由在 server.js); SOL 地址大小写敏感按原样匹配
+// 钱包资金查询配置 (fund-config.json, 路由在 server.js): 只看总开关 (2026-10-09 重设计: 显式「参与」名单废弃)
 function fundWalletsSol() {
-  let cfg = { enabled: true, wallets: {} };
-  try {
-    const c = JSON.parse(fs.readFileSync(path.join(__dirname, 'fund-config.json'), 'utf8'));
-    cfg = { enabled: c.enabled !== false, wallets: (c.wallets && typeof c.wallets === 'object') ? c.wallets : {} };
-  } catch {}
-  if (!cfg.enabled) return [];
+  let enabled = true;
+  try { enabled = JSON.parse(fs.readFileSync(path.join(__dirname, 'fund-config.json'), 'utf8')).enabled !== false; } catch {}
+  if (!enabled) return [];
   return activeWallets();   // 2026-09-28: 全部启用钱包都查余额 (观察钱包快照要用); 统计条只算自有由前端过滤
 }
 
@@ -1032,7 +1028,6 @@ function mountSolRoutes(app, adminGuard) {
     const removed = WALLETS.splice(idx, 1)[0];
     saveWallets(WALLETS);
     bustPnl();
-    ownSync.syncOwnFlag('sol', removed.address, false);   // 2026-10-09: 删除 = 从四项功能的显式「参与」名单剔除
     cache = { data: null, timestamp: 0 };
     console.log(`[SOL] Wallet removed: ${removed.name}`);
     res.json({ ok: true, wallets: WALLETS });
@@ -1074,9 +1069,6 @@ function mountSolRoutes(app, adminGuard) {
     if (newLedger === true) setImmediate(kickSolLedger);
     saveWallets(WALLETS);
     bustPnl();
-    // 2026-10-09: 自有/观察标记或地址变了 → 同步四项功能 (资金查询/盈亏/快照/通知) 的显式「参与」名单, 以标记为准 (own-sync.js; 此前切「观察」后名单里还留着, 它仍出现在「自有」范围)
-    if (addrChanged) ownSync.syncAddrChange('sol', old.address, WALLETS[idx].address, WALLETS[idx].own === true);
-    else if (newOwn !== undefined && newOwn !== (old.own === true)) ownSync.syncOwnFlag('sol', old.address, newOwn);
     if (addrChanged) {
       cache = { data: null, timestamp: 0 };
       delete raydiumInstances[old.address];
@@ -1101,14 +1093,12 @@ function kickSolRefresh() {
     .finally(() => { inFlight = null; });
 }
 
-// --- Solana 钱包盈亏账本: 只扫设置页「钱包盈亏」勾选的钱包 (未单独勾选沿用「钱包资金查询」的勾选); 启动 190s 后首跑, 之后每 30min ---
-function readCfg(file) { try { const c = JSON.parse(fs.readFileSync(path.join(__dirname, file), 'utf8')); return { enabled: c.enabled !== false, wallets: (c.wallets && typeof c.wallets === 'object') ? c.wallets : {} }; } catch { return { enabled: true, wallets: {} }; } }
+// --- Solana 钱包盈亏账本: 账本钱包 = 标「自有」的 ∪ 观察钱包里手动开了账本的 (2026-10-09 重设计: 原设置页勾选名单废弃); 启动 190s 后首跑, 之后每 30min ---
+function readCfg(file) { try { return { enabled: JSON.parse(fs.readFileSync(path.join(__dirname, file), 'utf8')).enabled !== false }; } catch { return { enabled: true }; } }
 function loadPnlCfgSol() { return readCfg('pnl-config.json'); }
 function solPnlWallets() {
-  const pc = loadPnlCfgSol(); if (!pc.enabled) return [];
-  const on = WALLETS.filter(w => w.enabled !== false);
-  if (!Array.isArray(pc.wallets.sol)) return on.filter(w => w.own === true || w.ledger === true);   // 未单独设置 = 自有 + 开账本的观察
-  const s = new Set(pc.wallets.sol.map(String)); return on.filter(w => s.has(w.address) || w.ledger === true);
+  if (!loadPnlCfgSol().enabled) return [];
+  return WALLETS.filter(w => w.enabled !== false && (w.own === true || w.ledger === true));   // 自有 + 开账本的观察
 }
 function solSymbols() { const o = {}; for (const [m, sym] of Object.entries(KNOWN_TOKENS)) o[m] = { symbol: sym }; for (const [m, v] of Object.entries(tokenMeta)) if (v && v.symbol) o[m] = v; return o; }
 solLedger.init({

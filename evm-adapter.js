@@ -8,7 +8,6 @@ const path = require('path');
 const fs = require('fs');
 const { ethers } = require('ethers');
 const ledger = require('./pnl-ledger');
-const ownSync = require('./own-sync');   // 自有/观察标记变更 → 同步四项功能的显式「参与」名单 (2026-10-09)
 const flows = require('./flows');     // 充提记录 / 净入金 (Ankr 链 base/eth; rh 用本文件的 Transfer 日志回溯, 注入形状同一套)   // 钱包盈亏账本 (rh/arc 纯日志重建: 真实成本/已提回/已领费/历史仓位)
 
 // --- 链配置(合约地址均已链上验证 2026-07-31) ---
@@ -1988,40 +1987,20 @@ function dropWalletFromCache(chainId, addr) {
   if (st.lastGood) delete st.lastGood[addr];
 }
 
-// --- 钱包资金查询配置 (fund-config.json, 路由在 server.js): 启用开关 + 按链勾选 ---
+// --- 钱包资金查询配置 (fund-config.json, 路由在 server.js): 只有总开关 (2026-10-09 重设计: 原 wallets.<chain> 显式「参与」名单废弃, 范围只由钱包「自有/观察」标记决定) ---
 function loadFundCfgEvm() {
-  try {
-    const c = JSON.parse(fs.readFileSync(path.join(__dirname, 'fund-config.json'), 'utf8'));
-    return { enabled: c.enabled !== false, wallets: (c.wallets && typeof c.wallets === 'object') ? c.wallets : {} };
-  } catch { return { enabled: true, wallets: {} }; }
+  try { return { enabled: JSON.parse(fs.readFileSync(path.join(__dirname, 'fund-config.json'), 'utf8')).enabled !== false }; } catch { return { enabled: true }; }
 }
-// 勾选子集; 未设置(非数组)=只看标了「自有」的钱包 (2026-09-28 起; 之前是全部钱包)
-function ownWallets(WALLETS) { return WALLETS.filter(w => w.own === true); }
+function ownWallets(WALLETS) { return WALLETS.filter(w => w.own === true); }   // 标了「自有」的 (资金查询 / 统计条 / 充提扫描的范围)
 function ledgerWallets(WALLETS) { return WALLETS.filter(w => w.own === true || w.ledger === true); }   // 自有 ∪ 观察钱包里手动开了账本的
-function fundSelected(fundCfg, chainId, WALLETS) {
-  if (!fundCfg.enabled) return [];
-  const sel = fundCfg.wallets[chainId];
-  if (!Array.isArray(sel)) return ownWallets(WALLETS);
-  const s = new Set(sel.map(a => String(a).toLowerCase()));
-  return WALLETS.filter(w => s.has(w.address.toLowerCase()));
-}
-// --- 钱包盈亏账本配置 (pnl-config.json, 与 server.js 的 /api/pnl/config 同一文件): { enabled, wallets: {<chain>: [addrs]} }
-//   wallets.<chain> 未设置 = 只看标了「自有」的钱包; [] = 全不参与; 数组 = 勾选子集 (例外覆盖)
-//   只有勾选的钱包才进账本队列 (别人的观察钱包动辄两千笔 tx, 用户不需要看它们的盈亏)
+function fundSelected(fundCfg, chainId, WALLETS) { return fundCfg.enabled ? ownWallets(WALLETS) : []; }
+// --- 钱包盈亏账本配置 (pnl-config.json, 与 server.js 的 /api/pnl/config 同一文件): 只有总开关 ---
+//   账本钱包 = 自有 ∪ 手动开了账本的观察钱包 (别人的观察钱包动辄两千笔 tx, 不开账本就不进队列)
 function loadPnlCfgEvm() {
-  try {
-    const c = JSON.parse(fs.readFileSync(path.join(__dirname, 'pnl-config.json'), 'utf8'));
-    return { enabled: c.enabled !== false, wallets: (c.wallets && typeof c.wallets === 'object') ? c.wallets : {} };
-  } catch { return { enabled: true, wallets: {} }; }
+  try { return { enabled: JSON.parse(fs.readFileSync(path.join(__dirname, 'pnl-config.json'), 'utf8')).enabled !== false }; } catch { return { enabled: true }; }
 }
-function pnlSelected(chainId, WALLETS) {
-  const pc = loadPnlCfgEvm();
-  if (!pc.enabled) return [];
-  const pick = arr => { const s = new Set(arr.map(a => String(a).toLowerCase())); return WALLETS.filter(w => s.has(w.address.toLowerCase())); };
-  if (Array.isArray(pc.wallets[chainId])) return pick(pc.wallets[chainId]).concat(WALLETS.filter(w => w.ledger === true && !pc.wallets[chainId].some(a => String(a).toLowerCase() === w.address.toLowerCase())));
-  return ledgerWallets(WALLETS);   // 未单独设置 = 自有 + 手动开了账本的观察钱包
-}
-// 充提队列 (fundingFromLogs 链) = 钱包资金查询勾选 ∪ 盈亏账本钱包 (启用中的)
+function pnlSelected(chainId, WALLETS) { return loadPnlCfgEvm().enabled ? ledgerWallets(WALLETS) : []; }
+// 充提队列 (fundingFromLogs 链) = 自有钱包 ∪ 盈亏账本钱包 (启用中的)
 //   2026-10-06: 盈亏页「总体盈亏 = 总资产 − 净入金」要每个账本钱包都有净入金; 此前只开了账本的观察钱包不进队列,
 //   它在勾选口径收窄前留下的旧缓存条目冻结在最后一次扫描, 却仍以 partial:false 交给前端 → 停扫后的大额提币没记, 盈亏算成巨亏
 function fundingWallets(chainId) {
@@ -2850,7 +2829,6 @@ function mountEvmRoutes(app, adminGuard) {
       const removed = wallets.splice(idx, 1)[0];
       saveWallets(chainId, wallets);
       bustPnl();
-      ownSync.syncOwnFlag(chainId, addr, false);   // 2026-10-09: 删除 = 从四项功能的显式「参与」名单剔除
       // 从缓存里剔除该钱包立即生效 (合计/统计就地重算), 其余数据保留; 后台补一轮刷新
       dropWalletFromCache(chainId, addr);
       kickRefresh(chainId);
@@ -2895,9 +2873,6 @@ function mountEvmRoutes(app, adminGuard) {
       if (newLedger === true) kickLedger(chainId);
       saveWallets(chainId, wallets);
       bustPnl();
-      // 2026-10-09: 自有/观察标记或地址变了 → 同步四项功能 (资金查询/盈亏/快照/通知) 的显式「参与」名单, 以标记为准 (own-sync.js; 此前切「观察」后名单里还留着, 它仍出现在「自有」范围)
-      if (addrChanged) ownSync.syncAddrChange(chainId, cur, wallets[idx].address, wallets[idx].own === true);
-      else if (newOwn !== undefined && newOwn !== (old.own === true)) ownSync.syncOwnFlag(chainId, cur, newOwn);
       const st = chainState(chainId);
       if (addrChanged) {
         // 旧地址就地剔出缓存, 新地址靠后台刷新补进来 (与删除+添加同语义); 停用中的钱包不抓

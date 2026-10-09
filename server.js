@@ -36,7 +36,6 @@ function sanitizePayloadSymbols(data) {
 const { mountLpAuth } = require("./lp-auth");
 const pnlLedger = require('./pnl-ledger');   // 盈亏字段注入 (applyPnl) + 钱包盈亏报告 (BSC 无账本, 全部退回建仓回溯)
 const flows = require('./flows');            // 充提记录 / 净入金 (BSC 走 Ankr, 与账本共用串行队列)
-const ownSync = require('./own-sync');       // 自有/观察标记变更 → 同步四项功能的显式「参与」名单 (2026-10-09)
 mountLpAuth(app);
 const PORT = parseInt(process.env.PORT || '1788');
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
@@ -1815,7 +1814,7 @@ async function _fetchPositionsInner(forceRefresh = false) {
 
   // 钱包闲置余额: fund-config 总开关关掉就不查; 失败沿用上轮快照, 不拖累主数据
   const fundCfg = loadFundCfg();
-  // 2026-09-28 审计修复: 删掉未使用的 fundSel。勾选 (fundCfg.wallets.bsc, 未设置=只算自有) 由前端 idleFiltered 套在统计条上, 与 evm/sol 同口径;
+  // 2026-09-28 审计修复: 删掉未使用的 fundSel。统计条范围 = 标「自有」的钱包 (2026-10-09 重设计: 显式名单废弃) 由前端 idleFiltered 套在统计条上, 与 evm/sol 同口径;
   //   后端余额对全部启用钱包查 (evm-adapter/sol-adapter 同样如此, 观察钱包的资金快照要用), 不能在这里按勾选裁掉
   const fundWallets = !fundCfg.enabled ? [] : activeWallets();   // 2026-09-28: 全部启用钱包都查余额 (观察钱包快照要用); 统计条只算自有由前端过滤
   let idle = null;
@@ -2007,7 +2006,6 @@ app.delete('/api/wallets/:address', adminGuard, (req, res) => {
   const removed = WALLETS.splice(idx, 1)[0];
   saveWallets(WALLETS);
   pnlCacheBust();   // 2026-10-09: 钱包变更后盈亏合并缓存立刻失效
-  ownSync.syncOwnFlag('bsc', addr, false);   // 2026-10-09: 删除 = 从四项功能的显式「参与」名单剔除
   dropBscWalletFromCache(addr);   // 2026-09-28 审计修复: 就地剔出缓存 (含 savePosCache), 不再整链空窗
   console.log(`Wallet removed: ${removed.name} (${addr})`);
   res.json({ ok: true, wallets: WALLETS });
@@ -2049,9 +2047,6 @@ app.patch('/api/wallets/:address', adminGuard, (req, res) => {
   if (newLedger === true && bscKickLedger) setImmediate(bscKickLedger);
   saveWallets(WALLETS);
   pnlCacheBust();   // 2026-10-09: 钱包变更后盈亏合并缓存立刻失效
-  // 2026-10-09: 自有/观察标记或地址变了 → 同步四项功能 (资金查询/盈亏/快照/通知) 的显式「参与」名单, 以标记为准 (own-sync.js; 此前切「观察」后名单里还留着, 它仍出现在「自有」范围)
-  if (addrChanged) ownSync.syncAddrChange('bsc', cur, WALLETS[idx].address, WALLETS[idx].own === true);
-  else if (newOwn !== undefined && newOwn !== (old.own === true)) ownSync.syncOwnFlag('bsc', cur, newOwn);
   if (addrChanged) {
     // 2026-09-28 审计修复: 换地址 = 剔旧 + 后台补一轮带新地址进来, 不再 cache.data=null 整链空窗
     dropBscWalletFromCache(cur);
@@ -2074,19 +2069,17 @@ const CHAIN_PNL_API = { bsc: '/api/pnl', sol: '/api/sol/pnl', eth: '/api/eth/pnl
 // 2026-09-28 审计修复: 链 id 用 Object.hasOwn 判白名单 (以前 'constructor' 之类的原型键也算命中), 非白名单返回 null
 function walletsFileOf(chain) { if (!Object.hasOwn(CHAIN_PNL_API, chain)) return null; return chain === 'bsc' ? 'wallets.json' : `wallets-${chain}.json`; }
 function chainWallets(chain) { const f = walletsFileOf(chain); if (!f) return []; try { return JSON.parse(fs.readFileSync(path.join(__dirname, f), 'utf8')).filter(w => w.enabled !== false); } catch { return []; } }
+// 盈亏页两个范围 (2026-10-09 重设计: 范围只由管理钱包的「自有/观察」标记决定, 不再有盈亏设置的显式名单): 自有 = 标「自有」的; 观察 = 其余
 function scopeWallets(chain, scope) {
   const all = chainWallets(chain);
   if (scope === 'obs') return all.filter(w => w.own !== true);
-  const pc = loadPnlCfg();
-  const norm = a => chain === 'sol' ? String(a) : String(a).toLowerCase();
-  if (Array.isArray(pc.wallets[chain])) { const s = new Set(pc.wallets[chain].map(norm)); return all.filter(w => w.own === true || s.has(norm(w.address))); }
   return all.filter(w => w.own === true);
 }
 function fetchLocalJson(pathname, timeoutMs = 30000) {
   return fetch(`http://127.0.0.1:${PORT}${pathname}`, { signal: AbortSignal.timeout(timeoutMs) }).then(r => r.ok ? r.json() : null).catch(() => null);
 }
 const pnlAllCache = {};   // `${scope}:${chain}` -> { ts, data }
-// 2026-10-09: 钱包增删改 / 盈亏参与名单一变就清掉合并缓存. 原来只按 60s 过期: 用户在设置页关掉某钱包的「参与」后, 盈亏页一分钟内仍回旧名单 (07:15 实例)
+// 2026-10-09: 钱包增删改 (含自有/观察标记) / 盈亏开关一变就清掉合并缓存. 原来只按 60s 过期: 用户改了标记后, 盈亏页一分钟内仍回旧范围 (07:15 实例)
 function pnlCacheBust() { for (const k of Object.keys(pnlAllCache)) delete pnlAllCache[k]; }
 app.locals.pnlCacheBust = pnlCacheBust;   // evm-adapter / sol-adapter 的钱包增删改也要调
 app.get('/api/pnl/all', async (req, res) => {
@@ -2243,26 +2236,17 @@ try {
 }
 
 // --- 钱包资金查询配置 (/api/fund/config): 启用开关 + 按链勾选钱包 ---
-// wallets.<chain> 未设置 = 只算标了「自有」的钱包; [] = 全不参与; 数组 = 勾选子集 (evm-adapter.fundSelected / 前端 idleAllowedSet 同语义)
-//   2026-09-28 审计修复: 注释改正 (原写「未设置 = 全部钱包」); 勾选只作用于统计条/资金扫描, 余额本身对全部启用钱包都查 (观察钱包快照要用)
+// 2026-10-09 重设计: 只剩总开关. 范围 = 管理钱包里标「自有」且启用的钱包 (evm-adapter.fundSelected / flows.fundSelected / sol fundWalletsSol / 前端 idleAllowedSet 同语义);
+//   原 wallets.<chain> 显式「参与」名单废弃 (旧文件残留的字段读时忽略, 保存时不再写; 标记即权威, 与「自有/观察」按钮重复的那层去掉).
+//   统计条只算自有 (前端按 own 过滤); 余额本身对全部启用钱包都查 (观察钱包快照要用)
 const FUND_CFG_FILE = path.join(__dirname, 'fund-config.json');
 function loadFundCfg() {
-  try {
-    const c = JSON.parse(fs.readFileSync(FUND_CFG_FILE, 'utf8'));
-    return { enabled: c.enabled !== false, wallets: (c.wallets && typeof c.wallets === 'object') ? c.wallets : {} };
-  } catch { return { enabled: true, wallets: {} }; }
+  try { return { enabled: JSON.parse(fs.readFileSync(FUND_CFG_FILE, 'utf8')).enabled !== false }; } catch { return { enabled: true }; }
 }
 app.get('/api/fund/config', (req, res) => res.json(loadFundCfg()));
 app.post('/api/fund/config', adminGuard, (req, res) => {
   const body = req.body || {};
-  const cur = loadFundCfg();
-  const next = { enabled: body.enabled !== false, wallets: {} };
-  const VALID_CHAINS = ['bsc', 'sol', 'eth', 'rh', 'base', 'arc'];
-  const src = (body.wallets && typeof body.wallets === 'object') ? body.wallets : cur.wallets;
-  for (const [ch, arr] of Object.entries(src)) {
-    if (!VALID_CHAINS.includes(ch)) continue;
-    if (Array.isArray(arr)) next.wallets[ch] = arr.slice(0, 60).map(a => String(a).slice(0, 64));
-  }
+  const next = { enabled: body.enabled !== false };
   try {
     const tmp = FUND_CFG_FILE + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(next, null, 2)); fs.renameSync(tmp, FUND_CFG_FILE);
@@ -2273,39 +2257,26 @@ app.post('/api/fund/config', adminGuard, (req, res) => {
     if (['eth', 'rh', 'base', 'arc'].includes(ch) && evmKickRefresh) evmKickRefresh(ch);
     else if (ch === 'sol' && solKickRefresh) solKickRefresh();
   } catch {}
-  console.log(`[fund] config saved: enabled=${next.enabled}, chains=${Object.keys(next.wallets).join(',') || '(all default)'}`);
+  console.log(`[fund] config saved: enabled=${next.enabled}`);
   res.json(loadFundCfg());
 });
 
-// --- 钱包盈亏账本配置 (/api/pnl/config): 总开关 + 按链勾选钱包 ---
-// wallets.<chain> 未设置 = 自有钱包 + 手动开了账本 (ledger) 的观察钱包; [] = 只剩开了账本的观察钱包; 数组 = 勾选子集 ∪ 开了账本的 (evm-adapter.pnlSelected 同语义)
-//   2026-09-28 审计修复: 注释改正 (原写「未设置 = 沿用钱包资金查询的勾选」, 与下面 pnlSelectedAddrs 的实际逻辑不符)
+// --- 钱包盈亏账本配置 (/api/pnl/config): 只剩总开关 (2026-10-09 重设计) ---
+//   账本钱包 = 标「自有」的 ∪ 观察钱包里手动开了账本 (ledger) 的 (evm-adapter.pnlSelected / flows.pnlSelected / sol solPnlWallets 同语义); 盈亏页「自有」范围 (scopeWallets) 只看标自有的.
+//   原 wallets.<chain> 显式名单废弃 (旧文件残留的字段读时忽略, 保存时不再写)
 const PNL_CFG_FILE = path.join(__dirname, 'pnl-config.json');
 function loadPnlCfg() {
-  try {
-    const c = JSON.parse(fs.readFileSync(PNL_CFG_FILE, 'utf8'));
-    return { enabled: c.enabled !== false, wallets: (c.wallets && typeof c.wallets === 'object') ? c.wallets : {} };
-  } catch { return { enabled: true, wallets: {} }; }
+  try { return { enabled: JSON.parse(fs.readFileSync(PNL_CFG_FILE, 'utf8')).enabled !== false }; } catch { return { enabled: true }; }
 }
 function pnlSelectedAddrs(chain, walletAddrs) {
-  const pc = loadPnlCfg();
-  if (!pc.enabled) return new Set();
+  if (!loadPnlCfg().enabled) return new Set();
   const norm = a => chain === 'sol' ? String(a) : String(a).toLowerCase();
-  const led = WALLETS.filter(w => w.ledger === true).map(w => norm(w.address));   // 观察钱包里手动开了账本的
-  if (Array.isArray(pc.wallets[chain])) return new Set([...pc.wallets[chain].map(norm), ...led]);
-  return new Set([...WALLETS.filter(w => w.own === true).map(w => norm(w.address)), ...led]);   // 未单独设置 = 自有 + 开账本的观察
+  return new Set(WALLETS.filter(w => w.own === true || w.ledger === true).map(w => norm(w.address)));   // 自有 + 开账本的观察
 }
 app.get('/api/pnl/config', (req, res) => res.json(loadPnlCfg()));
 app.post('/api/pnl/config', adminGuard, (req, res) => {
   const body = req.body || {};
-  const cur = loadPnlCfg();
-  const next = { enabled: body.enabled !== false, wallets: {} };
-  const VALID_CHAINS = ['bsc', 'sol', 'eth', 'rh', 'base', 'arc'];
-  const src = (body.wallets && typeof body.wallets === 'object') ? body.wallets : cur.wallets;
-  for (const [ch, arr] of Object.entries(src)) {
-    if (!VALID_CHAINS.includes(ch)) continue;
-    if (Array.isArray(arr)) next.wallets[ch] = arr.slice(0, 60).map(a => String(a).slice(0, 64));
-  }
+  const next = { enabled: body.enabled !== false };
   try {
     const tmp = PNL_CFG_FILE + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(next, null, 2)); fs.renameSync(tmp, PNL_CFG_FILE);
@@ -2313,7 +2284,7 @@ app.post('/api/pnl/config', adminGuard, (req, res) => {
   const ch = String(body._chain || '');
   try { if (next.enabled && evmKickLedger && ['rh', 'arc', 'base', 'eth'].includes(ch)) evmKickLedger(ch); if (next.enabled && ch === 'bsc' && bscKickLedger) bscKickLedger(); if (next.enabled && ch === 'sol' && solKickLedger) solKickLedger(); } catch {}
   pnlCacheBust();   // 2026-10-09
-  console.log(`[pnl] config saved: enabled=${next.enabled}, chains=${Object.keys(next.wallets).join(',') || '(沿用资金查询)'}`);
+  console.log(`[pnl] config saved: enabled=${next.enabled}`);
   res.json(loadPnlCfg());
 });
 

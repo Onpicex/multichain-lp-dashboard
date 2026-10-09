@@ -78,29 +78,19 @@ function finish(W) {
   W.outUSD = cnt.filter(e => e.dir === 'out').reduce((s, e) => s + e.usd, 0);
 }
 
-// 钱包资金查询的勾选 (fund-config.json): 未设置 = 只看自有钱包 (与总价值统计同口径)
+// 2026-10-09 重设计: 四项功能的显式「参与」名单废弃, 范围只由钱包「自有/观察」标记决定 (与各链适配器同语义)
+function cfgEnabled(file) { try { return JSON.parse(fs.readFileSync(path.join(__dirname, file), 'utf8')).enabled !== false; } catch { return true; } }
+// 钱包资金查询 (fund-config.json): 自有钱包 (与总价值统计同口径); 总开关关 = 无
 function fundSelected(chainId, wallets) {
-  let c = { enabled: true, wallets: {} };
-  try { const j = JSON.parse(fs.readFileSync(path.join(__dirname, 'fund-config.json'), 'utf8')); c = { enabled: j.enabled !== false, wallets: (j.wallets && typeof j.wallets === 'object') ? j.wallets : {} }; } catch {}
-  if (!c.enabled) return [];
-  const on = wallets.filter(w => w.enabled !== false);
-  const sel = c.wallets[chainId];
-  if (!Array.isArray(sel)) return on.filter(w => w.own === true);
-  const s = new Set(sel.map(a => normAddr(chainId, a)));
-  return on.filter(w => s.has(normAddr(chainId, w.address)));
+  if (!cfgEnabled('fund-config.json')) return [];
+  return wallets.filter(w => w.enabled !== false && w.own === true);
 }
-// 钱包盈亏账本的钱包 (pnl-config.json, 与各链 pnlSelected 同语义): 未设置 = 自有 + 开账本的观察; 数组 = 勾选子集 ∪ 开账本的; 停用 = 无
+// 钱包盈亏账本的钱包 (pnl-config.json): 自有 + 开账本的观察; 总开关关 = 无
 function pnlSelected(chainId, wallets) {
-  let c = { enabled: true, wallets: {} };
-  try { const j = JSON.parse(fs.readFileSync(path.join(__dirname, 'pnl-config.json'), 'utf8')); c = { enabled: j.enabled !== false, wallets: (j.wallets && typeof j.wallets === 'object') ? j.wallets : {} }; } catch {}
-  if (!c.enabled) return [];
-  const on = wallets.filter(w => w.enabled !== false);
-  const sel = c.wallets[chainId];
-  if (!Array.isArray(sel)) return on.filter(w => w.own === true || w.ledger === true);
-  const s = new Set(sel.map(a => normAddr(chainId, a)));
-  return on.filter(w => s.has(normAddr(chainId, w.address)) || w.ledger === true);
+  if (!cfgEnabled('pnl-config.json')) return [];
+  return wallets.filter(w => w.enabled !== false && (w.own === true || w.ledger === true));
 }
-// 充提队列 = 资金查询勾选 ∪ 账本钱包 (2026-10-06: 盈亏页「总体盈亏」要每个账本钱包都有净入金; 此前只开账本的观察钱包不进队列, 旧条目冻结却仍当完整数据)
+// 充提队列 = 自有钱包 ∪ 账本钱包 (2026-10-06: 盈亏页「总体盈亏」要每个账本钱包都有净入金; 此前只开账本的观察钱包不进队列, 旧条目冻结却仍当完整数据)
 function scanWallets(chainId, wallets) {
   let on = true;
   try { on = JSON.parse(fs.readFileSync(path.join(__dirname, 'fund-config.json'), 'utf8')).enabled !== false; } catch {}
