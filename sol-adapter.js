@@ -790,9 +790,11 @@ async function _fetchAllSol() {
       if (!pos._stale) {
       if (!pos.token0.symbol) pos.token0.symbol = cleanSym(symbols[pos.token0addr]?.symbol, pos.token0addr);   // 2026-09-28 审计修复 (XSS 上游)
       if (!pos.token1.symbol) pos.token1.symbol = cleanSym(symbols[pos.token1addr]?.symbol, pos.token1addr);
-      const price0 = prices[pos.token0addr] || 0;
-      const price1 = prices[pos.token1addr] || 0;
-      if (staleMints.has(pos.token0addr) || staleMints.has(pos.token1addr)) pos.priceStale = true;   // 2026-09-28 审计修复: 本轮价格缺失、沿用上轮价
+      let price0 = prices[pos.token0addr] || 0;
+      let price1 = prices[pos.token1addr] || 0;
+      const pl = poolLegPrices(pos, price0, price1);   // 2026-10-10: 非稳定币一边按池内现价 (见 poolLegPrices)
+      if (pl) { pos.pxDev = pl.dev; if (pl.keep) pos.pxKeep = true; else { pos.pxPool = pl.leg; if (pl.leg === 0) price0 = pl.p; else price1 = pl.p; } }
+      if ((staleMints.has(pos.token0addr) && pos.pxPool !== 0) || (staleMints.has(pos.token1addr) && pos.pxPool !== 1)) pos.priceStale = true;   // 2026-09-28 审计修复: 本轮价格缺失、沿用上轮价 (2026-10-10: 按池价定价的一边不算)
       pos.token0USD = price0;
       pos.token1USD = price1;
       pos.positionValueUSD = pos.amount0 * price0 + pos.amount1 * price1;
@@ -805,7 +807,7 @@ async function _fetchAllSol() {
       const claimedUSD = (pos._claimed0 || 0) * price0 + (pos._claimed1 || 0) * price1;
       const collectedUSD = (lg && lg.fees > 0) ? lg.fees : (Number.isFinite(pos.collectedFeesUSD) ? pos.collectedFeesUSD : claimedUSD);
       // feesUnknown: 账本的「已领费拆不开」与本轮「未领费读取失败」任一为真都保留 (applyPnl 会整体覆写该字段)
-      if (lg) pnlLedger.applyPnl(pos, { cost: lg.cost, approx: lg.approx, source: 'ledger', am: lg.a, costBy: lg.cb, withdrawnUSD: lg.ret, collectedUSD, feesUnknown: !!(lg.feesUnknown || pos.feesUnknown) }, a => prices[a] || 0);
+      if (lg) pnlLedger.applyPnl(pos, { cost: lg.cost, approx: lg.approx, source: 'ledger', am: lg.a, costBy: lg.cb, withdrawnUSD: lg.ret, collectedUSD, feesUnknown: !!(lg.feesUnknown || pos.feesUnknown) }, a => a === pos.token0addr ? price0 : a === pos.token1addr ? price1 : (prices[a] || 0));   // 2026-10-10: 持币对照/IL 与头寸同一套价 (池价)
       pos.collectedFeesUSD = collectedUSD;
 
       // === 日化（与 BSC 同口径） ===
@@ -922,6 +924,24 @@ function shouldFlipSol(pos) {
   if (STABLE_MINTS.has(pos.token0addr)) return true;
   return pos.token0addr === WSOL_MINT && !STABLE_MINTS.has(pos.token1addr);
 }
+// 2026-10-10 池内现价估值: 一边是稳定币 (或 SOL) 的池子, 另一边按仓位所在池的现价折算 (currentPrice = token1 per token0, 归一前的原始方向),
+//   Jupiter 价只做参考 (pxDev = 池价 / Jupiter − 1, 前端提示); 偏离 > 50% 不采用 (死池/假币池的池价没意义), 仍用 Jupiter 并标 pxKeep.
+//   真因: CBRS/USDC 仓 Jupiter 报 163.87 而池内 167.96 → 头寸价值少算约 2.4%, 净利润被压成亏损 (实际持平); 成本侧同步改按同 tx 池价 (sol-ledger fillPoolTicks)
+//   返回 { leg: 按池价定价的那一边 (0/1), p: 该边美元价, dev, keep } | null (两边都是稳定币 / 都不是稳定币也没 SOL / 没池价)
+function poolLegPrices(pos, jup0, jup1) {
+  const cp = pos.currentPrice; if (!(cp > 0) || !Number.isFinite(cp)) return null;
+  const st0 = STABLE_MINTS.has(pos.token0addr), st1 = STABLE_MINTS.has(pos.token1addr);
+  const sol0 = pos.token0addr === WSOL_MINT, sol1 = pos.token1addr === WSOL_MINT;
+  let leg = -1, p = 0;
+  if (st1 && !st0) { leg = 0; p = cp; }
+  else if (st0 && !st1) { leg = 1; p = 1 / cp; }
+  else if (sol1 && !st0 && jup1 > 0) { leg = 0; p = cp * jup1; }
+  else if (sol0 && !st1 && jup0 > 0) { leg = 1; p = jup0 / cp; }
+  if (leg < 0 || !(p > 0) || !Number.isFinite(p)) return null;
+  const jup = leg === 0 ? jup0 : jup1;
+  const dev = jup > 0 ? p / jup - 1 : null;
+  return { leg, p, dev, keep: dev != null && Math.abs(dev) > 0.5 };
+}
 function normalizeSolPosition(pos) {
   if (shouldFlipSol(pos)) {
     return {
@@ -929,6 +949,7 @@ function normalizeSolPosition(pos) {
       token0: pos.token1, token1: pos.token0,
       token0addr: pos.token1addr, token1addr: pos.token0addr,
       token0USD: pos.token1USD, token1USD: pos.token0USD,
+      pxPool: pos.pxPool == null ? undefined : 1 - pos.pxPool,   // 2026-10-10: 按池价定价的那一边跟着对调
       amount0: pos.amount1, amount1: pos.amount0,
       feesOwed0: pos.feesOwed1, feesOwed1: pos.feesOwed0,
       currentPrice: pos.currentPrice > 0 ? 1 / pos.currentPrice : 0,
