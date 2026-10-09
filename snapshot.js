@@ -8,6 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const wscope = require('./wallet-scope');   // 2026-10-09: 按钱包「纳入快照」开关
 
 const CFG_FILE = process.env.SNAPSHOT_CFG_FILE || path.join(__dirname, 'snapshot-config.json');
 const DATA_FILE = process.env.SNAPSHOT_DATA_FILE || path.join(__dirname, 'snapshots.json');
@@ -63,8 +64,9 @@ function chainWallets(chain) {
   const file = chain === 'bsc' ? 'wallets.json' : `wallets-${chain}.json`;
   try { return JSON.parse(fs.readFileSync(path.join(__dirname, file), 'utf8')).filter(w => w.enabled !== false); } catch { return []; }
 }
-function ownAddrs(chain) { return chainWallets(chain).filter(w => w.own === true).map(w => w.address); }      // 自有 (「自有」范围)
-function obsAddrs(chain) { return chainWallets(chain).filter(w => w.own !== true).map(w => w.address); }      // 观察 (别人的)
+// 2026-10-09: 两个范围都只含「纳入快照」开着的钱包 (缺省自有纳入、观察不纳入); 自有/观察标记决定落在哪个范围
+function ownAddrs(chain) { return chainWallets(chain).filter(w => w.own === true && wscope.featOn(w, 'snap')).map(w => w.address); }      // 自有范围
+function obsAddrs(chain) { return chainWallets(chain).filter(w => w.own !== true && wscope.featOn(w, 'snap')).map(w => w.address); }      // 观察范围 (另受 cfg.observe 总开关)
 function fetchLocal(pathname, timeoutMs = 60 * 1000) {
   return new Promise((resolve, reject) => {
     const req = http.get({ host: '127.0.0.1', port: PORT, path: pathname, timeout: timeoutMs }, res => {
@@ -170,7 +172,7 @@ async function _take() {
   const own = await collect(cfg, posData, ch => ownAddrs(ch), lastEntry(before.m5, before.hourly, before.days), tls);
   // 观察钱包: 小时级 + 日级 (5 分钟级省掉), 字段一样 (余额也查; 开了账本的还有盈亏)
   const obs = cfg.observe ? await collect(cfg, posData, ch => obsAddrs(ch), lastEntry(before.obs.hourly, [], before.obs.days), tls) : null;
-  if (!own && !obs) throw new Error('没有可记录的钱包 (没有标「自有」的钱包, 观察钱包也没数据)');
+  if (!own && !obs) throw new Error('没有可记录的钱包 (没有钱包「纳入快照」, 或都没数据)');
   const ts = Date.now();
   const lp = localParts(ts, cfg.tz);
   // 2026-09-28 审计修复: 所有 await 结束后才 loadData→改→saveData (中间无 await), 与 DELETE /day/:date 的 load→save 不再交错,
@@ -395,7 +397,7 @@ function mountSnapshot(app, adminGuard) {
     // 观察作用域: 日级全部 + 小时级只带最近 7 天 (钱包多, 省流量)
     const okeys = Object.keys(data.obs.days).sort();
     const obs = { days: okeys.map(k => data.obs.days[k]), hourly: data.obs.hourly.filter(e => Date.now() - e.ts <= 7 * 86400000) };
-    // 2026-10-09: 当前范围 (自有 = 管理钱包标「自有」的; 观察 = 其余). 前端拿它给「只在旧记录点出现、已不在范围」的钱包打「已移出」
+    // 2026-10-09: 当前范围 (自有 / 观察 = 各自里「纳入快照」开着的). 前端拿它给「只在旧记录点出现、已不在范围」的钱包打「已移出」
     const nowScope = { own: {}, obs: {} };
     for (const ch of CHAINS) { nowScope.own[ch] = ownAddrs(ch).map(a => normAddr(ch, a)); nowScope.obs[ch] = obsAddrs(ch).map(a => normAddr(ch, a)); }
     res.json({ days, hourly: data.hourly, m5, obs, totalDays: keys.length, nowScope, ...statusPayload() });

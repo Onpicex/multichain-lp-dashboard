@@ -29,6 +29,7 @@
 const fs = require('fs');
 const path = require('path');
 const ledger = require('./pnl-ledger');
+const wscope = require('./wallet-scope');   // 2026-10-09: 四项功能按钱包「纳入」开关
 const { PublicKey } = require('@solana/web3.js');
 
 const CACHE_V = { sol: 6 };         // 按链分版本: 只改 SOL 口径时不逼 EVM 链整体重扫
@@ -78,17 +79,17 @@ function finish(W) {
   W.outUSD = cnt.filter(e => e.dir === 'out').reduce((s, e) => s + e.usd, 0);
 }
 
-// 2026-10-09 重设计: 四项功能的显式「参与」名单废弃, 范围只由钱包「自有/观察」标记决定 (与各链适配器同语义)
+// 2026-10-09 重设计: 四项功能的显式名单废弃, 范围 = 每个钱包的「纳入」开关 (缺省自有纳入、观察不纳入) (与各链适配器同语义)
 function cfgEnabled(file) { try { return JSON.parse(fs.readFileSync(path.join(__dirname, file), 'utf8')).enabled !== false; } catch { return true; } }
 // 钱包资金查询 (fund-config.json): 自有钱包 (与总价值统计同口径); 总开关关 = 无
 function fundSelected(chainId, wallets) {
   if (!cfgEnabled('fund-config.json')) return [];
-  return wallets.filter(w => w.enabled !== false && w.own === true);
+  return wallets.filter(w => wscope.inScope(w, 'fund'));   // 2026-10-09: 「纳入资金查询」开着且启用的
 }
 // 钱包盈亏账本的钱包 (pnl-config.json): 自有 + 开账本的观察; 总开关关 = 无
 function pnlSelected(chainId, wallets) {
   if (!cfgEnabled('pnl-config.json')) return [];
-  return wallets.filter(w => w.enabled !== false && (w.own === true || w.ledger === true));
+  return wallets.filter(w => wscope.inScope(w, 'ledger'));   // 「纳入盈亏」开着且启用的
 }
 // 充提队列 = 自有钱包 ∪ 账本钱包 (2026-10-06: 盈亏页「总体盈亏」要每个账本钱包都有净入金; 此前只开账本的观察钱包不进队列, 旧条目冻结却仍当完整数据)
 function scanWallets(chainId, wallets) {

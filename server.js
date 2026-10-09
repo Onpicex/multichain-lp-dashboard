@@ -125,6 +125,7 @@ let WALLETS = loadWallets();
 // 启用中的钱包 (enabled 缺省=启用; false=停用: 不抓仓位/不查余额, 只保留在列表里)
 function isWalletOn(w) { return w.enabled !== false; }
 function activeWallets() { return WALLETS.filter(isWalletOn); }
+const wscope = require('./wallet-scope');   // 2026-10-09: 四项功能按钱包「纳入」开关 (fund / ledger / snap / notify; 缺省自有纳入、观察不纳入)
 const BSC_RPC = process.env.BSC_RPC || 'https://bsc-dataseed.binance.org';
 // Ankr Advanced API: 支持逗号分隔多个 endpoint 轮动使用 (分摊限流)
 const ANKR_ADVANCED_URLS = (process.env.ANKR_ADVANCED_URL || (process.env.BSC_RPC?.includes('ankr.com') ? process.env.BSC_RPC.replace('/bsc/', '/multichain/') : ''))
@@ -1814,7 +1815,7 @@ async function _fetchPositionsInner(forceRefresh = false) {
 
   // 钱包闲置余额: fund-config 总开关关掉就不查; 失败沿用上轮快照, 不拖累主数据
   const fundCfg = loadFundCfg();
-  // 2026-09-28 审计修复: 删掉未使用的 fundSel。统计条范围 = 标「自有」的钱包 (2026-10-09 重设计: 显式名单废弃) 由前端 idleFiltered 套在统计条上, 与 evm/sol 同口径;
+  // 2026-09-28 审计修复: 删掉未使用的 fundSel。统计条范围 = 「纳入资金查询」开着的钱包 (2026-10-09 重设计: 按钱包开关, 缺省自有纳入) 由前端 idleFiltered 套在统计条上, 与 evm/sol 同口径;
   //   后端余额对全部启用钱包查 (evm-adapter/sol-adapter 同样如此, 观察钱包的资金快照要用), 不能在这里按勾选裁掉
   const fundWallets = !fundCfg.enabled ? [] : activeWallets();   // 2026-09-28: 全部启用钱包都查余额 (观察钱包快照要用); 统计条只算自有由前端过滤
   let idle = null;
@@ -2016,12 +2017,13 @@ app.patch('/api/wallets/:address', adminGuard, (req, res) => {
   const cur = req.params.address.toLowerCase();
   const idx = WALLETS.findIndex(w => w.address.toLowerCase() === cur);
   if (idx === -1) return res.status(404).json({ error: '地址不存在' });
-  const { name, address, enabled, own, ledger } = req.body || {};
+  const { name, address, enabled, own } = req.body || {};
   let newName, newAddr, newEnabled;
   let newOwn;
-  let newLedger;
-  if (ledger !== undefined) { if (typeof ledger !== 'boolean') return res.status(400).json({ error: 'ledger 须为布尔值' }); newLedger = ledger; }   // 观察钱包手动开账本 (自有钱包默认开, 此标记无意义)
-  if (own !== undefined) { if (typeof own !== 'boolean') return res.status(400).json({ error: 'own 须为布尔值' }); newOwn = own; }   // 自有(true)/观察(false): 资金查询·快照·盈亏·通知默认只看自有
+  const fp = wscope.parseFeatPatch(req.body || {});   // 2026-10-09: 四项功能的「纳入」开关 (fund / ledger / snap / notify), 显式存值
+  if (fp.error) return res.status(400).json({ error: fp.error });
+  const newFeats = fp.feats;
+  if (own !== undefined) { if (typeof own !== 'boolean') return res.status(400).json({ error: 'own 须为布尔值' }); newOwn = own; }   // 自有(true)/观察(false): 只决定落在盈亏页/快照页的哪个范围; 纳入开关缺省 = 自有纳入、观察不纳入
   if (enabled !== undefined) {
     if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled 须为布尔值' });
     newEnabled = enabled;
@@ -2035,7 +2037,7 @@ app.patch('/api/wallets/:address', adminGuard, (req, res) => {
     if (newAddr === null) return res.status(400).json({ error: '无效的 BSC 地址' });
     if (newAddr !== cur && WALLETS.some((w, i) => i !== idx && w.address.toLowerCase() === newAddr)) return res.status(409).json({ error: '地址已存在' });
   }
-  if (newName === undefined && newAddr === undefined && newEnabled === undefined && newOwn === undefined && newLedger === undefined) return res.status(400).json({ error: '需要 name / address / enabled / own / ledger' });
+  if (newName === undefined && newAddr === undefined && newEnabled === undefined && newOwn === undefined && !Object.keys(newFeats).length) return res.status(400).json({ error: wscope.PATCH_FIELDS_HINT });
   const old = { ...WALLETS[idx] };
   const addrChanged = newAddr !== undefined && newAddr !== cur;
   const enabledChanged = newEnabled !== undefined && newEnabled !== isWalletOn(old);
@@ -2043,8 +2045,8 @@ app.patch('/api/wallets/:address', adminGuard, (req, res) => {
   if (newAddr !== undefined) WALLETS[idx].address = newAddr;
   if (newEnabled !== undefined) { if (newEnabled) delete WALLETS[idx].enabled; else WALLETS[idx].enabled = false; }
   if (newOwn !== undefined) { if (newOwn) WALLETS[idx].own = true; else delete WALLETS[idx].own; }
-  if (newLedger !== undefined) { if (newLedger) WALLETS[idx].ledger = true; else delete WALLETS[idx].ledger; }
-  if (newLedger === true && bscKickLedger) setImmediate(bscKickLedger);
+  wscope.applyFeatPatch(WALLETS[idx], newFeats);
+  if (wscope.inScope(WALLETS[idx], 'ledger') && !wscope.inScope(old, 'ledger') && bscKickLedger) setImmediate(bscKickLedger);   // 有效「纳入盈亏」由关→开 (含改标记 / 启用带出的): 踢一轮账本扫描
   saveWallets(WALLETS);
   pnlCacheBust();   // 2026-10-09: 钱包变更后盈亏合并缓存立刻失效
   if (addrChanged) {
@@ -2059,7 +2061,7 @@ app.patch('/api/wallets/:address', adminGuard, (req, res) => {
     for (const w of cache.data.wallets) if ((w.address || '').toLowerCase() === cur) w.name = WALLETS[idx].name;
     savePosCache();
   }
-  console.log(`Wallet updated: ${old.name} (${old.address}) -> ${WALLETS[idx].name} (${WALLETS[idx].address})${enabledChanged ? (newEnabled ? ' [启用]' : ' [停用]') : ''}`);
+  console.log(`Wallet updated: ${old.name} (${old.address}) -> ${WALLETS[idx].name} (${WALLETS[idx].address})${enabledChanged ? (newEnabled ? ' [启用]' : ' [停用]') : ''}${newOwn !== undefined ? (newOwn ? ' [自有]' : ' [观察]') : ''}${Object.keys(newFeats).length ? ' [纳入 ' + JSON.stringify(newFeats) + ']' : ''}`);
   res.json({ ok: true, wallets: WALLETS });
 });
 
@@ -2069,11 +2071,11 @@ const CHAIN_PNL_API = { bsc: '/api/pnl', sol: '/api/sol/pnl', eth: '/api/eth/pnl
 // 2026-09-28 审计修复: 链 id 用 Object.hasOwn 判白名单 (以前 'constructor' 之类的原型键也算命中), 非白名单返回 null
 function walletsFileOf(chain) { if (!Object.hasOwn(CHAIN_PNL_API, chain)) return null; return chain === 'bsc' ? 'wallets.json' : `wallets-${chain}.json`; }
 function chainWallets(chain) { const f = walletsFileOf(chain); if (!f) return []; try { return JSON.parse(fs.readFileSync(path.join(__dirname, f), 'utf8')).filter(w => w.enabled !== false); } catch { return []; } }
-// 盈亏页两个范围 (2026-10-09 重设计: 范围只由管理钱包的「自有/观察」标记决定, 不再有盈亏设置的显式名单): 自有 = 标「自有」的; 观察 = 其余
+// 盈亏页两个范围 (2026-10-09 重设计: 每个钱包一个「纳入盈亏」开关 ledger, 缺省自有纳入、观察不纳入; 自有/观察标记只决定落在哪个范围)
 function scopeWallets(chain, scope) {
   const all = chainWallets(chain);
-  if (scope === 'obs') return all.filter(w => w.own !== true);
-  return all.filter(w => w.own === true);
+  if (scope === 'obs') return all.filter(w => w.own !== true && wscope.featOn(w, 'ledger'));   // 2026-10-09: 两个范围都只含「纳入盈亏」开着的钱包 (观察钱包缺省不纳入, 要显式打开 = 原「开账本」)
+  return all.filter(w => w.own === true && wscope.featOn(w, 'ledger'));
 }
 function fetchLocalJson(pathname, timeoutMs = 30000) {
   return fetch(`http://127.0.0.1:${PORT}${pathname}`, { signal: AbortSignal.timeout(timeoutMs) }).then(r => r.ok ? r.json() : null).catch(() => null);
@@ -2101,7 +2103,7 @@ app.get('/api/pnl/all', async (req, res) => {
       const rep = await fetchLocalJson(`${CHAIN_PNL_API[ch]}?wallet=${encodeURIComponent(w.address)}${refresh ? '&refresh=true' : ''}`);
       if (!rep) continue;
       const wk = `${ch}:${w.address}`;
-      out.wallets.push({ chain: ch, address: w.address, name: w.name, own: w.own === true, ledger: w.ledger === true, ledgerOn: !!rep.ledger, ledgerStale: !!rep.ledgerStale, priceMiss: rep.priceMiss || 0, partial: !!rep.partial, pending: !!rep.pending, scanning: !!rep.scanning, updatedAt: rep.updatedAt || 0, lpUSD: rep.lpUSD || 0, idleUSD: rep.idleUSD, funding: rep.funding || null, n: (rep.positions || []).length });
+      out.wallets.push({ chain: ch, address: w.address, name: w.name, own: w.own === true, ledger: wscope.featOn(w, 'ledger'), ledgerOn: !!rep.ledger, ledgerStale: !!rep.ledgerStale, priceMiss: rep.priceMiss || 0, partial: !!rep.partial, pending: !!rep.pending, scanning: !!rep.scanning, updatedAt: rep.updatedAt || 0, lpUSD: rep.lpUSD || 0, idleUSD: rep.idleUSD, funding: rep.funding || null, n: (rep.positions || []).length });
       for (const r of (rep.positions || [])) out.positions.push({ ...r, chain: ch, wallet: w.name, walletAddress: w.address, wk });
       out.lpUSD += rep.lpUSD || 0;
       if (typeof rep.idleUSD === 'number') out.idleUSD += rep.idleUSD;
@@ -2271,7 +2273,7 @@ function loadPnlCfg() {
 function pnlSelectedAddrs(chain, walletAddrs) {
   if (!loadPnlCfg().enabled) return new Set();
   const norm = a => chain === 'sol' ? String(a) : String(a).toLowerCase();
-  return new Set(WALLETS.filter(w => w.own === true || w.ledger === true).map(w => norm(w.address)));   // 自有 + 开账本的观察
+  return new Set(WALLETS.filter(w => wscope.inScope(w, 'ledger')).map(w => norm(w.address)));   // 2026-10-09: 「纳入盈亏」开着且启用的 (缺省自有纳入)
 }
 app.get('/api/pnl/config', (req, res) => res.json(loadPnlCfg()));
 app.post('/api/pnl/config', adminGuard, (req, res) => {

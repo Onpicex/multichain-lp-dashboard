@@ -7,6 +7,7 @@
 const path = require('path');
 const fs = require('fs');
 const { ethers } = require('ethers');
+const wscope = require('./wallet-scope');   // 2026-10-09: 四项功能按钱包「纳入」开关
 const ledger = require('./pnl-ledger');
 const flows = require('./flows');     // 充提记录 / 净入金 (Ankr 链 base/eth; rh 用本文件的 Transfer 日志回溯, 注入形状同一套)   // 钱包盈亏账本 (rh/arc 纯日志重建: 真实成本/已提回/已领费/历史仓位)
 
@@ -1987,13 +1988,13 @@ function dropWalletFromCache(chainId, addr) {
   if (st.lastGood) delete st.lastGood[addr];
 }
 
-// --- 钱包资金查询配置 (fund-config.json, 路由在 server.js): 只有总开关 (2026-10-09 重设计: 原 wallets.<chain> 显式「参与」名单废弃, 范围只由钱包「自有/观察」标记决定) ---
+// --- 钱包资金查询配置 (fund-config.json, 路由在 server.js): 只有总开关 (2026-10-09 重设计: 原 wallets.<chain> 显式名单废弃, 范围 = 每个钱包的「纳入」开关) ---
 function loadFundCfgEvm() {
   try { return { enabled: JSON.parse(fs.readFileSync(path.join(__dirname, 'fund-config.json'), 'utf8')).enabled !== false }; } catch { return { enabled: true }; }
 }
-function ownWallets(WALLETS) { return WALLETS.filter(w => w.own === true); }   // 标了「自有」的 (资金查询 / 统计条 / 充提扫描的范围)
-function ledgerWallets(WALLETS) { return WALLETS.filter(w => w.own === true || w.ledger === true); }   // 自有 ∪ 观察钱包里手动开了账本的
-function fundSelected(fundCfg, chainId, WALLETS) { return fundCfg.enabled ? ownWallets(WALLETS) : []; }
+function fundWallets(WALLETS) { return WALLETS.filter(w => wscope.inScope(w, 'fund')); }   // 2026-10-09: 「纳入资金查询」开着的 (统计条 / 充提扫描的范围; 缺省自有纳入)
+function ledgerWallets(WALLETS) { return WALLETS.filter(w => wscope.inScope(w, 'ledger')); }   // 「纳入盈亏」开着的 (缺省自有纳入; 观察钱包要显式打开 = 原「开账本」)
+function fundSelected(fundCfg, chainId, WALLETS) { return fundCfg.enabled ? fundWallets(WALLETS) : []; }
 // --- 钱包盈亏账本配置 (pnl-config.json, 与 server.js 的 /api/pnl/config 同一文件): 只有总开关 ---
 //   账本钱包 = 自有 ∪ 手动开了账本的观察钱包 (别人的观察钱包动辄两千笔 tx, 不开账本就不进队列)
 function loadPnlCfgEvm() {
@@ -2842,12 +2843,13 @@ function mountEvmRoutes(app, adminGuard) {
       const wallets = loadWallets(chainId);
       const idx = wallets.findIndex(w => w.address.toLowerCase() === cur);
       if (idx === -1) return res.status(404).json({ error: '地址不存在' });
-      const { name, address, enabled, own, ledger } = req.body || {};
+      const { name, address, enabled, own } = req.body || {};
       let newName, newAddr, newEnabled;
       let newOwn;
-      let newLedger;
-      if (ledger !== undefined) { if (typeof ledger !== 'boolean') return res.status(400).json({ error: 'ledger 须为布尔值' }); newLedger = ledger; }   // 观察钱包手动开账本 (自有钱包默认开, 此标记无意义)
-      if (own !== undefined) { if (typeof own !== 'boolean') return res.status(400).json({ error: 'own 须为布尔值' }); newOwn = own; }   // 自有(true)/观察(false): 资金查询·快照·盈亏·通知默认只看自有
+      const fp = wscope.parseFeatPatch(req.body || {});   // 2026-10-09: 四项功能的「纳入」开关 (fund / ledger / snap / notify), 显式存值
+      if (fp.error) return res.status(400).json({ error: fp.error });
+      const newFeats = fp.feats;
+      if (own !== undefined) { if (typeof own !== 'boolean') return res.status(400).json({ error: 'own 须为布尔值' }); newOwn = own; }   // 自有(true)/观察(false): 只决定落在盈亏页/快照页的哪个范围; 纳入开关缺省 = 自有纳入、观察不纳入
       if (enabled !== undefined) {
         if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled 须为布尔值' });
         newEnabled = enabled;
@@ -2861,7 +2863,7 @@ function mountEvmRoutes(app, adminGuard) {
         if (!/^0x[0-9a-f]{40}$/.test(newAddr)) return res.status(400).json({ error: '无效的 EVM 地址' });
         if (newAddr !== cur && wallets.some((w, i) => i !== idx && w.address.toLowerCase() === newAddr)) return res.status(409).json({ error: '地址已存在' });
       }
-      if (newName === undefined && newAddr === undefined && newEnabled === undefined && newOwn === undefined && newLedger === undefined) return res.status(400).json({ error: '需要 name / address / enabled / own / ledger' });
+      if (newName === undefined && newAddr === undefined && newEnabled === undefined && newOwn === undefined && !Object.keys(newFeats).length) return res.status(400).json({ error: wscope.PATCH_FIELDS_HINT });
       const old = { ...wallets[idx] };
       const addrChanged = newAddr !== undefined && newAddr !== cur;
       const enabledChanged = newEnabled !== undefined && newEnabled !== isWalletOn(old);
@@ -2869,8 +2871,8 @@ function mountEvmRoutes(app, adminGuard) {
       if (newAddr !== undefined) wallets[idx].address = newAddr;
       if (newEnabled !== undefined) { if (newEnabled) delete wallets[idx].enabled; else wallets[idx].enabled = false; }
       if (newOwn !== undefined) { if (newOwn) wallets[idx].own = true; else delete wallets[idx].own; }
-      if (newLedger !== undefined) { if (newLedger) wallets[idx].ledger = true; else delete wallets[idx].ledger; }
-      if (newLedger === true) kickLedger(chainId);
+      wscope.applyFeatPatch(wallets[idx], newFeats);
+      if (wscope.inScope(wallets[idx], 'ledger') && !wscope.inScope(old, 'ledger')) kickLedger(chainId);   // 有效「纳入盈亏」由关→开 (含改标记 / 启用带出的): 踢一轮账本扫描
       saveWallets(chainId, wallets);
       bustPnl();
       const st = chainState(chainId);
@@ -2890,7 +2892,7 @@ function mountEvmRoutes(app, adminGuard) {
         if (st.lastIdle?.byWallet?.[cur]) st.lastIdle.byWallet[cur].name = wallets[idx].name;
         if (st.lastGood && st.lastGood[cur]) st.lastGood[cur].name = wallets[idx].name;
       }
-      console.log(`[${chainId}] Wallet updated: ${old.name} (${old.address}) -> ${wallets[idx].name} (${wallets[idx].address})${enabledChanged ? (newEnabled ? ' [启用]' : ' [停用]') : ''}`);
+      console.log(`[${chainId}] Wallet updated: ${old.name} (${old.address}) -> ${wallets[idx].name} (${wallets[idx].address})${enabledChanged ? (newEnabled ? ' [启用]' : ' [停用]') : ''}${newOwn !== undefined ? (newOwn ? ' [自有]' : ' [观察]') : ''}${Object.keys(newFeats).length ? ' [纳入 ' + JSON.stringify(newFeats) + ']' : ''}`);
       res.json({ ok: true, wallets });
     });
     app.get(`${base}/positions`, async (req, res) => {

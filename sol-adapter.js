@@ -97,6 +97,7 @@ async function getPrices(mints) {
 
 // --- Token metadata (symbol) via Jupiter, with fallback map + cache ---
 const solLedger = require('./sol-ledger');    // Solana 钱包盈亏账本 (Helius 数据源)
+const wscope = require('./wallet-scope');    // 2026-10-09: 四项功能按钱包「纳入」开关
 const pnlLedger = require('./pnl-ledger');    // 只用它的 applyPnl (盈亏字段注入, 各链同一口径)
 const flows = require('./flows');             // 充提记录 / 净入金 (从账本记录挑单向转账, Helius 补对方地址)
 let lastPricesSol = {};                        // 上轮定价 (mint -> USD), 供账本给已关闭仓/无换币记录的币估值
@@ -1037,12 +1038,13 @@ function mountSolRoutes(app, adminGuard) {
   app.patch('/api/sol/wallets/:address', adminGuard, (req, res) => {
     const idx = WALLETS.findIndex(w => w.address === req.params.address);
     if (idx === -1) return res.status(404).json({ error: '地址不存在' });
-    const { name, address, enabled, own, ledger } = req.body || {};
+    const { name, address, enabled, own } = req.body || {};
     let newName, newAddr, newEnabled;
     let newOwn;
-    let newLedger;
-    if (ledger !== undefined) { if (typeof ledger !== 'boolean') return res.status(400).json({ error: 'ledger 须为布尔值' }); newLedger = ledger; }   // 观察钱包手动开账本 (自有钱包默认开, 此标记无意义)
-    if (own !== undefined) { if (typeof own !== 'boolean') return res.status(400).json({ error: 'own 须为布尔值' }); newOwn = own; }   // 自有(true)/观察(false): 资金查询·快照·盈亏·通知默认只看自有
+    const fp = wscope.parseFeatPatch(req.body || {});   // 2026-10-09: 四项功能的「纳入」开关 (fund / ledger / snap / notify), 显式存值
+    if (fp.error) return res.status(400).json({ error: fp.error });
+    const newFeats = fp.feats;
+    if (own !== undefined) { if (typeof own !== 'boolean') return res.status(400).json({ error: 'own 须为布尔值' }); newOwn = own; }   // 自有(true)/观察(false): 只决定落在盈亏页/快照页的哪个范围; 纳入开关缺省 = 自有纳入、观察不纳入
     if (enabled !== undefined) {
       if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled 须为布尔值' });
       newEnabled = enabled;
@@ -1057,7 +1059,7 @@ function mountSolRoutes(app, adminGuard) {
       try { new PublicKey(newAddr); } catch { return res.status(400).json({ error: '无效的 Solana 地址' }); }
       if (newAddr !== WALLETS[idx].address && WALLETS.some((w, i) => i !== idx && w.address === newAddr)) return res.status(409).json({ error: '地址已存在' });
     }
-    if (newName === undefined && newAddr === undefined && newEnabled === undefined && newOwn === undefined && newLedger === undefined) return res.status(400).json({ error: '需要 name / address / enabled / own / ledger' });
+    if (newName === undefined && newAddr === undefined && newEnabled === undefined && newOwn === undefined && !Object.keys(newFeats).length) return res.status(400).json({ error: wscope.PATCH_FIELDS_HINT });
     const old = { ...WALLETS[idx] };
     const addrChanged = newAddr !== undefined && newAddr !== old.address;
     const enabledChanged = newEnabled !== undefined && newEnabled !== isWalletOn(old);
@@ -1065,8 +1067,8 @@ function mountSolRoutes(app, adminGuard) {
     if (newAddr !== undefined) WALLETS[idx].address = newAddr;
     if (newEnabled !== undefined) { if (newEnabled) delete WALLETS[idx].enabled; else WALLETS[idx].enabled = false; }
     if (newOwn !== undefined) { if (newOwn) WALLETS[idx].own = true; else delete WALLETS[idx].own; }
-    if (newLedger !== undefined) { if (newLedger) WALLETS[idx].ledger = true; else delete WALLETS[idx].ledger; }
-    if (newLedger === true) setImmediate(kickSolLedger);
+    wscope.applyFeatPatch(WALLETS[idx], newFeats);
+    if (wscope.inScope(WALLETS[idx], 'ledger') && !wscope.inScope(old, 'ledger')) setImmediate(kickSolLedger);   // 有效「纳入盈亏」由关→开 (含改标记 / 启用带出的): 踢一轮账本扫描
     saveWallets(WALLETS);
     bustPnl();
     if (addrChanged) {
@@ -1080,7 +1082,7 @@ function mountSolRoutes(app, adminGuard) {
       for (const w of (cache.data.wallets || [])) if (w.address === old.address) w.name = WALLETS[idx].name;
       saveCache();
     }
-    console.log(`[SOL] Wallet updated: ${old.name} (${old.address}) -> ${WALLETS[idx].name} (${WALLETS[idx].address})${enabledChanged ? (newEnabled ? ' [启用]' : ' [停用]') : ''}`);
+    console.log(`[SOL] Wallet updated: ${old.name} (${old.address}) -> ${WALLETS[idx].name} (${WALLETS[idx].address})${enabledChanged ? (newEnabled ? ' [启用]' : ' [停用]') : ''}${newOwn !== undefined ? (newOwn ? ' [自有]' : ' [观察]') : ''}${Object.keys(newFeats).length ? ' [纳入 ' + JSON.stringify(newFeats) + ']' : ''}`);
     res.json({ ok: true, wallets: WALLETS });
   });
 }
@@ -1098,7 +1100,7 @@ function readCfg(file) { try { return { enabled: JSON.parse(fs.readFileSync(path
 function loadPnlCfgSol() { return readCfg('pnl-config.json'); }
 function solPnlWallets() {
   if (!loadPnlCfgSol().enabled) return [];
-  return WALLETS.filter(w => w.enabled !== false && (w.own === true || w.ledger === true));   // 自有 + 开账本的观察
+  return WALLETS.filter(w => wscope.inScope(w, 'ledger'));   // 2026-10-09: 「纳入盈亏」开着且启用的 (缺省自有纳入; 观察钱包要显式打开)
 }
 function solSymbols() { const o = {}; for (const [m, sym] of Object.entries(KNOWN_TOKENS)) o[m] = { symbol: sym }; for (const [m, v] of Object.entries(tokenMeta)) if (v && v.symbol) o[m] = v; return o; }
 solLedger.init({

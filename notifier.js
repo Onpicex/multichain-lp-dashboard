@@ -5,6 +5,7 @@
 // 通知失败不翻转状态, 下轮自动重试。渠道: telegram_sentinel_bot(.env TG_BOT_TOKEN/TG_CHAT_ID)。
 const fs = require('fs');
 const path = require('path');
+const wscope = require('./wallet-scope');   // 2026-10-09: 按钱包「纳入通知」开关
 
 const CFG_FILE = process.env.NOTIFY_CFG_FILE || path.join(__dirname, 'notify-config.json');
 const STATE_FILE = process.env.NOTIFY_STATE_FILE || path.join(__dirname, 'notify-state.json');
@@ -39,11 +40,8 @@ function loadState() {
 }
 
 function normAddr(chain, a) { return chain === 'sol' ? String(a) : String(a).toLowerCase(); }
-// 该链标了「自有」且启用的钱包地址 = 监控范围
-function ownAddrs(chain) {
-  const file = chain === 'bsc' ? 'wallets.json' : `wallets-${chain}.json`;
-  try { return JSON.parse(fs.readFileSync(path.join(__dirname, file), 'utf8')).filter(w => w.own === true && w.enabled !== false).map(w => w.address); } catch { return []; }
-}
+// 该链「纳入通知」开着且启用的钱包地址 = 监控范围 (2026-10-09: 按钱包开关, 缺省自有纳入、观察不纳入)
+function notifyAddrs(chain) { return wscope.scopeAddrs(chain, 'notify'); }
 
 function fmtP(v) {
   if (!v || isNaN(v)) return '?';
@@ -122,7 +120,7 @@ async function _checkInner() {
   const events = [];       // 待发送的事件 [{ text, rec, out }]; 哪段发送成功, 哪段的翻转才落实 (2026-09-28 按段提交)
 
   for (const [chain, apiBase] of Object.entries(CHAIN_API)) {
-    const sel = ownAddrs(chain);   // 自有钱包
+    const sel = notifyAddrs(chain);   // 纳入通知的钱包
     if (!sel.length) continue;
     const selSet = new Set(sel.map(a => normAddr(chain, a)));
 
@@ -218,7 +216,7 @@ function mountNotifier(app, adminGuard) {
     return {
       enabled: cfg.enabled, channel: cfg.channel, intervalMin: cfg.intervalMin,
       notifyRecover: cfg.notifyRecover,
-      ownCount: Object.fromEntries(Object.keys(CHAIN_API).map(ch => [ch, ownAddrs(ch).length])),   // 各链监控中的自有钱包数 (设置页角标)
+      inCount: Object.fromEntries(Object.keys(CHAIN_API).map(ch => [ch, notifyAddrs(ch).length])),   // 各链纳入通知的钱包数 (设置页角标)
       channelReady: !!(TG_TOKEN && TG_CHAT),
       lastRun: st.lastRun || 0,
       tracked: Object.keys(st.keys).length,
