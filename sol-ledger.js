@@ -88,9 +88,10 @@ for (const [prog, names] of Object.entries(IX)) for (const n of Object.keys(name
 //   Raydium CLMM 开/加/减仓都在日志 "Program data:" 里发 LiquidityCalculateEvent (92 B) / LiquidityChangeEvent (84 B), 两者 offset 40 都是 pool 当前 tick (i32)
 //     —— 增强交易 API 不带日志, 由 fillPoolTicks 按签名 getTransaction 补 (ix.pt); Meteora DLMM 走 emit_cpi (自调用内层指令, data = EVENT_CPI 8 + disc 8 + body),
 //     AddLiquidity/RemoveLiquidity body = lb_pair 32 | from 32 | position 32 | amounts u64×2 | active_bin_id i32 → 绝对偏移 128 (parseTx 顺手记 ix.ab/ix.lb);
-//     Orca Whirlpool 事件不带 tick, 单边存取只能按区间边界价估 (ax)
+//     Orca Whirlpool 开/加/减仓事件 (LiquidityIncreased/Decreased, 128 B: whirlpool @8..40) 不带价格; 但 CLMM 池价只在换币时变, 每笔换币发 Traded (121 B: whirlpool @8..40,
+//     a_to_b @40, pre_sqrt_price u128 @41, post_sqrt_price u128 @57) → 本操作之前最近一笔换币的 post_sqrt_price 就是操作那一刻的精确池价 (fillOrcaPrices, ix.sp/ix.wp)
 const EV = {};
-for (const [prog, names] of Object.entries({ Raydium: ['LiquidityCalculateEvent', 'LiquidityChangeEvent'], Meteora: ['AddLiquidity', 'RemoveLiquidity'] }))
+for (const [prog, names] of Object.entries({ Raydium: ['LiquidityCalculateEvent', 'LiquidityChangeEvent'], Meteora: ['AddLiquidity', 'RemoveLiquidity'], Orca: ['Traded', 'LiquidityIncreased', 'LiquidityDecreased'] }))
   for (const n of names) EV[`${prog}:${crypto.createHash('sha256').update(`event:${n}`).digest('hex').slice(0, 16)}`] = n;
 
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
@@ -426,7 +427,7 @@ async function fillPoolTicks(wallet, deadline) {
   for (const [sig, rec] of Object.entries(W.txs)) {
     if (rec.ev || !(rec.lp || []).some(ix => ix.p === 'Raydium' && PT_OPS.has(IX.Raydium[ix.n]))) continue;
     if (Date.now() > deadline) { deps.log(`[SOL] pnl-ledger 池 tick 补齐 ${wallet.slice(0, 6)}: 预算用尽, 下轮续`); break; }
-    const r = await heliusRpc('getTransaction', [sig, { maxSupportedTransactionVersion: 0, encoding: 'json', commitment: 'finalized' }]);
+    const r = await heliusRpc('getTransaction', [sig, { maxSupportedTransactionVersion: 1, encoding: 'json', commitment: 'finalized' }]);   // 2026-10-10: 版本上限 1 (版本 1 的交易 Helius 按 0 请求会拒)
     if (!r || !r.meta) { if (++fail >= 3) { deps.log(`[SOL] pnl-ledger 池 tick 补齐 ${wallet.slice(0, 6)}: RPC 连失败 3 次, 下轮续`); break; } continue; }
     const ticks = raydiumTicksFromLogs(r.meta.logMessages);
     const ray = rec.lp.filter(ix => ix.p === 'Raydium');
@@ -458,6 +459,86 @@ async function fillBinSteps(wallet, deadline) {
     await sleep(100);
   }
   if (n) { deps.log(`[SOL] pnl-ledger binStep 补齐 ${wallet.slice(0, 6)}: ${n} 池`); save(); }
+  return n;
+}
+// ---- Orca 精确池价 (2026-10-10) ----
+//   Whirlpool 的开/加/减仓事件不带价格, 单边存取原先只能按区间边界价估 (ax; 线上 28 笔实测误差中位 0.36%、最大 2.5%), 或退用别的 tx 的观测 (隔得久就偏: 1.26h → 2%).
+//   CLMM 池价只在换币时变, 开/加/减仓不改价 → 本笔操作之前最近一笔换币的 post_sqrt_price 就是操作那一刻的精确池价 (抽样 10 笔: 都在 1~2 笔 tx 内找到, 换币早于操作 3~170 秒).
+//   做法: 对每笔带 Orca 开/加/减仓的 tx 取日志, 先看本 tx 内同池有无换币 (zap: 流动性事件之前最近一笔取 post, 之后第一笔取 pre), 没有就按池子签名表向前回溯 (跳过失败 tx) 找最近的 Traded;
+//   结果记在腿上 ix.sp (post_sqrt_price 十进制串) + ix.wp (池子), 池子两枚 mint 记在 s.d.wp[pool] = { a, b } (加/减仓指令槽位 7/8 免 RPC, 没有的读 Whirlpool 账户 token_mint_a @101 / token_mint_b @181);
+//   buildPriceObs 按 (sp / 2^64)^2 × 10^(decA − decB) 记 pr 0 精确观测. rec.oev: 1 = 已补, 2 = 回溯没找到 (不再重试). 每轮限 20 笔 / 150 次 RPC, 新的先补 (活跃仓先准)
+// 日志 → Orca 事件序列 [{ ev, pool, pre?, post? }] (按 invoke/success 栈归属到 whirlpool 程序; pre/post 为 u128 十进制串)
+function orcaEventsFromLogs(logs) {
+  const ORCA = PROG_ID.Orca, stack = [], out = [];
+  for (const L of (logs || [])) {
+    if (L.startsWith('Program ') && L.includes(' invoke [')) stack.push(L.split(' ')[1]);
+    else if (L.startsWith('Program ') && (L.endsWith(' success') || L.includes(' failed'))) stack.pop();
+    else if (L.startsWith('Program data: ') && stack.length && stack[stack.length - 1] === ORCA) {
+      let b = null; try { b = Buffer.from(L.slice(14), 'base64'); } catch {}
+      if (!b || b.length < 40) continue;
+      const ev = EV[`Orca:${b.subarray(0, 8).toString('hex')}`]; if (!ev) continue;
+      const e = { ev, pool: new PublicKey(b.subarray(8, 40)).toBase58() };
+      if (ev === 'Traded') { if (b.length < 73) continue; const u = o => ((b.readBigUInt64LE(o + 8) << 64n) | b.readBigUInt64LE(o)).toString(); e.pre = u(41); e.post = u(57); }
+      out.push(e);
+    }
+  }
+  return out;
+}
+const ORCA_POOL_SLOT = n => IX.Orca[n] === 'open' ? 5 : 0;   // 开仓指令 whirlpool 在槽位 5, 加/减仓在槽位 0 (线上开仓+加仓 tx 实测)
+async function fillOrcaPrices(wallet, deadline) {
+  const s = state(), W = s.d.wallets[wallet]; if (!W || W.partial) return 0;
+  const WP = s.d.wp = s.d.wp || {};
+  const pending = Object.entries(W.txs).filter(([, rec]) => !rec.oev && (rec.lp || []).some(ix => ix.p === 'Orca' && PT_OPS.has(IX.Orca[ix.n]))).sort((a, b) => b[1].ts - a[1].ts);
+  if (!pending.length) return 0;
+  for (const [, rec] of pending) for (const ix of rec.lp) { const pm = ix.p === 'Orca' && PT_OPS.has(IX.Orca[ix.n]) ? poolMintsOf(ix) : null; if (pm && ix.acc[0] && !WP[ix.acc[0]]) WP[ix.acc[0]] = { a: pm[0], b: pm[1] }; }
+  const MAX_OPS = 20, MAX_CALLS = 150, PAGE = 50, PAGES = 3, MAX_TX = 40;   // 每轮最多补 20 笔 / 150 次 RPC; 每笔回溯最多翻 150 笔签名、取 40 笔 tx (冷池翻不到就放弃, 不每轮重烧)
+  let n = 0, miss = 0, fail = 0, calls = 0, stop = '';
+  const call = async (m, p) => { calls++; return heliusRpc(m, p); };
+  for (const [sig, rec] of pending) {
+    if (n + miss >= MAX_OPS || calls >= MAX_CALLS) { stop = '本轮限额'; break; }
+    if (Date.now() > deadline) { stop = '预算用尽'; break; }
+    const r = await call('getTransaction', [sig, { maxSupportedTransactionVersion: 1, encoding: 'json', commitment: 'finalized' }]);
+    if (!r || !r.meta) { if (++fail >= 3) { stop = 'RPC 连失败 3 次'; break; } continue; }
+    const evs = orcaEventsFromLogs(r.meta.logMessages);
+    const legs = rec.lp.filter(ix => ix.p === 'Orca' && PT_OPS.has(IX.Orca[ix.n]));
+    const pools = new Set(evs.filter(e => e.ev !== 'Traded').map(e => e.pool));   // 本 tx 动过流动性的池 (事件里的 whirlpool); 没事件 (日志截断) 退用指令槽位
+    if (!pools.size) for (const ix of legs) { const p = ix.acc[ORCA_POOL_SLOT(ix.n)]; if (p) pools.add(p); }
+    let ok = true, cut = false;
+    for (const pool of pools) {
+      let sp = null, fetched = 0;
+      const li = evs.findIndex(e => e.pool === pool && e.ev !== 'Traded');
+      const before = evs.slice(0, li < 0 ? evs.length : li).filter(e => e.pool === pool && e.ev === 'Traded'), after = li < 0 ? [] : evs.slice(li + 1).filter(e => e.pool === pool && e.ev === 'Traded');
+      if (before.length) sp = before[before.length - 1].post; else if (after.length) sp = after[0].pre;
+      let cursor = sig;
+      for (let pg = 0; pg < PAGES && sp == null && fetched < MAX_TX && !cut; pg++) {
+        if (calls >= MAX_CALLS) { cut = true; break; }
+        const sigs = await call('getSignaturesForAddress', [pool, { before: cursor, limit: PAGE, commitment: 'finalized' }]);
+        if (!Array.isArray(sigs) || !sigs.length) break;
+        for (const sg of sigs) {
+          cursor = sg.signature; if (sg.err) continue;
+          if (fetched >= MAX_TX) break;
+          if (calls >= MAX_CALLS) { cut = true; break; }
+          fetched++;
+          const tx = await call('getTransaction', [sg.signature, { maxSupportedTransactionVersion: 1, encoding: 'json', commitment: 'finalized' }]);
+          if (!tx || !tx.meta || tx.meta.err) continue;
+          const tr = orcaEventsFromLogs(tx.meta.logMessages).filter(e => e.pool === pool && e.ev === 'Traded');
+          if (tr.length) { sp = tr[tr.length - 1].post; break; }
+          await sleep(60);
+        }
+      }
+      if (sp == null) { ok = false; continue; }
+      if (!WP[pool] && calls < MAX_CALLS) {   // 本池没有加/减仓指令可取 mint: 读 Whirlpool 账户
+        const ai = await call('getAccountInfo', [pool, { encoding: 'base64' }]);
+        const raw = ai && ai.value && ai.value.data && ai.value.data[0]; const b = raw ? Buffer.from(raw, 'base64') : null;
+        if (b && b.length >= 213) WP[pool] = { a: new PublicKey(b.subarray(101, 133)).toBase58(), b: new PublicKey(b.subarray(181, 213)).toBase58() };
+      }
+      for (const ix of legs) { const p = ix.acc[ORCA_POOL_SLOT(ix.n)]; if (p === pool || (pools.size === 1 && !p)) { ix.sp = sp; ix.wp = pool; } }
+    }
+    if (cut && !ok) { stop = '本轮限额'; break; }   // 回溯被本轮限额打断的不算「没找到」, 下轮续
+    rec.oev = ok ? 1 : 2; if (ok) n++; else miss++;
+    await sleep(120);
+  }
+  if (n || miss) { deps.log(`[SOL] pnl-ledger Orca 池价补齐 ${wallet.slice(0, 6)}: ${n} 笔${miss ? `, ${miss} 笔回溯 ${MAX_TX} 笔 tx 内没找到换币 (保留原估法)` : ''}${stop ? `; ${stop}, 剩 ${pending.length - n - miss} 笔下轮续` : ''} (RPC ${calls} 次)`); save(); }
   return n;
 }
 
@@ -554,7 +635,7 @@ function buildPriceObs(order, P, keys) {
   const add = (m, ts, p, pr, sg, ax) => { if (p > 0 && Number.isFinite(p)) (obs[m] = obs[m] || []).push({ ts, p, pr, s: sg, ax: !!ax }); };   // 2026-09-28 审计修复: 记下来源 tx 签名 s, 供「同 tx 观测优先」; 2026-10-10: ax = 估的 (区间边界价), 只在没别的可用时退用
   const dec = m => { const x = state().d.tok[m]; return x && x.decimals != null ? x.decimals : null; };
   const sentTo = {};   // 收过本钱包代币的地址 → 收过的 mint
-  const LB = state().d.lb || {};
+  const LB = state().d.lb || {}, WP = state().d.wp || {};
   const solQuoted = [];   // 2026-10-10: 以 SOL 计价的池子 (X/SOL) 的精确池价, 等 SOL 美元价观测齐了再折成美元 (下面循环之后)
   const byA = (a, b) => Buffer.compare(b58decode(a) || Buffer.alloc(0), b58decode(b) || Buffer.alloc(0)) < 0;   // 池子 A/B (token0/1) 按 mint 字节序
   for (const t of order) {
@@ -570,6 +651,10 @@ function buildPriceObs(order, P, keys) {
       } else if (ix.p === 'Meteora' && ix.ab != null && ix.lb && LB[ix.lb]) {
         const { bs, x, y } = LB[ix.lb], dX = dec(x), dY = dec(y);
         if (dX != null && dY != null) exact = [x, y, Math.pow(1 + bs / 10000, ix.ab) * Math.pow(10, dX - dY)];
+      } else if (ix.p === 'Orca' && ix.sp != null && ix.wp && WP[ix.wp]) {   // 2026-10-10: 操作前最近一笔换币的 post_sqrt_price (fillOrcaPrices); 池价 B per A = (sqrt / 2^64)^2 × 10^(decA − decB)
+        const { a, b } = WP[ix.wp], dA = dec(a), dB = dec(b);
+        let r = null; try { r = Number(BigInt(ix.sp)) / 2 ** 64; } catch {}
+        if (dA != null && dB != null && r > 0) exact = [a, b, r * r * Math.pow(10, dA - dB)];
       }
       if (exact) {
         const [mA, mB, pAB] = exact;
@@ -966,6 +1051,7 @@ async function runQueue(liveByWallet, opts = {}) {
         await reparseUnnamed(w.address, deadline);
         await fillPoolTicks(w.address, deadline);   // 2026-10-10: Raydium 开/加/减仓 tx 的池 tick (日志事件)
         await fillBinSteps(w.address, deadline);    // 2026-10-10: Meteora 池 bin_step / 两枚 mint
+        await fillOrcaPrices(w.address, deadline);  // 2026-10-10: Orca 开/加/减仓之前最近一笔换币的 post_sqrt_price (精确池价)
         await fillBlockOrder(w.address, deadline);
         await computeWithHist(w.address, (liveByWallet && liveByWallet[w.address]) || [], w.name);
         // 2026-10-08: 只在已关闭仓出现过的池子 mint (活跃仓缓存没见过, 没查过 symbol) 补查一次; 查到新的就重算 (pair 名是算的时候定的; 重算是纯本地)
@@ -1046,4 +1132,4 @@ function walletReport(wallet, liveWallet, useLedger = true) {   // useLedger=fal
   return out;
 }
 
-module.exports = { init, enabled, runQueue, positionPnl, walletStatus, walletReport, histPrice, obsReady, ROUND_MS, _state: state, _test: { parseTx, computeWallet, computeWithHist, reparseUnnamed, fillBlockOrder, scanTokenAccounts, buildPriceObs, walletFlow, poolPriceFromAmounts, scanWallet, positionKeysOf, impliedPriceNear, priceAt, raydiumTicksFromLogs, fillPoolTicks, fillBinSteps, EV } };   // 2026-09-28 审计修复: 多导出几个给独立脚本验证
+module.exports = { init, enabled, runQueue, positionPnl, walletStatus, walletReport, histPrice, obsReady, ROUND_MS, _state: state, _test: { parseTx, computeWallet, computeWithHist, reparseUnnamed, fillBlockOrder, scanTokenAccounts, buildPriceObs, walletFlow, poolPriceFromAmounts, scanWallet, positionKeysOf, impliedPriceNear, priceAt, raydiumTicksFromLogs, fillPoolTicks, fillBinSteps, orcaEventsFromLogs, fillOrcaPrices, EV } };   // 2026-09-28 审计修复: 多导出几个给独立脚本验证
