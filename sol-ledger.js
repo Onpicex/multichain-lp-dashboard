@@ -110,7 +110,7 @@ function pda(seedStr, mint, prog) {
 }
 const PROG_ID = Object.fromEntries(Object.entries(PROGS).map(([k, v]) => [v, k]));
 
-let deps = { prices: () => ({}), symbols: () => ({}), wallets: () => [], log: console.log, histSol: null };   // histSol(tsMs) → SOL 当时美元价 (0 = 没取到)
+let deps = { prices: () => ({}), symbols: () => ({}), wallets: () => [], log: console.log, histSol: null, uiMult: () => 1 };   // 2026-10-13: uiMult(mint) → Token-2022 份额乘数 (出口数量换份额口径)   // histSol(tsMs) → SOL 当时美元价 (0 = 没取到)
 function init(d) { deps = { ...deps, ...d }; }
 function key() { return (process.env.HELIUS_KEY || '').trim(); }
 function enabled() { return !!key(); }
@@ -1073,8 +1073,13 @@ async function runQueue(liveByWallet, opts = {}) {
 function positionPnl(wallet, k) {
   if (!enabled()) return null;
   const W = state().d.wallets[wallet]; if (!W || W.partial) return null;
-  const P = W.pos[k]; return P && P.c && P.c.cost > 0 ? P.c : null;
+  const P = W.pos[k]; return P && P.c && P.c.cost > 0 ? scaleOut(P.c) : null;
 }
+// 2026-10-13: 账本内部数量 (a / cb.q / lots.q) 全按链上 raw 单位 (与池价、观测价同口径, 自洽); 只在出口换成份额口径 (Token-2022 scaledUiAmount 乘数,
+//   由 sol-adapter 注入 deps.uiMult), 与仓位数量 / Jupiter 价同口径, 美元不变. 乘数 = 1 的币原样.
+const um = m => { const v = Number(deps.uiMult ? deps.uiMult(m) : 1); return v > 0 && Number.isFinite(v) ? v : 1; };
+function scaleCb(cb) { if (!cb) return cb; const o = {}; for (const [m, v] of Object.entries(cb)) o[m] = v && typeof v === 'object' ? { ...v, q: (v.q || 0) * um(m) } : v; return o; }
+function scaleOut(c) { const a = {}; for (const [m, q] of Object.entries(c.a || {})) a[m] = q * um(m); return { ...c, a, cb: scaleCb(c.cb) }; }
 function walletStatus(wallet) {
   if (!enabled()) return { ledger: false, unsupported: true };
   const s = state(); const W = s.d.wallets[wallet];
@@ -1121,12 +1126,12 @@ function walletReport(wallet, liveWallet, useLedger = true) {   // useLedger=fal
       out.positions.push({
         key: k, protocol: PROTO[P.p] || P.p, platform: P.p, tokenId: k.slice(0, 8), pair: c.pair, feeLabel: null,
         status, note: status === 'active' ? '' : (unseen ? 'unseen' : c.note), inRange: null, openTs: c.openTs, closeTs: status === 'active' ? 0 : c.closeTs, source: 'ledger',
-        costUSD: c.cost, costApprox: c.approx, costBy: c.cb || null, valueUSD: 0, pendingFeesUSD: 0, collectedFeesUSD: c.fees, feeLog: feeLogOf(c.fx), withdrawnUSD: c.ret,
+        costUSD: c.cost, costApprox: c.approx, costBy: scaleCb(c.cb) || null, valueUSD: 0, pendingFeesUSD: 0, collectedFeesUSD: c.fees, feeLog: feeLogOf(c.fx), withdrawnUSD: c.ret,
         hodlValueUSD: null, ilUSD: null, netProfitUSD: c.cost > 0 && !noNet ? net : null, netProfitPct: c.cost > 0 && !noNet ? net / c.cost * 100 : null, feesUnknown: c.feesUnknown,
         tokens: (c.mints || []).map(m => ({ address: m, symbol: (sym[m] && sym[m].symbol) || STABLES[m] || (m === WSOL ? 'SOL' : m.slice(0, 4) + '…') })),
       });
     }
-    out.lots = Object.entries(W.lots || {}).map(([m, L]) => ({ token: m, qty: L.q, costUSD: L.c, avgCost: L.q > 0 ? L.c / L.q : 0, approx: L.ax }));
+    out.lots = Object.entries(W.lots || {}).map(([m, L]) => { const q = L.q * um(m); return { token: m, qty: q, costUSD: L.c, avgCost: q > 0 ? L.c / q : 0, approx: L.ax }; });   // 2026-10-13: 份额口径
   }
   for (const [k, p] of liveMap) if (!seen.has(k)) out.positions.push(rowLive(k, p));
   return out;

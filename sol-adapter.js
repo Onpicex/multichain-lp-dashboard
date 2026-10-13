@@ -100,7 +100,62 @@ const solLedger = require('./sol-ledger');    // Solana 钱包盈亏账本 (Heli
 const wscope = require('./wallet-scope');    // 2026-10-09: 四项功能按钱包「纳入」开关
 const pnlLedger = require('./pnl-ledger');    // 只用它的 applyPnl (盈亏字段注入, 各链同一口径)
 const flows = require('./flows');             // 充提记录 / 净入金 (从账本记录挑单向转账, Helius 补对方地址)
-let lastPricesSol = {};                        // 上轮定价 (mint -> USD), 供账本给已关闭仓/无换币记录的币估值
+let lastPricesSol = {};                        // 上轮定价 (mint -> USD, 份额口径 = Jupiter usdPrice), 供账本给已关闭仓/无换币记录的币估值
+// 2026-10-13: Token-2022 scaledUiAmount 份额乘数 (xStocks 分红再投: 钱包/Raydium/Jupiter 显示的份额 = 链上 raw × 乘数, 池子按 raw 成交, 乘数只在分红时改).
+//   真因: 某 AVGOx/USDC 仓 Raydium 官方区间 350.36–358.87, 看板 352.52–361.08, 比值正好 = 1/1.00616 (AVGOx 当前乘数); 数量同理差 0.6%.
+//   做法: 仓位数量/未领费/已领费/三价在定价前换成份额口径 (数量 × m, 价 × m1/m0), 美元价值不变 (raw 数 × raw 价 = 份额数 × 份额价);
+//   账本 (sol-ledger) 内部仍全按 raw 自洽 —— 交给它的现价表换成 raw 口径 (rawPricesSol), 它出口的数量 (positionPnl / walletReport) 由它按 deps.uiMult 换成份额口径.
+//   乘数每轮随仓位 mint 一起读 (getMultipleParsedAccounts, 一次 RPC), 读失败沿用上次; 落盘 ui-mult-sol.json, 重启后账本首轮回填 (190s) 早于首轮仓位刷新也有值.
+const UI_MULT_FILE = path.join(__dirname, 'ui-mult-sol.json');
+let uiMultCfg = {};   // mint -> { m, nm, eff }: multiplier / newMultiplier / newMultiplier 生效秒 (0 = 无); 没该扩展的 mint 记 { m: 1 }
+{ const u = readJsonSafe(UI_MULT_FILE, {}); if (u && typeof u === 'object' && !Array.isArray(u)) uiMultCfg = u; }
+function uiMultOf(mint) {
+  const c = uiMultCfg[mint]; if (!c) return 1;
+  const v = (c.eff > 0 && Date.now() / 1000 >= c.eff && c.nm > 0) ? c.nm : c.m;   // 同 sol-stocks parseMint: 到生效时间后用 newMultiplier
+  return v > 0 && Number.isFinite(v) ? v : 1;
+}
+const UI_MULT_TTL = 30 * 60 * 1000;   // 乘数只在分红时改 (newMultiplier 提前排期, uiMultOf 到点自动切), 每个 mint 30 分钟问一次就够
+const uiMultAt = {};                   // mint -> 上次读到的时刻 (只在内存, 重启后首轮全读一遍)
+async function refreshUiMults(mints) {
+  const now = Date.now();
+  const uniq = [...new Set(mints)].filter(m => m && !(uiMultCfg[m] && uiMultAt[m] && now - uiMultAt[m] < UI_MULT_TTL));
+  if (!uniq.length) return;
+  const next = {};
+  for (let i = 0; i < uniq.length; i += 100) {
+    const batch = uniq.slice(i, i + 100);
+    const keys = batch.map(k => new PublicKey(k));
+    // 钱包刚扫完主 RPC 常常还在 429 (首轮实测): 主 → 等 3s 备胎 → 等 8s 主, 三次都不行才算失败 (沿用上次)
+    let r = null, lastErr = null;
+    for (const [c, wait] of [[conn, 0], [new Connection(SOL_RPC_FALLBACK, 'confirmed'), 3000], [conn, 8000]]) {
+      if (wait) await new Promise(res => setTimeout(res, wait));
+      try { r = await c.getMultipleParsedAccounts(keys); break; } catch (e) { lastErr = e; }
+    }
+    if (!r) throw lastErr;
+    (r.value || []).forEach((acc, j) => {
+      const info = acc?.data?.parsed?.info; if (!info || info.decimals == null) return;   // 不是 mint / 没解析出来: 不写 (沿用旧值)
+      const su = (info.extensions || []).find(e => e?.extension === 'scaledUiAmountConfig')?.state;
+      next[batch[j]] = su ? { m: Number(su.multiplier) || 1, nm: Number(su.newMultiplier) || 0, eff: Number(su.newMultiplierEffectiveTimestamp) || 0 } : { m: 1 };
+    });
+    for (const m of batch) uiMultAt[m] = now;
+  }
+  let changed = false;
+  for (const [m, c] of Object.entries(next)) { const o = uiMultCfg[m]; if (!o || o.m !== c.m || o.nm !== c.nm || o.eff !== c.eff) changed = true; uiMultCfg[m] = c; }
+  if (changed) {
+    try { writeJsonAtomic(UI_MULT_FILE, uiMultCfg); } catch (e) { console.error('[SOL] 份额乘数落盘失败:', String(e?.message || e).slice(0, 80)); }
+    const scaled = Object.keys(uiMultCfg).filter(m => uiMultOf(m) !== 1);
+    console.log(`[SOL] Token-2022 份额乘数更新: ${scaled.length ? scaled.map(m => `${tokenMeta[m]?.symbol || KNOWN_TOKENS[m] || m.slice(0, 4) + '…'} ×${uiMultOf(m).toFixed(6)}`).join(', ') : '(全部 = 1)'}`);
+  }
+}
+// 仓位 (归一前原始方向, currentPrice = token1 per token0) 的数量 / 费 / 三价从 raw 换成份额口径
+function applyUiMult(pos, m0, m1) {
+  pos.uiMult0 = m0; pos.uiMult1 = m1;
+  for (const f of ['amount0', 'feesOwed0', '_claimed0']) if (Number.isFinite(pos[f])) pos[f] *= m0;
+  for (const f of ['amount1', 'feesOwed1', '_claimed1']) if (Number.isFinite(pos[f])) pos[f] *= m1;
+  const k = m1 / m0;   // 份额价 = raw 价 × m1/m0 (token1_ui / token0_ui)
+  for (const f of ['currentPrice', 'lowerPrice', 'upperPrice']) if (pos[f] > 0) pos[f] *= k;
+}
+// 交账本 / 充提记录的现价表: 它们的数量按 raw, 价也得按 raw 单位 (= 份额价 × 乘数)
+function rawPricesSol() { const o = {}; for (const [m, p] of Object.entries(lastPricesSol)) o[m] = p * uiMultOf(m); return o; }
 const TOKEN_META_FILE = path.join(__dirname, 'token-meta-sol.json');
 let tokenMeta = {};
 {
@@ -767,7 +822,8 @@ async function _fetchAllSol() {
   // 2026-10-01 修复: WSOL 常驻报价表 —— 账本给 SOL 腿兜底估值 (priceAt 无观测时退到 lastPricesSol[WSOL]); 旧版只问活跃仓的 mint,
   //   钱包没有 SOL 对的活跃仓时 SOL 现价 = 0, 已关闭仓的 SOL 提回就按 $0 算
   allMints.push(WSOL_MINT);
-  const [symbols, freshPrices] = await Promise.all([getTokenSymbols(allMints), getPrices(allMints)]);
+  const [symbols, freshPrices] = await Promise.all([getTokenSymbols(allMints), getPrices(allMints),
+    refreshUiMults(allMints).catch(e => console.error('[SOL] 份额乘数读取失败, 沿用上次:', String(e?.message || e).slice(0, 100)))]);   // 2026-10-13: Token-2022 份额乘数
   // 2026-09-28 审计修复: 某 mint 本轮无价而上轮有 → 回退上轮价 (仓位打 priceStale); 整批为空不覆盖 lastPricesSol; stats.priceMiss = 缺价 token 数
   const prices = { ...freshPrices };
   const uniqMints = [...new Set(allMints)];
@@ -790,6 +846,8 @@ async function _fetchAllSol() {
       if (!pos._stale) {
       if (!pos.token0.symbol) pos.token0.symbol = cleanSym(symbols[pos.token0addr]?.symbol, pos.token0addr);   // 2026-09-28 审计修复 (XSS 上游)
       if (!pos.token1.symbol) pos.token1.symbol = cleanSym(symbols[pos.token1addr]?.symbol, pos.token1addr);
+      const um0 = uiMultOf(pos.token0addr), um1 = uiMultOf(pos.token1addr);   // 2026-10-13: 先换成份额口径再定价 (Jupiter usdPrice 是每份额价, 池价/数量是 raw)
+      if (um0 !== 1 || um1 !== 1) applyUiMult(pos, um0, um1);
       let price0 = prices[pos.token0addr] || 0;
       let price1 = prices[pos.token1addr] || 0;
       const pl = poolLegPrices(pos, price0, price1);   // 2026-10-10: 非稳定币一边按池内现价 (见 poolLegPrices)
@@ -950,6 +1008,7 @@ function normalizeSolPosition(pos) {
       token0addr: pos.token1addr, token1addr: pos.token0addr,
       token0USD: pos.token1USD, token1USD: pos.token0USD,
       pxPool: pos.pxPool == null ? undefined : 1 - pos.pxPool,   // 2026-10-10: 按池价定价的那一边跟着对调
+      uiMult0: pos.uiMult1, uiMult1: pos.uiMult0,                 // 2026-10-13: 份额乘数跟着对调
       amount0: pos.amount1, amount1: pos.amount0,
       feesOwed0: pos.feesOwed1, feesOwed1: pos.feesOwed0,
       currentPrice: pos.currentPrice > 0 ? 1 / pos.currentPrice : 0,
@@ -1125,7 +1184,8 @@ function solPnlWallets() {
 }
 function solSymbols() { const o = {}; for (const [m, sym] of Object.entries(KNOWN_TOKENS)) o[m] = { symbol: sym }; for (const [m, v] of Object.entries(tokenMeta)) if (v && v.symbol) o[m] = v; return o; }
 solLedger.init({
-  prices: () => lastPricesSol,
+  prices: rawPricesSol,   // 2026-10-13: 账本数量按 raw, 价给 raw 口径 (份额价 × 乘数)
+  uiMult: uiMultOf,       // 账本出口数量换份额口径
   symbols: solSymbols,
   wallets: solPnlWallets,
   log: console.log,
@@ -1134,7 +1194,7 @@ solLedger.init({
   ensureSymbols: async mints => { const known = ms => ms.filter(m => tokenMeta[m] && !tokenMeta[m]._fallbackAt).length; const before = known(mints); try { await getTokenSymbols(mints); } catch {} return known(mints) > before; },
 });
 // 充提记录: 直接读账本落盘的逐笔记录 (没开账本的钱包就没有充提数据)
-flows.initSol({ records: addr => solLedger._state().d.wallets[addr] || null, prices: () => lastPricesSol, symbols: solSymbols, histPrice: solLedger.histPrice, obsReady: solLedger.obsReady });
+flows.initSol({ records: addr => solLedger._state().d.wallets[addr] || null, prices: rawPricesSol, uiMult: uiMultOf, symbols: solSymbols, histPrice: solLedger.histPrice, obsReady: solLedger.obsReady });
 function kickSolFlows() { flows.runQueue('sol', WALLETS).catch(e => console.error('[SOL] flows:', e.message)); }
 function liveByWalletSol() { const m = {}; for (const w of (cache.data?.wallets || [])) m[w.address] = (w.positions || []).filter(p => p.liquidityActive); return m; }
 // 2026-09-30 修 (DJT/USDC 加仓后成本/无常/净利润错 40 分钟实例): 账本 30 分钟一轮 + 仓位缓存 5 分钟一轮, 用户加减仓后页面最长要等两轮才对。

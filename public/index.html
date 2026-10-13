@@ -1689,13 +1689,16 @@ function mkDet(p) {
   const devTxt = Number.isFinite(p.pxDev) ? `与 Jupiter 差 ${p.pxDev >= 0 ? '+' : ''}${(p.pxDev * 100).toFixed(2)}%` : '';
   const pxNote = p.pxPool != null ? `<div class="d-sub" title="${escH(p['token' + p.pxPool].symbol)} 按仓位所在池的现价折算, 与开仓成本同口径">按池内现价${devTxt ? ' · ' + devTxt : ''}</div>`
     : (p.pxKeep ? `<div class="d-sub" title="池内现价与 Jupiter 偏离超过 50%, 按 Jupiter 价">Jupiter 价 · 池价偏离 ${(p.pxDev * 100).toFixed(0)}% 未采用</div>` : '');
+  // 2026-10-13: Token-2022 份额乘数 (xStocks 分红再投只改乘数, 链上原始数量不动): 数量 / 区间 / 价已换成钱包与 Raydium 显示的份额口径, 这里提示一下
+  const umParts = [[s0, p.uiMult0], [s1, p.uiMult1]].filter(([, m]) => m > 0 && m !== 1).map(([s, m]) => `${s} ×${Number(m).toFixed(5)}`);
+  const umNote = umParts.length ? `<div class="d-sub" title="该币是 Token-2022 带份额乘数的代币 (分红再投只改乘数, 链上原始数量不动). 数量 / 区间 / 价格均已换成钱包与 Raydium 显示的份额口径, 美元价值不受影响">份额乘数 ${umParts.join(' · ')}</div>` : '';
   return `<div class="detail-inner">
     <div class="detail-grid">
       <div><div class="d-label">${s0} 数量</div><div class="d-val">${fN(p.amount0)}</div>${p.token0USD?`<div class="d-sub">${fU(p.amount0*p.token0USD)}</div>`:''}</div>
       <div><div class="d-label">${s1} 数量</div><div class="d-val">${fN(p.amount1)}</div>${p.token1USD?`<div class="d-sub">${fU(p.amount1*p.token1USD)}</div>`:''}</div>
       <div><div class="d-label">手续费 ${s0}</div><div class="d-val fees">${feesBad(p) ? '<span title="未领费读取失败">—</span>' : fN(p.feesOwed0)}</div>${p.token0USD && !feesBad(p)?`<div class="d-sub">${fU2(p.feesOwed0*p.token0USD)}</div>`:''}</div>
       <div><div class="d-label">手续费 ${s1}</div><div class="d-val fees">${feesBad(p) ? '<span title="未领费读取失败">—</span>' : fN(p.feesOwed1)}</div>${p.token1USD && !feesBad(p)?`<div class="d-sub">${fU2(p.feesOwed1*p.token1USD)}</div>`:''}</div>
-      <div><div class="d-label">头寸价值</div><div class="d-val">${fU(p.positionValueUSD)}${pxStale}</div>${pxNote}</div>
+      <div><div class="d-label">头寸价值</div><div class="d-val">${fU(p.positionValueUSD)}${pxStale}</div>${pxNote}${umNote}</div>
       <div><div class="d-label">手续费价值</div><div class="d-val fees">${feesBad(p) ? '<span title="未领费读取失败">—</span>' : fU2(p.feesValueUSD)}</div></div>
       ${p.pendingCake > 0 ? `<div><div class="d-label">CAKE 奖励 (待领)</div><div class="d-val fees">${fN(p.pendingCake)}</div>${p.rewardValueUSD ? `<div class="d-sub">${fU2(p.rewardValueUSD)}</div>` : ''}</div>` : ''}
       ${p.dailyRateCumulative ? `<div><div class="d-label">累计日化</div><div class="d-val fees">${p.dailyRateCumulative.toFixed(2)}%</div><div class="d-sub">${p.totalDays>=1 ? p.totalDays+'天'+((p.totalHours%24)>0?(p.totalHours%24)+'h':'') : (p.totalHours||0)+'h'} · ${p.protocol==='V4' ? '不含已领' : '含已领'}</div></div>` : ''}

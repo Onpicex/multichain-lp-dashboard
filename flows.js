@@ -47,7 +47,7 @@ const hexNum = h => (typeof h === 'number' ? h : (String(h).startsWith('0x') ? p
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const normAddr = (chainId, a) => (chainId === 'sol' ? String(a) : low(a));
 
-let solDeps = null;   // sol-adapter 注入: { records(addr) → 账本钱包对象 | null, prices() → { mint: usd }, symbols() → { mint: { symbol } }, histPrice(addr, mint, ts, sig) → { p, approx } | null, obsReady(addr) }
+let solDeps = null;   // sol-adapter 注入: { records(addr) → 账本钱包对象 | null, prices() → { mint: usd (raw 口径) }, uiMult(mint) → Token-2022 份额乘数, symbols() → { mint: { symbol } }, histPrice(addr, mint, ts, sig) → { p, approx } | null, obsReady(addr) }
 function initSol(d) { solDeps = d; }
 function heliusKey() { return (process.env.HELIUS_KEY || '').trim(); }
 function enabled(chainId) { return chainId === 'sol' ? !!(heliusKey() && solDeps) : ledger.isAnkr(chainId); }
@@ -458,7 +458,7 @@ function fundingOf(chainId, addr, wallets) {
   if (!W || (!W.updatedAt && W.stopped !== 'budget')) return null;
   if (W.stopped === 'budget') return { partial: true };
   const out = { inUSD: W.inUSD || 0, outUSD: W.outUSD || 0, netUSD: (W.inUSD || 0) - (W.outUSD || 0), partial: false, catchingUp: W.stopped === 'rpc',
-    events: W.events.map(({ rp, ...e }) => e) };
+    events: W.events.map(({ rp, ...e }) => chainId === 'sol' && solDeps && solDeps.uiMult ? { ...e, amt: e.amt * (solDeps.uiMult(e.tok) || 1) } : e) };   // 2026-10-13: Solana 记录的数量按链上 raw, 出口换成份额口径 (Token-2022 乘数, 见 sol-adapter uiMultOf)
   const sel = wallets ? scanSet(chainId, wallets) : queued[chainId];
   if (sel && !sel.has(k)) { out.stale = true; out.staleAt = W.updatedAt || 0; out.catchingUp = false; }
   return out;
