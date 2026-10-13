@@ -56,6 +56,15 @@ function cfgOf(chainId) { return (E && E.EVM_CHAINS[chainId]) || (extra[chainId]
 function stateOf(chainId) { return extra[chainId] ? extra[chainId].chainState() : E.chainState(chainId); }
 function tokenInfoOf(chainId, addr) { return extra[chainId] ? extra[chainId].getTokenInfo(addr) : E.getTokenInfo(chainId, addr); }
 function walletsOf(chainId) { if (extra[chainId]) return extra[chainId].wallets(); return E.ledgerWallets ? E.ledgerWallets(chainId) : E.loadActiveWallets(chainId); }
+// 2026-10-13: 份额乘数 (BSC ERC-8056 uiMultiplier: registerChain 注入 uiMult(addr); evm-adapter 链可经 E.uiMult(chainId, addr) 注入, 没有 = 1):
+//   账本内部数量全按链上 raw 自洽, 只在出口 (positionPnl 的 a/cb, walletReport 的 lots/costBy) 换成钱包显示的份额口径, 与 sol-ledger 同一套
+function uiMultOf(chainId, addr) {
+  const f = extra[chainId] ? extra[chainId].uiMult : (E && typeof E.uiMult === 'function' ? a => E.uiMult(chainId, a) : null);
+  if (typeof f !== 'function') return 1;
+  const v = Number(f(addr)); return v > 0 && Number.isFinite(v) ? v : 1;
+}
+function scaleAm(chainId, am) { if (!am) return am; const o = {}; for (const [a, q] of Object.entries(am)) o[a] = q * uiMultOf(chainId, a); return o; }
+function scaleCb(chainId, cb) { if (!cb) return cb; const o = {}; for (const [a, c] of Object.entries(cb)) o[a] = { ...c, q: (c.q || 0) * uiMultOf(chainId, a) }; return o; }
 function enabled(chainId) { const c = cfgOf(chainId); return !!(c && !c.pending && (c.ledgerFromLogs || (c.ledgerFromAnkr && ankrKey()))); }
 function isAnkr(chainId) { const c = cfgOf(chainId); return !!(c && c.ledgerFromAnkr && ankrKey()); }
 function npmOf(cfg, kind) { return kind === 'v4' ? cfg.v4.pm : (kind === 'pcs' ? cfg.v3.pcsNpm : cfg.v3.npm); }
@@ -1272,7 +1281,7 @@ function positionPnl(chainId, addr, kind, tokenId) {
   const W = ledgerState(chainId).d.wallets[low(addr)];
   if (!W || W.partial) return null;
   const P = W.pos[`${kind}-${tokenId}`];
-  return P && P.c && P.c.cost > 0 ? P.c : null;
+  return P && P.c && P.c.cost > 0 ? { ...P.c, a: scaleAm(chainId, P.c.a), cb: scaleCb(chainId, P.c.cb) } : null;   // 2026-10-13: 出口数量换份额口径 (拷贝, 账本内部仍 raw)
 }
 function walletStatus(chainId, addr) {
   if (!enabled(chainId)) return { ledger: false };
@@ -1299,9 +1308,9 @@ function walletReport(chainId, addr, liveWallet, useLedger = true) {
       if (!P.c) continue;
       const live = liveMap.get(key);
       seen.add(key);
-      out.positions.push(rowFromLedger(key, P, live));
+      out.positions.push(rowFromLedger(chainId, key, P, live));
     }
-    out.lots = Object.entries(W.lots || {}).map(([tok, L]) => ({ token: tok, qty: L.q, costUSD: L.c, avgCost: L.q > 0 ? L.c / L.q : 0, approx: L.ax }));
+    out.lots = Object.entries(W.lots || {}).map(([tok, L]) => { const q = L.q * uiMultOf(chainId, tok); return { token: tok, qty: q, costUSD: L.c, avgCost: q > 0 ? L.c / q : 0, approx: L.ax }; });   // 2026-10-13: 数量换份额口径
   }
   for (const [key, p] of liveMap) if (!seen.has(key)) out.positions.push(rowFromLive(key, p));
   return out;
@@ -1313,7 +1322,7 @@ function feeLogOf(fx) {
   for (const [t, v] of fx) if (v) m.set(t, (m.get(t) || 0) + v);
   return [...m].sort((a, b) => a[0] - b[0]).map(([t, v]) => [t, Math.round(v * 1e6) / 1e6]);
 }
-function rowFromLedger(key, P, live) {
+function rowFromLedger(chainId, key, P, live) {
   const c = P.c;
   // 2026-09-28 审计修复: 看板活跃仓里有它就是 active —— 账本上轮算出的 closed (如算的那轮主流程缓存为空) 不能把活跃仓压成已关闭
   const active = !!live;
@@ -1332,7 +1341,7 @@ function rowFromLedger(key, P, live) {
     key, protocol: P.k === 'v4' ? 'V4' : 'V3', dex: P.k === 'pcs' ? 'pancake' : undefined, tokenId: P.id, pair: live ? `${live.token0.symbol}/${live.token1.symbol}` : c.pair, feeLabel: live ? live.feeLabel : null, fee: c.fee,
     status: active ? 'active' : 'closed', note: active ? '' : (transferred ? 'transferred' : (unseen ? 'unseen' : c.note)), inRange: live ? !!live.inRange : null,
     openTs: c.openTs, closeTs, source: 'ledger',
-    costUSD: c.cost, costApprox: c.approx, incomplete: c.inc, depositValueUSD: c.dep, adds: c.n, costBy: c.cb || null,
+    costUSD: c.cost, costApprox: c.approx, incomplete: c.inc, depositValueUSD: c.dep, adds: c.n, costBy: c.cb ? scaleCb(chainId, c.cb) : null,   // 2026-10-13: 数量换份额口径
     valueUSD, pendingFeesUSD: pending, collectedFeesUSD: c.fees, feeLog: feeLogOf(c.fx), withdrawnUSD: c.ret, feesUnknown: !!c.feesUnknown,
     hodlValueUSD: live ? (live.hodlValueUSD ?? null) : null, ilUSD: live ? (live.ilUSD ?? null) : null,
     netProfitUSD: c.cost > 0 && !noNet ? net : null, netProfitPct: c.cost > 0 && !noNet ? net / c.cost * 100 : null,
@@ -1387,4 +1396,4 @@ function applyPnl(pos, src, priceOf) {
 // 充提记录模块 (flows.js) 复用: 同一条 Ankr 串行队列 (与账本不抢限流)、Ankr 归档节点、链配置、coingecko 小时价
 const flowApi = { ankrCall, providerFor, cfgOf, stateOf, coinUsdAt: (id, ts) => E.coinUsdAtTime(id, ts) };
 
-module.exports = { init, registerChain, enabled, isAnkr, flowApi, runQueue, positionPnl, walletStatus, walletReport, applyPnl, ledgerState, ROUND_MS, _test: { computeWallet, scanWallet, ensurePositions, scanV3Events, scanV4Events, scanNative, nativeTxsOf, scanTopValues } };
+module.exports = { init, registerChain, enabled, isAnkr, flowApi, runQueue, positionPnl, walletStatus, walletReport, applyPnl, ledgerState, uiMultOf, ROUND_MS, _test: { computeWallet, scanWallet, ensurePositions, scanV3Events, scanV4Events, scanNative, nativeTxsOf, scanTopValues } };

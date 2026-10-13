@@ -1689,9 +1689,9 @@ function mkDet(p) {
   const devTxt = Number.isFinite(p.pxDev) ? `与 Jupiter 差 ${p.pxDev >= 0 ? '+' : ''}${(p.pxDev * 100).toFixed(2)}%` : '';
   const pxNote = p.pxPool != null ? `<div class="d-sub" title="${escH(p['token' + p.pxPool].symbol)} 按仓位所在池的现价折算, 与开仓成本同口径">按池内现价${devTxt ? ' · ' + devTxt : ''}</div>`
     : (p.pxKeep ? `<div class="d-sub" title="池内现价与 Jupiter 偏离超过 50%, 按 Jupiter 价">Jupiter 价 · 池价偏离 ${(p.pxDev * 100).toFixed(0)}% 未采用</div>` : '');
-  // 2026-10-13: Token-2022 份额乘数 (xStocks 分红再投只改乘数, 链上原始数量不动): 数量 / 区间 / 价已换成钱包与 Raydium 显示的份额口径, 这里提示一下
+  // 2026-10-13: 份额乘数 (Solana Token-2022 scaledUiAmount / BSC ERC-8056 uiMultiplier; 分红再投只改乘数, 链上原始数量不动): 数量 / 区间 / 价已换成钱包与 Raydium / Backed 显示的份额口径, 这里提示一下
   const umParts = [[s0, p.uiMult0], [s1, p.uiMult1]].filter(([, m]) => m > 0 && m !== 1).map(([s, m]) => `${s} ×${Number(m).toFixed(5)}`);
-  const umNote = umParts.length ? `<div class="d-sub" title="该币是 Token-2022 带份额乘数的代币 (分红再投只改乘数, 链上原始数量不动). 数量 / 区间 / 价格均已换成钱包与 Raydium 显示的份额口径, 美元价值不受影响">份额乘数 ${umParts.join(' · ')}</div>` : '';
+  const umNote = umParts.length ? `<div class="d-sub" title="该币带份额乘数 (Solana Token-2022 scaledUiAmount / BSC ERC-8056 uiMultiplier): 分红再投只改乘数, 链上原始数量不动. 数量 / 区间 / 价格均已换成钱包与 Raydium / Backed 显示的份额口径, 美元价值不受影响">份额乘数 ${umParts.join(' · ')}</div>` : '';
   return `<div class="detail-inner">
     <div class="detail-grid">
       <div><div class="d-label">${s0} 数量</div><div class="d-val">${fN(p.amount0)}</div>${p.token0USD?`<div class="d-sub">${fU(p.amount0*p.token0USD)}</div>`:''}</div>

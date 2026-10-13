@@ -36,6 +36,7 @@ function sanitizePayloadSymbols(data) {
 const { mountLpAuth } = require("./lp-auth");
 const pnlLedger = require('./pnl-ledger');   // 盈亏字段注入 (applyPnl) + 钱包盈亏报告 (BSC 无账本, 全部退回建仓回溯)
 const flows = require('./flows');            // 充提记录 / 净入金 (BSC 走 Ankr, 与账本共用串行队列)
+const uiMultEvm = require('./ui-mult-evm');  // 2026-10-13: ERC-8056 份额乘数 (bStocks 分红再投只改 uiMultiplier), 与 Solana Token-2022 同一套口径
 mountLpAuth(app);
 const PORT = parseInt(process.env.PORT || '1788');
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
@@ -652,10 +653,12 @@ async function getUSDPrices(tokenAddresses, positionsData, meta = {}) {
     if (!poolOk(pos)) continue;
 
     let target, price;
+    // 2026-10-13: 仓位三价已换成份额口径 (uiMult), 定价表按 raw (账本 / 充提记录 / 闲置余额的数量都按链上 raw), 这里换回 raw 池价
+    const rawPx = uiMultEvm.rawCurrentPrice(pos);
     if (STABLECOINS.has(t1) && !STABLECOINS.has(t0)) {
-      target = t0; price = pos.currentPrice;
+      target = t0; price = rawPx;
     } else if (STABLECOINS.has(t0) && !STABLECOINS.has(t1)) {
-      target = t1; price = 1 / pos.currentPrice;
+      target = t1; price = 1 / rawPx;
     } else continue;
 
     const src = pos.liquidityActive && pos.inRange ? 'active-inrange'
@@ -676,8 +679,9 @@ async function getUSDPrices(tokenAddresses, positionsData, meta = {}) {
   for (const pos of positionsData) {
     const t0 = pos.token0addr.toLowerCase(), t1 = pos.token1addr.toLowerCase();
     if (!poolOk(pos)) continue;
-    if (prices[t1] > 0 && !(prices[t0] > 0)) prices[t0] = pos.currentPrice * prices[t1];
-    else if (prices[t0] > 0 && !(prices[t1] > 0)) prices[t1] = prices[t0] / pos.currentPrice;
+    const rawPx = uiMultEvm.rawCurrentPrice(pos);   // 2026-10-13: 同上, 按 raw 池价推
+    if (prices[t1] > 0 && !(prices[t0] > 0)) prices[t0] = rawPx * prices[t1];
+    else if (prices[t0] > 0 && !(prices[t1] > 0)) prices[t1] = prices[t0] / rawPx;
   }
 
   // ④ 仍缺的逐个问 CoinGecko (每轮限量, 其余下轮再问; 失败沿用上轮价)
@@ -732,8 +736,9 @@ async function fetchIdleBsc(walletsSel, tokens, usdPrices, priceMeta = {}) {
       for (const { a, bal } of rs) {
         if (bal === 0n) continue;
         const meta = await getTokenInfo(a);
-        const amount = Number(bal) / 10 ** (meta?.decimals ?? 18);
-        const price = STABLECOINS.has(a) ? 1 : (usdPrices[a] || 0);
+        const um = uiMultEvm.uiMultOf('bsc', a);   // 2026-10-13: ERC-8056 份额乘数 —— 数量按钱包显示的份额 (raw × m), 价按份额 (raw 价 ÷ m), 美元不变
+        const amount = Number(bal) / 10 ** (meta?.decimals ?? 18) * um;
+        const price = STABLECOINS.has(a) ? 1 : (usdPrices[a] || 0) / um;
         const v = amount * price;
         if (v < 1) continue;
         items.push({ symbol: meta?.symbol || a.slice(0, 6), address: a, amount, priceUSD: price, valueUSD: v, ...(staleSet.has(a) ? { priceStale: true } : {}) });   // 2026-09-28 审计修复: 沿用上轮价的条目打标
@@ -1544,6 +1549,7 @@ function denormalizePosition(pos) {
     token0USD: pos.token1USD, token1USD: pos.token0USD,
     amount0: pos.amount1, amount1: pos.amount0,
     feesOwed0: pos.feesOwed1, feesOwed1: pos.feesOwed0,
+    uiMult0: pos.uiMult1, uiMult1: pos.uiMult0,   // 2026-10-13: 份额乘数随两侧交换 (没有就都是 undefined, 本轮会按 raw 重新换算)
     currentPrice: pos.currentPrice > 0 ? 1 / pos.currentPrice : 0,
     lowerPrice: pos.upperPrice > 0 ? 1 / pos.upperPrice : 0,
     upperPrice: pos.lowerPrice > 0 ? 1 / pos.lowerPrice : 0,
@@ -1662,6 +1668,23 @@ async function _fetchPositionsInner(forceRefresh = false) {
     console.log(`V4 Collect events: found ${Object.keys(v4CollectTimes).length} positions with collects`);
   }
 
+  // 2026-10-13: ERC-8056 份额乘数 (bStocks 分红再投只改 uiMultiplier, 链上余额不动; 钱包 / Backed 显示 raw × m, 池子按 raw 成交):
+  //   本轮新建的仓位对象 (沿用上轮的已换算过, 带 uiMult0) 把数量 / 未领费 / 三价换成份额口径, 与 Solana xStocks 同一套 (见 ui-mult-evm.js);
+  //   乘数每轮随仓位 token 一起读 (Multicall3 一次, 30 分钟缓存), 读失败沿用上次
+  {
+    const fresh = [], toks = new Set(), symOf = {};
+    for (const wr of walletResults) for (const pos of wr.positions) {
+      const a0 = pos.token0addr.toLowerCase(), a1 = pos.token1addr.toLowerCase();
+      symOf[a0] = pos.token0?.symbol; symOf[a1] = pos.token1?.symbol;
+      if (!STABLECOINS.has(a0)) toks.add(a0);
+      if (!STABLECOINS.has(a1)) toks.add(a1);
+      if (pos.uiMult0 == null) fresh.push(pos);
+    }
+    try { await uiMultEvm.refresh('bsc', provider, [...toks], a => symOf[a]); }
+    catch (e) { console.error('[bsc] 份额乘数读取失败, 沿用上次:', String(e?.message || e).slice(0, 100)); }
+    for (const pos of fresh) uiMultEvm.applyUiMult(pos, uiMultEvm.uiMultOf('bsc', pos.token0addr), uiMultEvm.uiMultOf('bsc', pos.token1addr));
+  }
+
   // Collect all token addresses and all positions for USD pricing
   const allTokenAddresses = new Set();
   const allPositions = [];
@@ -1696,8 +1719,13 @@ async function _fetchPositionsInner(forceRefresh = false) {
 
     for (const pos of wr.positions) {
       const t0l = pos.token0.address.toLowerCase(), t1l = pos.token1.address.toLowerCase();
-      const price0 = usdPrices[t0l] || 0;
-      const price1 = usdPrices[t1l] || 0;
+      // 2026-10-13: 定价表按 raw, 仓位数量已是份额口径 → 价换成份额价 (÷ 乘数), 份额数 × 份额价 = raw 数 × raw 价, 美元不变
+      const um0 = pos.uiMult0 || 1, um1 = pos.uiMult1 || 1;
+      const price0 = (usdPrices[t0l] || 0) / um0;
+      const price1 = (usdPrices[t1l] || 0) / um1;
+      // 已领费按现价折算: collectedFees 保持 raw (× 乘数换份额再 × 份额价 = raw × raw 价); 账本命中时 applyPnl 用账本的领取时点价代替
+      const cfRaw = pos.collectedFees || { token0: 0, token1: 0 };
+      const collectedFxUSD = (cfRaw.token0 || 0) * um0 * price0 + (cfRaw.token1 || 0) * um1 * price1;
       // 2026-09-28 审计修复: 本轮缺价 (沿用上轮价或无价) 的仓位打 priceStale, 前端提示; 每轮重算, 不残留上轮标记
       if (priceMeta.stale.has(t0l) || priceMeta.stale.has(t1l) || priceMeta.missing.has(t0l) || priceMeta.missing.has(t1l)) pos.priceStale = true;
       else delete pos.priceStale;
@@ -1725,7 +1753,7 @@ async function _fetchPositionsInner(forceRefresh = false) {
           pos.entryTs = ed.ts;
           pos.entryAdds = ed.n;
           pos.entryModified = ed.mod;
-          pos.entryAm = ed.am || null;
+          pos.entryAm = ed.am ? uiMultEvm.scaleAm('bsc', ed.am) : null;   // 2026-10-13: 建仓数量 (raw) 换份额口径, 与 priceOf 的份额价配对
         }
       }
       // 盈亏字段: Ankr 账本命中 → 真实成本/已提回/已领费; 否则成本 = 建仓时点价值 (approx), 已领费 V3 子图/Pancake 事件有, V4 无 (feesUnknown)
@@ -1735,9 +1763,9 @@ async function _fetchPositionsInner(forceRefresh = false) {
         //   先转存到前端认的专用字段 pendingFeesFailed (index.html feesBad), 账本命中时待领费仍显示「—」而不是 $0
         if (pos.dex === 'pancake') { if (pos.feesUnknown === true) pos.pendingFeesFailed = true; else delete pos.pendingFeesFailed; }
         const lg = pnlLedger.positionPnl('bsc', wr.address, kind, pos.tokenId);
-        const priceOf = a => usdPrices[a] || 0;
+        const priceOf = a => (usdPrices[a] || 0) / uiMultEvm.uiMultOf('bsc', a);   // 2026-10-13: 份额价 (账本出口的 am / costBy 已是份额数量)
         if (lg) pnlLedger.applyPnl(pos, { cost: lg.cost, approx: lg.approx || lg.inc, source: 'ledger', am: lg.a, costBy: lg.cb, withdrawnUSD: lg.ret, collectedUSD: lg.fees }, priceOf);
-        else if (pos.entryValueUSD > 0) pnlLedger.applyPnl(pos, { cost: pos.entryValueUSD, approx: true, source: 'entry', am: pos.entryAm || {}, withdrawnUSD: pos.entryWithdrawnUSD || 0, collectedUSD: pos.protocol === 'V4' ? 0 : undefined, feesUnknown: pos.protocol === 'V4' }, priceOf);
+        else if (pos.entryValueUSD > 0) pnlLedger.applyPnl(pos, { cost: pos.entryValueUSD, approx: true, source: 'entry', am: pos.entryAm || {}, withdrawnUSD: pos.entryWithdrawnUSD || 0, collectedUSD: pos.protocol === 'V4' ? 0 : collectedFxUSD, feesUnknown: pos.protocol === 'V4' }, priceOf);
       }
 
       // === Two daily rate metrics ===
@@ -1748,9 +1776,8 @@ async function _fetchPositionsInner(forceRefresh = false) {
         const totalHours = totalMs / (60 * 60 * 1000);
         if (totalDays > 0) {
           // Total fees = already collected (from subgraph) + pending (unclaimed)
-          const cf = pos.collectedFees || { token0: 0, token1: 0 };
-          // 2026-09-28 审计修复: 账本 applyPnl 注入的已领费美元 (collectedFeesUSD, 领取时点价) 优先; 没有才按 token 数 × 现价折算
-          const collectedUSD = (typeof pos.collectedFeesUSD === 'number' && pos.collectedFeesUSD >= 0) ? pos.collectedFeesUSD : (cf.token0 * price0 + cf.token1 * price1);
+          // 2026-09-28 审计修复: 账本 applyPnl 注入的已领费美元 (collectedFeesUSD, 领取时点价) 优先; 没有才按 token 数 × 现价折算 (collectedFxUSD, 2026-10-13 含份额乘数)
+          const collectedUSD = (typeof pos.collectedFeesUSD === 'number' && pos.collectedFeesUSD >= 0) ? pos.collectedFeesUSD : collectedFxUSD;
           const totalFeesUSD = collectedUSD + pos.feesValueUSD;
           if (totalFeesUSD > 0) {
             pos.dailyRateCumulative = (totalFeesUSD / pos.positionValueUSD) / totalDays * 100;
@@ -1879,6 +1906,7 @@ function normalizePosition(pos) {
       amount1: pos.amount0,
       feesOwed0: pos.feesOwed1,
       feesOwed1: pos.feesOwed0,
+      uiMult0: pos.uiMult1, uiMult1: pos.uiMult0,   // 2026-10-13: 份额乘数随两侧交换
       currentPrice: pos.currentPrice > 0 ? 1 / pos.currentPrice : 0,
       lowerPrice: pos.upperPrice > 0 ? 1 / pos.upperPrice : 0,  // swap & invert
       upperPrice: pos.lowerPrice > 0 ? 1 / pos.lowerPrice : 0,  // swap & invert
@@ -2179,6 +2207,7 @@ try {
     },
     chainState: () => ({ provider, lastUsdPrices: lastUsdPricesBsc }),
     getTokenInfo: (a) => getTokenInfo(a),
+    uiMult: (a) => uiMultEvm.uiMultOf('bsc', a),   // 2026-10-13: 账本出口数量 (positionPnl 的 am/costBy, walletReport 的 lots) 换份额口径; 现价表 lastUsdPricesBsc 保持 raw
     wallets: () => { const sel = pnlSelectedAddrs('bsc', activeWallets().map(w => w.address)); return activeWallets().filter(w => sel.has(w.address.toLowerCase())); },
     // 2026-09-28 审计修复: 账本 priceSane 参考价钩子 ({ [addrLower]: usd }): 稳定币=1, 先用上轮定价, 缺的按合约地址批量问 coingecko (与主流程同源)
     getUSDPrices: async (addrsLower) => {

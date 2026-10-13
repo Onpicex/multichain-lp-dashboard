@@ -457,8 +457,10 @@ function fundingOf(chainId, addr, wallets) {
   const W = cacheOf(chainId).wallets[k];
   if (!W || (!W.updatedAt && W.stopped !== 'budget')) return null;
   if (W.stopped === 'budget') return { partial: true };
+  // 2026-10-13: 记录的数量按链上 raw, 出口换成份额口径 (Solana Token-2022 乘数 → sol-adapter uiMultOf; EVM ERC-8056 → pnl-ledger uiMultOf, 只有 BSC 接了, 其余链 = 1)
+  const um = chainId === 'sol' ? (solDeps && solDeps.uiMult ? solDeps.uiMult : null) : (t => ledger.uiMultOf(chainId, t));
   const out = { inUSD: W.inUSD || 0, outUSD: W.outUSD || 0, netUSD: (W.inUSD || 0) - (W.outUSD || 0), partial: false, catchingUp: W.stopped === 'rpc',
-    events: W.events.map(({ rp, ...e }) => chainId === 'sol' && solDeps && solDeps.uiMult ? { ...e, amt: e.amt * (solDeps.uiMult(e.tok) || 1) } : e) };   // 2026-10-13: Solana 记录的数量按链上 raw, 出口换成份额口径 (Token-2022 乘数, 见 sol-adapter uiMultOf)
+    events: W.events.map(({ rp, ...e }) => um ? { ...e, amt: e.amt * (um(e.tok) || 1) } : e) };
   const sel = wallets ? scanSet(chainId, wallets) : queued[chainId];
   if (sel && !sel.has(k)) { out.stale = true; out.staleAt = W.updatedAt || 0; out.catchingUp = false; }
   return out;
