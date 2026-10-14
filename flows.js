@@ -50,6 +50,7 @@ const normAddr = (chainId, a) => (chainId === 'sol' ? String(a) : low(a));
 let solDeps = null;   // sol-adapter 注入: { records(addr) → 账本钱包对象 | null, prices() → { mint: usd (raw 口径) }, uiMult(mint) → Token-2022 份额乘数, symbols() → { mint: { symbol } }, histPrice(addr, mint, ts, sig) → { p, approx } | null, obsReady(addr) }
 function initSol(d) { solDeps = d; }
 function heliusKey() { return (process.env.HELIUS_KEY || '').trim(); }
+const solRpc = require('./sol-rpc');   // 2026-10-15: Helius 请求走共用限速桶 + 积分计量
 function enabled(chainId) { return chainId === 'sol' ? !!(heliusKey() && solDeps) : ledger.isAnkr(chainId); }
 
 // ---- 缓存 ----
@@ -270,9 +271,10 @@ async function scanEvmWallet(chainId, addr, monitored, deadline) {
 async function heliusParse(sigs) {
   for (let i = 0; i < 4; i++) {
     try {
-      const r = await fetch(`https://api.helius.xyz/v0/transactions?api-key=${heliusKey()}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ transactions: sigs }), signal: AbortSignal.timeout(60000) });
+      const r = await solRpc.heliusFetch('enhanced', `https://api.helius.xyz/v0/transactions?api-key=${heliusKey()}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ transactions: sigs }), signal: AbortSignal.timeout(60000) });   // 2026-10-15: 共用限速桶 + 积分计量
       if (r.status === 429) { await sleep(3000 * (i + 1)); continue; }
       if (!r.ok) { await sleep(2000 * (i + 1)); continue; }
+      solRpc.add('enhanced');
       const j = await r.json();
       if (Array.isArray(j)) return j;
       await sleep(2000);
@@ -336,8 +338,9 @@ function solCounterparty(p, wallet, mint, dir) {
 async function solSigners(sig) {
   for (let i = 0; i < 3; i++) {
     try {
-      const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${heliusKey()}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getTransaction', params: [sig, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 }] }), signal: AbortSignal.timeout(30000) });
+      const r = await solRpc.heliusFetch('rpc', `https://mainnet.helius-rpc.com/?api-key=${heliusKey()}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getTransaction', params: [sig, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 }] }), signal: AbortSignal.timeout(30000) });
       if (!r.ok) { await sleep(2000 * (i + 1)); continue; }
+      solRpc.add('getTransaction');
       const j = await r.json();
       const keys = j && j.result && j.result.transaction && j.result.transaction.message.accountKeys;
       if (keys) return new Set(keys.filter(k => k.signer).map(k => k.pubkey));

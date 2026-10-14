@@ -113,6 +113,7 @@ const PROG_ID = Object.fromEntries(Object.entries(PROGS).map(([k, v]) => [v, k])
 let deps = { prices: () => ({}), symbols: () => ({}), wallets: () => [], log: console.log, histSol: null, uiMult: () => 1 };   // 2026-10-13: uiMult(mint) → Token-2022 份额乘数 (出口数量换份额口径)   // histSol(tsMs) → SOL 当时美元价 (0 = 没取到)
 function init(d) { deps = { ...deps, ...d }; }
 function key() { return (process.env.HELIUS_KEY || '').trim(); }
+const rpc = require('./sol-rpc');   // 2026-10-15: 与仓位轮共用 Helius 限速桶 + 积分计量 (Enhanced API 100 积分/次, 普通 RPC 1)
 function enabled() { return !!key(); }
 
 let st = null;
@@ -133,9 +134,10 @@ async function heliusPage(wallet, before) {
   const url = `https://api.helius.xyz/v0/addresses/${wallet}/transactions?api-key=${key()}&limit=100${before ? '&before=' + before : ''}`;
   for (let i = 0; i < 5; i++) {
     try {
-      const r = await fetch(url, { signal: AbortSignal.timeout(60000) });
+      const r = await rpc.heliusFetch('enhanced', url, { signal: AbortSignal.timeout(60000) });
       if (r.status === 429) { await sleep(3000 * (i + 1)); continue; }
       if (!r.ok) { await sleep(2000 * (i + 1)); continue; }
+      rpc.add('enhanced');
       const j = await r.json();
       if (Array.isArray(j)) return j;
       await sleep(2000);
@@ -267,10 +269,17 @@ async function scanWallet(wallet, deadline) {
   if (mode === 'first' && W.oldest) before = W.oldest;
   else if (mode === 'resume') before = W.resume;
   const halt = (why) => { if (mode !== 'first' && before) W.resume = before; W.stopped = why; save(); return W; };   // 首扫的断点是 W.oldest, 不用 resume
+  // 2026-10-15 省积分: 追平状态下先用 1 积分的 getSignaturesForAddress 看最新签名是否还是上轮记的 W.top; 是 → 没新交易, 省掉 100 积分的解析页
+  //   (Enhanced API 按地址翻页 = 对同一地址 getSignaturesForAddress 再解析, 两边最新一条一致; 对不上就照旧翻页, 最坏只是多花原来那 100 积分)
+  if (mode === 'top' && W.top) {
+    const latest = await heliusRpc('getSignaturesForAddress', [wallet, { limit: 1, commitment: 'finalized' }]);
+    if (Array.isArray(latest) && latest.length && latest[0].signature === W.top) { W.stopped = null; W.updatedAt = Date.now(); save(); return W; }
+  }
   while (true) {
     if (Date.now() > deadline) return halt('budget');
     const page = await heliusPage(wallet, before);
     if (!page) return halt('rpc');
+    if (!before && page.length && page[0].signature) W.top = page[0].signature;   // 从最新往下的第一页: 记下最新签名 (含失败 tx, 和 getSignaturesForAddress 口径一致)
     if (page.length === 0) {
       if (mode === 'resume') { delete W.resume; mode = 'top'; before = null; continue; }   // 续扫翻到底 = 缺口补完
       if (mode === 'first') W.done = true;
@@ -311,9 +320,10 @@ const TOKEN_PROGS = ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNb
 async function heliusRpc(method, params) {
   for (let i = 0; i < 4; i++) {
     try {
-      const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${key()}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(30000) });
+      const r = await rpc.heliusFetch('rpc', `https://mainnet.helius-rpc.com/?api-key=${key()}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(30000) });
       if (r.status === 429) { await sleep(2000 * (i + 1)); continue; }
       if (!r.ok) { await sleep(1500 * (i + 1)); continue; }
+      rpc.add(method);
       const j = await r.json();
       if (j && !j.error) return j.result;
       await sleep(1500 * (i + 1));
@@ -324,8 +334,8 @@ async function heliusRpc(method, params) {
 async function heliusTxs(sigs) {
   for (let k = 0; k < 4; k++) {
     try {
-      const r = await fetch(`https://api.helius.xyz/v0/transactions?api-key=${key()}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ transactions: sigs }), signal: AbortSignal.timeout(60000) });
-      if (r.ok) { const j = await r.json(); if (Array.isArray(j)) return j; }
+      const r = await rpc.heliusFetch('enhanced', `https://api.helius.xyz/v0/transactions?api-key=${key()}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ transactions: sigs }), signal: AbortSignal.timeout(60000) });
+      if (r.ok) { rpc.add('enhanced'); const j = await r.json(); if (Array.isArray(j)) return j; }
       await sleep(2000 * (k + 1));
     } catch { await sleep(2000 * (k + 1)); }
   }
@@ -564,8 +574,8 @@ async function reparseUnnamed(wallet, deadline) {
     let arr = null;
     for (let k = 0; k < 4 && !arr; k++) {
       try {
-        const r = await fetch(`https://api.helius.xyz/v0/transactions?api-key=${key()}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ transactions: chunk }), signal: AbortSignal.timeout(60000) });
-        if (r.ok) { const j = await r.json(); if (Array.isArray(j)) arr = j; }
+        const r = await rpc.heliusFetch('enhanced', `https://api.helius.xyz/v0/transactions?api-key=${key()}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ transactions: chunk }), signal: AbortSignal.timeout(60000) });
+        if (r.ok) { rpc.add('enhanced'); const j = await r.json(); if (Array.isArray(j)) arr = j; }
         else await sleep(2000 * (k + 1));
       } catch { await sleep(2000 * (k + 1)); }
     }

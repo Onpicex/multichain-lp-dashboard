@@ -7,10 +7,13 @@ const { Connection, PublicKey } = require('@solana/web3.js');
 const fs = require('fs');
 const path = require('path');
 
-const SOL_RPC = process.env.SOL_RPC || 'https://api.mainnet-beta.solana.com';
-// 备胎 RPC: 主 RPC 连续 429 时最后一轮重试切换用 (官方节点低频单钱包查询可承受)
-const SOL_RPC_FALLBACK = process.env.SOL_RPC_FALLBACK || 'https://api.mainnet-beta.solana.com';
-let conn = new Connection(SOL_RPC, 'confirmed');
+const rpc = require('./sol-rpc');   // 2026-10-15: 限速 + gPA→V2 省积分 + Helius 积分计量 (SOL_RPC 填 "helius" 即用 HELIUS_KEY 展开)
+const SOL_RPC = rpc.resolve(process.env.SOL_RPC, 'https://api.mainnet-beta.solana.com');
+// 备胎 RPC: 主 RPC 连续 429 时最后一轮重试切换用 (官方节点低频单钱包查询可承受); 仓位轮估算积分超预算时整轮走备胎
+const SOL_RPC_FALLBACK = rpc.resolve(process.env.SOL_RPC_FALLBACK, 'https://api.mainnet-beta.solana.com');
+const connPrimary = rpc.mkConn(SOL_RPC), connFallback = rpc.mkConn(SOL_RPC_FALLBACK);   // 两条连接复用 (原来每次备胎重试 new 一条)
+let conn = connPrimary;
+console.log(`[SOL] RPC 主 ${rpc.maskUrl(SOL_RPC)}${rpc.isHelius(SOL_RPC) ? ' (Helius, 限速 + gPA V2 + 积分计量, 预算 ' + rpc.BUDGET + '/月)' : ''}, 备胎 ${rpc.maskUrl(SOL_RPC_FALLBACK)}`);
 
 const WALLETS_FILE = path.join(__dirname, 'wallets-sol.json');
 const CACHE_FILE = path.join(__dirname, 'positions-cache-sol.json');
@@ -126,7 +129,7 @@ async function refreshUiMults(mints) {
     const keys = batch.map(k => new PublicKey(k));
     // 钱包刚扫完主 RPC 常常还在 429 (首轮实测): 主 → 等 3s 备胎 → 等 8s 主, 三次都不行才算失败 (沿用上次)
     let r = null, lastErr = null;
-    for (const [c, wait] of [[conn, 0], [new Connection(SOL_RPC_FALLBACK, 'confirmed'), 3000], [conn, 8000]]) {
+    for (const [c, wait] of [[conn, 0], [connFallback, 3000], [conn, 8000]]) {
       if (wait) await new Promise(res => setTimeout(res, wait));
       try { r = await c.getMultipleParsedAccounts(keys); break; } catch (e) { lastErr = e; }
     }
@@ -631,7 +634,7 @@ async function getCreatedAt(pubkeyStr) {
   if (typeof hit === 'number' && hit > 0) return { ts: hit, approx: false };
   if (hit && typeof hit === 'object' && hit.ts > 0) return { ts: hit.ts, approx: !!hit.approx };
   // 主 RPC 失败(429等)时切备胎重试一次 —— createdAt 拿不到会导致日化无法计算
-  for (const c of [conn, new Connection(SOL_RPC_FALLBACK, 'confirmed')]) {
+  for (const c of [conn, connFallback]) {
     try {
       const pk = new PublicKey(pubkeyStr);
       let before = undefined, oldest = null, capped = false;
@@ -662,7 +665,7 @@ async function getCreatedAt(pubkeyStr) {
 
 // 最近一次链上操作时间（领取/加减仓都会更新）——不缓存，每次刷新都查最新
 async function getLastActivityAt(pubkeyStr) {
-  for (const c of [conn, new Connection(SOL_RPC_FALLBACK, 'confirmed')]) {
+  for (const c of [conn, connFallback]) {
     try {
       const sigs = await c.getSignaturesForAddress(new PublicKey(pubkeyStr), { limit: 1 }, 'finalized');
       if (sigs[0]?.blockTime) return sigs[0].blockTime * 1000;
@@ -785,6 +788,11 @@ async function fetchAllSol(force = false) {
 
 async function _fetchAllSol() {
   let walletResults = [];
+  // 2026-10-15: Helius 本月估算积分到预算 → 这一轮整轮走备胎 (账本那边没有替代源, 把余量留给它); 估算值, 以 Helius 控制台为准
+  const roundPrimary = rpc.isHelius(SOL_RPC) && rpc.overBudget() && !rpc.isHelius(SOL_RPC_FALLBACK) ? connFallback : connPrimary;
+  if (roundPrimary !== connPrimary) console.log(`[SOL] Helius 本月估算积分 ${rpc.monthCredits()} ≥ 预算 ${rpc.BUDGET}, 本轮仓位走备胎 ${rpc.maskUrl(SOL_RPC_FALLBACK)}`);
+  if (conn !== roundPrimary) { conn = roundPrimary; raydiumInstances = {}; }
+  rpc.takeRound();   // 清零本轮计数
   const failedWallets = [];   // 2026-09-28 审计修复: 本轮抓取失败、沿用上轮数据的钱包 (原样 base58 地址), 进载荷顶层
   for (const w of activeWallets()) {
     // 抓取失败(429限流等)时重试最多3轮, 每轮间隔递增, 避免把有仓钱包误判为空仓
@@ -794,10 +802,10 @@ async function _fetchAllSol() {
         console.log(`[SOL] ${w.name} 第${attempt + 1}次重试 (限流退避 ${attempt * 5}s)...`);
         await new Promise(r => setTimeout(r, attempt * 5000));
       }
-      if (attempt === 2 && SOL_RPC_FALLBACK !== SOL_RPC) {
+      if (attempt === 2 && roundPrimary !== connFallback) {
         // 最后一轮切备胎 RPC (主节点持续限流时兜底)
         console.log(`[SOL] ${w.name} 切换备胎 RPC 重试...`);
-        conn = new Connection(SOL_RPC_FALLBACK, 'confirmed');
+        conn = connFallback;
         raydiumInstances = {};   // Raydium 实例绑定旧连接, 必须重建
       }
       if (met === null) met = await fetchMeteoraPositions(w);
@@ -805,8 +813,8 @@ async function _fetchAllSol() {
       if (orc === null) orc = await fetchOrcaPositions(w);
       if (met !== null && ray !== null && orc !== null) break;
     }
-    if (conn.rpcEndpoint !== SOL_RPC) {
-      conn = new Connection(SOL_RPC, 'confirmed');   // 用完备胎切回主 RPC
+    if (conn !== roundPrimary) {
+      conn = roundPrimary;   // 用完备胎切回主 RPC
       raydiumInstances = {};
     }
     const wr = { address: w.address, name: w.name, positions: [...(met || []), ...(ray || []), ...(orc || [])], totalUSD: 0 };
@@ -970,7 +978,8 @@ async function _fetchAllSol() {
     timestamp: Date.now(),
     chain: 'sol',
     failedWallets,   // 2026-09-28 审计修复: 本轮抓取失败、沿用上轮数据的钱包地址
-    stats: { totalActive, totalInRange, totalOutOfRange, totalFees, walletsWithActiveLP, totalWallets: activeWallets().length, priceMiss },   // 2026-09-28 审计修复: priceMiss
+    stats: { totalActive, totalInRange, totalOutOfRange, totalFees, walletsWithActiveLP, totalWallets: activeWallets().length, priceMiss,   // 2026-09-28 审计修复: priceMiss
+      heliusMeter: rpc.isHelius(SOL_RPC) ? rpc.meterSummary() : undefined },   // 2026-10-15: 本月估算积分 (estimated=true, 以 Helius 控制台为准)
   };
   // 2026-09-28 审计修复: Jupiter 整批为空 (或本轮根本没有 mint 要问) 不覆盖上轮价, 避免把 lastPricesSol 清成空表污染账本估值
   if (uniqMints.length && !batchEmpty) {
@@ -983,7 +992,8 @@ async function _fetchAllSol() {
   cache = { data: result, timestamp: Date.now() };
   saveCache();
   if (changed.length) { console.log(`[SOL] ${changed.length} 个账本仓位流动性变化 (${changed.slice(0, 3).join(', ')}${changed.length > 3 ? '…' : ''}), 立即扫账本`); setImmediate(kickSolLedger); }
-  console.log(`[SOL] Fetch complete. ${wallets.length} wallets, ${totalActive} active, total $${grandTotalUSD.toFixed(2)}${failedWallets.length ? `, ${failedWallets.length} wallets stale` : ''}${priceMiss ? `, ${priceMiss} mints price-miss` : ''}`);
+  const rt = rpc.takeRound();   // 2026-10-15: 本轮 Helius 估算积分 (含期间并发的账本调用), 便于核对月预算
+  console.log(`[SOL] Fetch complete. ${wallets.length} wallets, ${totalActive} active, total $${grandTotalUSD.toFixed(2)}${failedWallets.length ? `, ${failedWallets.length} wallets stale` : ''}${priceMiss ? `, ${priceMiss} mints price-miss` : ''}${rpc.isHelius(SOL_RPC) || rpc.isHelius(SOL_RPC_FALLBACK) ? `, Helius≈${rt.credits} 积分/${rt.calls} 次, 本月≈${rpc.monthCredits()}` : ''}`);
   return result;
 }
 
@@ -995,7 +1005,7 @@ function shouldFlipSol(pos) {
 }
 // 2026-10-10 池内现价估值: 一边是稳定币 (或 SOL) 的池子, 另一边按仓位所在池的现价折算 (currentPrice = token1 per token0, 归一前的原始方向),
 //   Jupiter 价只做参考 (pxDev = 池价 / Jupiter − 1, 前端提示); 偏离 > 50% 不采用 (死池/假币池的池价没意义), 仍用 Jupiter 并标 pxKeep.
-//   真因: CBRS/USDC 仓 Jupiter 报 163.87 而池内 167.96 → 头寸价值少算约 2.4%, 净利润被压成亏损 (实际持平); 成本侧同步改按同 tx 池价 (sol-ledger fillPoolTicks)
+//   真因: CBRS/USDC 仓 Jupiter 报 163.87 而池内 167.96 → 头寸价值少算 $104, 净利润显示 −175 (实际持平); 成本侧同步改按同 tx 池价 (sol-ledger fillPoolTicks)
 //   返回 { leg: 按池价定价的那一边 (0/1), p: 该边美元价, dev, keep } | null (两边都是稳定币 / 都不是稳定币也没 SOL / 没池价)
 function poolLegPrices(pos, jup0, jup1) {
   const cp = pos.currentPrice; if (!(cp > 0) || !Number.isFinite(cp)) return null;
