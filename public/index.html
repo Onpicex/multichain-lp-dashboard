@@ -1175,6 +1175,7 @@ document.querySelectorAll('#chainNav .nav-item').forEach(btn => {
     document.getElementById('flowPanel').style.display = 'none'; lastFlow = null;
     document.getElementById('idleValue').textContent = '—';
     liveEtag = null;   // ETag 按链
+    clearRefreshWait();   // 2026-10-15: 强刷等待态按链, 切链即解除 (函数声明在下一个 script 块, 点击时已就绪)
     if (!isPending(chain)) loadWallets();   // pending 链不提供钱包管理, 也不发这个请求
     loadData(false);                        // loadData 内部对 pending 链直接渲染占位卡, 不发请求
   });
@@ -2068,6 +2069,18 @@ function renderKeepOpen(d){
   for(const id of open){ const el=$(id); if(el) el.classList.add('open'); }
 }
 let loadBusy=false, liveEtag=null, liveBusy=false;
+// 2026-10-15: 强刷等待态 —— 服务端强刷最多同步等 30s, 没跑完先回旧数据 + refreshing 标 (Solana 公共 RPC 限流时一轮 200s+, 以前等整轮被 Cloudflare 100s 掐成 524「API 错误」);
+//   按钮停在「后台刷新中…」, 10s 轻探带回更新的 timestamp 即解除; 10 分钟兜底解除
+let refreshWaitTs=0, refreshWaitTimer=null;
+function setRefreshWait(ts){
+  refreshWaitTs=ts; clearTimeout(refreshWaitTimer); refreshWaitTimer=setTimeout(clearRefreshWait,10*60*1000);
+  const b=$('refreshBtn'); b.disabled=true; b.textContent='后台刷新中…'; b.title='服务端这一轮链上拉取还没跑完 (Solana 公共 RPC 限流时一轮要几分钟)，跑完后 10 秒内自动更新到页面';
+}
+function clearRefreshWait(){
+  if(!refreshWaitTs) return;
+  refreshWaitTs=0; clearTimeout(refreshWaitTimer); refreshWaitTimer=null;
+  if(!loadBusy){ const b=$('refreshBtn'); b.disabled=false; b.textContent='刷新'; b.title=''; }
+}
 async function loadData(fr=false,_retry=0){
   if(isPending()){ renderPending(); return; }   // 预接线链: 只渲染占位卡, 不发任何请求
   const b=$('refreshBtn'); b.disabled=true; b.title=''; b.textContent='加载中…'; loadBusy=true;
@@ -2079,12 +2092,13 @@ async function loadData(fr=false,_retry=0){
     liveEtag=r.headers.get('ETag');
     renderKeepOpen(d);
     nextR=Date.now()+RI;
+    if(d.refreshing) setRefreshWait(d.timestamp); else if(refreshWaitTs&&d.timestamp>refreshWaitTs) clearRefreshWait();   // 2026-10-15: 服务端没等到整轮跑完 → 进等待态; 拿到更新的一轮 → 解除
   }catch(e){
     if(chainAtStart!==activeChain||seq!==loadSeq) return;   // 2026-09-28 审计修复: 旧链请求的报错也别盖到新链页面上
     if(e.badJson&&!_retry){ setTimeout(()=>loadData(false,1),2000); return; }   // 2026-09-28 审计修复: 空 body (刷新撞上后台轮) 2 秒后静默重试一次
     $('content').innerHTML='<div class="error-box"><p>⚠ '+escH(e.message)+'</p></div>';   // 2026-09-28 审计修复: 错误消息可能带服务端原文, escH
   }
-  finally{ b.disabled=false; b.textContent='刷新'; loadBusy=false; }
+  finally{ loadBusy=false; if(refreshWaitTs){ b.disabled=true; b.textContent='后台刷新中…'; } else { b.disabled=false; b.textContent='刷新'; } }   // 2026-10-15: 等待态期间按钮保持「后台刷新中…」
 }
 
 // --- 实时同步: 每 10s 带 If-None-Match 轻探 /positions —— 服务端缓存没变返 304 (零流量), 变了才重绘;
@@ -2099,6 +2113,7 @@ async function livePoll(){
     if(chainAtStart!==activeChain||seq!==loadSeq||r.status===304) return;
     const d=await r.json();
     if(chainAtStart!==activeChain||seq!==loadSeq) return;
+    if(refreshWaitTs&&d.timestamp>refreshWaitTs) clearRefreshWait();   // 2026-10-15: 强刷等待态 —— 轻探带回了更新的一轮, 解除
     // 2026-09-28 审计修复: 比屏上数据还旧的轻探结果 (手动刷新已先拿到新数据, 轻探才回来) 丢弃, 也不记它的 ETag
     if(curData&&d.timestamp<curData.timestamp) return;
     liveEtag=r.headers.get('ETag');

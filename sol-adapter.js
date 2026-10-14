@@ -754,18 +754,29 @@ async function fetchIdleSol(walletsSel) {
 // ============================================================
 let inFlight = null;
 
+// 2026-10-15: 强刷最多同步等这么久; 轮子没跑完就先回旧数据 + refreshing 标 —— 公共 RPC 持续 429 后一轮要 200s+, 而 Cloudflare 100s 就掐线,
+//   浏览器收到 524 显示「API 错误」(nginx 日志 14 天 87 次 499, 全是 Sol 页强刷). 前端收到 refreshing 标后由 10s 轻探 (timestamp 变新) 自动带回新数据
+const FORCE_WAIT_MS = 30 * 1000;
+const sleepMs = ms => new Promise(r => { const t = setTimeout(r, ms); if (t.unref) t.unref(); });
+
 async function fetchAllSol(force = false) {
   if (force) setImmediate(kickSolLedger);   // 2026-10-02: 强刷顺带扫账本 (增量, 每钱包一页 Helius), 扫完接着跑充提 → 新充提下次刷新可见
   const fresh = cache.data && Date.now() - cache.timestamp < CACHE_TTL;
   if (!force && fresh) return cache.data;
   // 与 BSC 同架构：有旧数据就先秒回旧数据，后台悄悄刷新（stale-while-revalidate）
-  if (!force && cache.data) {
+  if (cache.data) {
     if (!inFlight) {
       inFlight = _fetchAllSol()
-        .catch(e => console.error('[SOL] background refresh failed:', e.message))
+        .catch(e => console.error(`[SOL] ${force ? 'forced' : 'background'} refresh failed:`, e.message))
         .finally(() => { inFlight = null; });
     }
-    return cache.data;
+    if (!force) return cache.data;
+    // 强刷: 等本轮 (自己起的或撞上的后台轮) 最多 FORCE_WAIT_MS, 跑完回新缓存; 没跑完回旧缓存 + refreshing.
+    //   以前撞上后台轮时直接 return inFlight —— 后台轮的 promise 解析值是 undefined, 路由 res.json(undefined) 回 200 空 body (日志里的 "200 0")
+    const round = inFlight, tsBefore = cache.timestamp;
+    const done = await Promise.race([round.then(() => true), sleepMs(FORCE_WAIT_MS).then(() => false)]);
+    if (done || cache.timestamp > tsBefore) return cache.data;   // 跑完 (或恰好在写缓存与 promise 解析之间) → 新数据
+    return { ...cache.data, refreshing: true };
   }
   if (inFlight) return inFlight;
   inFlight = _fetchAllSol().finally(() => { inFlight = null; });
