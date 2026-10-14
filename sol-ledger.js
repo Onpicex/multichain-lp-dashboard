@@ -113,7 +113,8 @@ const PROG_ID = Object.fromEntries(Object.entries(PROGS).map(([k, v]) => [v, k])
 let deps = { prices: () => ({}), symbols: () => ({}), wallets: () => [], log: console.log, histSol: null, uiMult: () => 1 };   // 2026-10-13: uiMult(mint) → Token-2022 份额乘数 (出口数量换份额口径)   // histSol(tsMs) → SOL 当时美元价 (0 = 没取到)
 function init(d) { deps = { ...deps, ...d }; }
 function key() { return (process.env.HELIUS_KEY || '').trim(); }
-const rpc = require('./sol-rpc');   // 2026-10-15: 与仓位轮共用 Helius 限速桶 + 积分计量 (Enhanced API 100 积分/次, 普通 RPC 1)
+const rpc = require('./sol-rpc');
+const PRECHECK = process.env.SOL_LEDGER_PRECHECK === '1';   // 2026-10-15: 与仓位轮共用 Helius 限速桶 + 积分计量 (Enhanced API 100 积分/次, 普通 RPC 1)
 function enabled() { return !!key(); }
 
 let st = null;
@@ -269,9 +270,9 @@ async function scanWallet(wallet, deadline) {
   if (mode === 'first' && W.oldest) before = W.oldest;
   else if (mode === 'resume') before = W.resume;
   const halt = (why) => { if (mode !== 'first' && before) W.resume = before; W.stopped = why; save(); return W; };   // 首扫的断点是 W.oldest, 不用 resume
-  // 2026-10-15 省积分: 追平状态下先用 1 积分的 getSignaturesForAddress 看最新签名是否还是上轮记的 W.top; 是 → 没新交易, 省掉 100 积分的解析页
-  //   (Enhanced API 按地址翻页 = 对同一地址 getSignaturesForAddress 再解析, 两边最新一条一致; 对不上就照旧翻页, 最坏只是多花原来那 100 积分)
-  if (mode === 'top' && W.top) {
+  // 2026-10-15 可选省积分 (SOL_LEDGER_PRECHECK=1 才开; 默认关 —— 账本不省, 积分不够靠多把 key 接力): 追平状态下先用 1 积分的
+  //   getSignaturesForAddress 看最新签名是否还是上轮记的 W.top; 是 → 没新交易, 省掉 100 积分的解析页 (对不上就照旧翻页)
+  if (PRECHECK && mode === 'top' && W.top) {
     const latest = await heliusRpc('getSignaturesForAddress', [wallet, { limit: 1, commitment: 'finalized' }]);
     if (Array.isArray(latest) && latest.length && latest[0].signature === W.top) { W.stopped = null; W.updatedAt = Date.now(); save(); return W; }
   }

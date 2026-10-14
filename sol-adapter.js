@@ -13,7 +13,7 @@ const SOL_RPC = rpc.resolve(process.env.SOL_RPC, 'https://api.mainnet-beta.solan
 const SOL_RPC_FALLBACK = rpc.resolve(process.env.SOL_RPC_FALLBACK, 'https://api.mainnet-beta.solana.com');
 const connPrimary = rpc.mkConn(SOL_RPC), connFallback = rpc.mkConn(SOL_RPC_FALLBACK);   // 两条连接复用 (原来每次备胎重试 new 一条)
 let conn = connPrimary;
-console.log(`[SOL] RPC 主 ${rpc.maskUrl(SOL_RPC)}${rpc.isHelius(SOL_RPC) ? ' (Helius, 限速 + gPA V2 + 积分计量, 预算 ' + rpc.BUDGET + '/月)' : ''}, 备胎 ${rpc.maskUrl(SOL_RPC_FALLBACK)}`);
+console.log(`[SOL] RPC 主 ${rpc.maskUrl(SOL_RPC)}${rpc.isHelius(SOL_RPC) ? ' (Helius ' + rpc.keyCount() + ' 把 key 顺序接力, 限速 + gPA V2 + 积分计量, 每把 ' + rpc.BUDGET + '/月)' : ''}, 备胎 ${rpc.maskUrl(SOL_RPC_FALLBACK)}`);
 
 const WALLETS_FILE = path.join(__dirname, 'wallets-sol.json');
 const CACHE_FILE = path.join(__dirname, 'positions-cache-sol.json');
