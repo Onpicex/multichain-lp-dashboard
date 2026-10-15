@@ -50,3 +50,4 @@ lp-token.map
 # 2026-10-13 补: 充提扫描缓存 (含钱包地址) / 份额乘数缓存 (Solana scaledUiAmount + BSC ERC-8056)
 flows-cache-*.json
 ui-mult-*.json
+helius-meter-sol.json
