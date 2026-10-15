@@ -16,7 +16,7 @@
 //     ② 本钱包换币腿成交价 (含池费, 覆盖 zap 里的换币和 Meteora) ③ 纯换币 tx 的钱包净流向隐含价
 //     解析层把每条 LP 指令自己的 SPL 转账挂在指令下 (xf), zap tx 里才能把换币腿和入金腿分开; 开仓指令解出 tick 区间 (tk)
 //   - zap 找零 (入金 tx 顺带的稳定币流入) 从成本、持币基线、按币拆分三处一起扣, 否则 IL 会虚报找零那么多
-//     Raydium 的 decreaseLiquidity 把手续费和本金一起转出, 无法拆分 → 全计提回, feesUnknown
+//     Raydium 的 decreaseLiquidity 把手续费和本金一起转出 → (2026-10-15 起) 从该 tx 日志的 DecreaseLiquidityEvent 取 fee_amount_0/1 拆出手续费 (fillPoolTicks 记 ix.fee), 取不到才全计提回 + feesUnknown
 //     (2026-09-28 审计修复) Orca collectFees*/collectReward*、Meteora claimFee*/claimReward* 指令名下的 xf 就是手续费/奖励 → 平仓 tx 里直接计 fees, 其余流入计提回
 //   - 同 tx 多仓: 按每条 LP 指令自己的 xf 归属流水, xf 解释不了的剩余才均分 (2026-09-28 审计修复, 旧版整 tx 1/N 均分)
 //   - 无常损失/净利润的现价来自 sol-adapter 每轮定价 (注入时给)
@@ -91,7 +91,7 @@ for (const [prog, names] of Object.entries(IX)) for (const n of Object.keys(name
 //     Orca Whirlpool 开/加/减仓事件 (LiquidityIncreased/Decreased, 128 B: whirlpool @8..40) 不带价格; 但 CLMM 池价只在换币时变, 每笔换币发 Traded (121 B: whirlpool @8..40,
 //     a_to_b @40, pre_sqrt_price u128 @41, post_sqrt_price u128 @57) → 本操作之前最近一笔换币的 post_sqrt_price 就是操作那一刻的精确池价 (fillOrcaPrices, ix.sp/ix.wp)
 const EV = {};
-for (const [prog, names] of Object.entries({ Raydium: ['LiquidityCalculateEvent', 'LiquidityChangeEvent'], Meteora: ['AddLiquidity', 'RemoveLiquidity'], Orca: ['Traded', 'LiquidityIncreased', 'LiquidityDecreased'] }))
+for (const [prog, names] of Object.entries({ Raydium: ['LiquidityCalculateEvent', 'LiquidityChangeEvent', 'DecreaseLiquidityEvent'], Meteora: ['AddLiquidity', 'RemoveLiquidity'], Orca: ['Traded', 'LiquidityIncreased', 'LiquidityDecreased'] }))
   for (const n of names) EV[`${prog}:${crypto.createHash('sha256').update(`event:${n}`).digest('hex').slice(0, 16)}`] = n;
 
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
@@ -416,37 +416,51 @@ async function fillBlockOrder(wallet, deadline) {
 // 成本侧真因 (CBRS/USDC 仓实例): Raydium 减仓的数量比失真 (手续费混本金) 所以不记观测, 平仓取回的 CBRS 按 23h 前的观测入批次 (170.78 vs 池价 167.96),
 //   40 秒后单边开仓再按这批成本记 → 开仓成本虚高约 1.7%. 现在 Raydium 开/加/减仓都从该 tx 日志的事件里取 pool tick (精确池价, 与数量比无关),
 //   Meteora 存/取从事件里取 active bin (parseTx), 池子 bin_step/两枚 mint 从 lbPair 账户补 (fillBinSteps)
-// Raydium 日志 → 每次 Raydium 调用的 pool tick (按 invoke/success 栈归属; 一次调用里 Calculate/Change 事件 tick 相同, 取第一个; 没有事件的调用 (closePosition 等) 占位 null)
+// Raydium 日志 → 每次 Raydium 调用 { t: pool tick | null, fee: [fee0, fee1] (原始单位, 池 token0/1 序) | null } (按 invoke/success 栈归属; 一次调用里 Calculate/Change 事件 tick 相同, 取第一个;
+//   没有事件的调用 (closePosition 等) 占位 { t: null, fee: null })
+//   2026-10-15: 减仓的手续费取 DecreaseLiquidityEvent (128 B: position_nft_mint @8, liquidity u128 @40, decrease_amount_0/1 u64 @56/@64, fee_amount_0/1 @72/@80, reward_amounts[3] @88);
+//   日志里没有它 (截断) 时退用 LiquidityCalculateEvent (92 B) 的 trade_fee_owed_0/1 @60/@68 (减仓 tx 里与 fee_amount 相等). 加仓 tx 的 trade_fee_owed 只是记欠没付出 → fillPoolTicks 只给减仓指令
 function raydiumTicksFromLogs(logs) {
   const RAY = PROG_ID.Raydium, stack = [], out = [];
+  const u64 = (b, o) => Number(b.readBigUInt64LE(o));
   for (const L of (logs || [])) {
-    if (L.startsWith('Program ') && L.includes(' invoke [')) { const pid = L.split(' ')[1]; stack.push(pid); if (pid === RAY) out.push(null); }
+    if (L.startsWith('Program ') && L.includes(' invoke [')) { const pid = L.split(' ')[1]; stack.push(pid); if (pid === RAY) out.push({ t: null, fee: null, calc: null }); }
     else if (L.startsWith('Program ') && (L.endsWith(' success') || L.includes(' failed'))) stack.pop();
-    else if (L.startsWith('Program data: ') && stack.length && stack[stack.length - 1] === RAY && out.length && out[out.length - 1] == null) {
+    else if (L.startsWith('Program data: ') && stack.length && stack[stack.length - 1] === RAY && out.length) {
+      const cur = out[out.length - 1];
       let b = null; try { b = Buffer.from(L.slice(14), 'base64'); } catch {}
       if (!b || b.length < 44) continue;
       const ev = EV[`Raydium:${b.subarray(0, 8).toString('hex')}`];
-      if (ev === 'LiquidityCalculateEvent' || ev === 'LiquidityChangeEvent') { const t = b.readInt32LE(40); if (Math.abs(t) < 1e6) out[out.length - 1] = t; }
+      if ((ev === 'LiquidityCalculateEvent' || ev === 'LiquidityChangeEvent') && cur.t == null) { const t = b.readInt32LE(40); if (Math.abs(t) < 1e6) cur.t = t; }
+      if (ev === 'DecreaseLiquidityEvent' && b.length >= 88 && !cur.fee) cur.fee = [u64(b, 72), u64(b, 80)];
+      else if (ev === 'LiquidityCalculateEvent' && b.length >= 76 && !cur.calc) cur.calc = [u64(b, 60), u64(b, 68)];
     }
   }
-  return out;
+  return out.map(({ t, fee, calc }) => ({ t, fee: fee || calc }));
 }
 const PT_OPS = new Set(['open', 'dep', 'wd']);
+// 2026-10-15: 减仓指令另记 ix.fee = [fee0, fee1] (原始单位, 池 token0/1 = mint 字节序; null = 日志里没取到, 不再重取) → computeWallet 把减仓流入拆成本金/手续费.
+//   已补过 tick (rec.ev) 但减仓指令还没 fee 字段的老记录重取一次日志 (上线时存量 114 笔 ≈ 114 个 Helius 普通 RPC 积分, 一次性)
+const RAY_WD = ix => ix.p === 'Raydium' && IX.Raydium[ix.n] === 'wd';
 async function fillPoolTicks(wallet, deadline) {
   const W = state().d.wallets[wallet]; if (!W || W.partial) return 0;
   let n = 0, fail = 0;
   for (const [sig, rec] of Object.entries(W.txs)) {
-    if (rec.ev || !(rec.lp || []).some(ix => ix.p === 'Raydium' && PT_OPS.has(IX.Raydium[ix.n]))) continue;
+    const lp = rec.lp || [];
+    if (!lp.some(ix => ix.p === 'Raydium' && PT_OPS.has(IX.Raydium[ix.n]))) continue;
+    if (rec.ev && !lp.some(ix => RAY_WD(ix) && ix.fee === undefined)) continue;
     if (Date.now() > deadline) { deps.log(`[SOL] pnl-ledger 池 tick 补齐 ${wallet.slice(0, 6)}: 预算用尽, 下轮续`); break; }
     const r = await heliusRpc('getTransaction', [sig, { maxSupportedTransactionVersion: 1, encoding: 'json', commitment: 'finalized' }]);   // 2026-10-10: 版本上限 1 (版本 1 的交易 Helius 按 0 请求会拒)
     if (!r || !r.meta) { if (++fail >= 3) { deps.log(`[SOL] pnl-ledger 池 tick 补齐 ${wallet.slice(0, 6)}: RPC 连失败 3 次, 下轮续`); break; } continue; }
-    const ticks = raydiumTicksFromLogs(r.meta.logMessages);
-    const ray = rec.lp.filter(ix => ix.p === 'Raydium');
-    if (ticks.length === ray.length) ray.forEach((ix, i) => { if (ticks[i] != null && PT_OPS.has(IX.Raydium[ix.n])) ix.pt = ticks[i]; });
+    const evs = raydiumTicksFromLogs(r.meta.logMessages);
+    const ray = lp.filter(ix => ix.p === 'Raydium'), ops = ray.filter(ix => PT_OPS.has(IX.Raydium[ix.n]));
+    const give = (ix, e) => { if (e.t != null) ix.pt = e.t; if (RAY_WD(ix)) ix.fee = e.fee || null; };
+    if (evs.length === ray.length) ray.forEach((ix, i) => { if (PT_OPS.has(IX.Raydium[ix.n])) give(ix, evs[i]); });
     else {   // 调用数对不上 (日志截断 / 内层调用): 只在「有事件的调用数 == 开/加/减仓指令数」时按序给
-      const got = ticks.filter(t => t != null), ops = ray.filter(ix => PT_OPS.has(IX.Raydium[ix.n]));
-      if (got.length === ops.length) ops.forEach((ix, i) => { ix.pt = got[i]; });
+      const got = evs.filter(e => e.t != null);
+      if (got.length === ops.length) ops.forEach((ix, i) => give(ix, got[i]));
     }
+    for (const ix of ops) if (RAY_WD(ix) && ix.fee === undefined) ix.fee = null;   // 没对上的减仓指令标「看过没取到」, 免得每轮重取
     rec.ev = 1; n++;
     await sleep(120);
   }
@@ -614,6 +628,8 @@ function poolMintsOf(ix) {
   const a = ix.acc[sl[0]], b = ix.acc[sl[1]];
   return a && b && a !== b ? [a, b] : null;
 }
+const dec = m => { const x = state().d.tok[m]; return x && x.decimals != null ? x.decimals : null; };   // mint → 小数位 (已扫到的代币表)
+const byA = (a, b) => Buffer.compare(b58decode(a) || Buffer.alloc(0), b58decode(b) || Buffer.alloc(0)) < 0;   // 池子 A/B (token0/1) 按 mint 字节序 (2026-10-15 提到模块级, 重放拆 Raydium 手续费也用)
 // 仓位 NFT mint → 它对应的仓位键 (Orca/Raydium 仓位键 = PDA("position", NFT mint)); PDA 推导不便宜, 每轮每钱包都查, 结果缓存
 const NFT_KEY_CACHE = new Map();
 function nftKeysOf(m) {
@@ -644,11 +660,9 @@ function walletFlow(t) {
 function buildPriceObs(order, P, keys) {
   const obs = {};
   const add = (m, ts, p, pr, sg, ax) => { if (p > 0 && Number.isFinite(p)) (obs[m] = obs[m] || []).push({ ts, p, pr, s: sg, ax: !!ax }); };   // 2026-09-28 审计修复: 记下来源 tx 签名 s, 供「同 tx 观测优先」; 2026-10-10: ax = 估的 (区间边界价), 只在没别的可用时退用
-  const dec = m => { const x = state().d.tok[m]; return x && x.decimals != null ? x.decimals : null; };
   const sentTo = {};   // 收过本钱包代币的地址 → 收过的 mint
   const LB = state().d.lb || {}, WP = state().d.wp || {};
   const solQuoted = [];   // 2026-10-10: 以 SOL 计价的池子 (X/SOL) 的精确池价, 等 SOL 美元价观测齐了再折成美元 (下面循环之后)
-  const byA = (a, b) => Buffer.compare(b58decode(a) || Buffer.alloc(0), b58decode(b) || Buffer.alloc(0)) < 0;   // 池子 A/B (token0/1) 按 mint 字节序
   for (const t of order) {
     for (const [a, ms] of Object.entries(t.to || {})) for (const m of Object.keys(ms)) (sentTo[a] = sentTo[a] || {})[m] = 1;
     for (const ix of (t.lp || [])) {
@@ -953,7 +967,7 @@ function computeWallet(wallet, livePositions) {
         const isDep = set.has('open') || set.has('dep'), isOut = set.has('wd') || set.has('close'), hasCol = set.has('col');
         // 2026-09-28 审计修复 (平仓领费拆分): Orca collectFees*/collectReward*、Meteora claimFee*/claimReward* 指令名下的 xf 就是手续费/奖励 → 直接计 fees,
         //   同 tx 的 decrease/remove 等其余流入计 ret. 旧版 tx 里只要有减仓/关仓就全计 ret + feesUnknown (平仓几乎都显示「不含已领」).
-        //   Raydium decreaseLiquidity 把费和本金一起转出 → 仍 unknown; 本仓的减仓指令没有 xf (经包装程序中转, 转账都挂到最后一条 LP 指令下) → 不拆, 仍 unknown
+        //   Raydium decreaseLiquidity 把费和本金一起转出 → 2026-10-15 起按日志事件拆 (下面 raySplit), 取不到才 unknown; 本仓的减仓指令没有 xf (经包装程序中转, 转账都挂到最后一条 LP 指令下) → 不拆, 仍 unknown
         let feeIns = [], restIns = i, split = false;
         if (hasCol) {
           if (!isDep && !isOut) { feeIns = i; restIns = []; }   // 只领费 (原口径): 流入全是手续费/奖励
@@ -963,6 +977,30 @@ function computeWallet(wallet, livePositions) {
             const fm = Object.fromEntries(feeIns);
             restIns = i.map(([m, q]) => [m, q - (fm[m] || 0)]).filter(([, q]) => q > 1e-12);
             split = true;
+          }
+        }
+        // 2026-10-15: Raydium 减仓的手续费从该 tx 日志的 DecreaseLiquidityEvent 取 (fillPoolTicks 记在减仓指令 ix.fee, 原始单位, 池 token0/1 = mint 字节序),
+        //   与本仓净流入取小后从流入里拆出 → 计 fees, 其余计 ret (旧版 Raydium 减仓一律全计提回 + feesUnknown: 净利润没错, 但手续费列显示 0「不含已领」).
+        //   任一减仓指令没取到 fee (日志截断 / 还没补) 或池子 mint 缺 / 有费那边的小数位缺 → 不拆, 维持旧口径. 奖励 (reward_amounts) 这里不拆: 同 tx 有领奖励指令时仍标 unknown
+        let raySplit = false;
+        if (isOut && !split && P[k].p === 'Raydium') {
+          const have = Object.fromEntries(i), fq = {};
+          let ok = false;
+          for (const ix of (t.lp || [])) {
+            if (!RAY_WD(ix) || !ix.acc.includes(k)) continue;
+            const pm = poolMintsOf(ix);
+            if (!Array.isArray(ix.fee) || !pm) { ok = false; break; }
+            const [m0, m1] = byA(pm[0], pm[1]) ? pm : [pm[1], pm[0]];
+            let bad = false;
+            for (const [m, f] of [[m0, ix.fee[0]], [m1, ix.fee[1]]]) { if (!(f > 0)) continue; const dd = dec(m); if (dd == null) { bad = true; break; } fq[m] = (fq[m] || 0) + f / 10 ** dd; }   // 费为 0 的那边不需要小数位 (单边仓没收过另一枚币时代币表里没它)
+            if (bad) { ok = false; break; }
+            ok = true;
+          }
+          if (ok) {
+            feeIns = Object.entries(fq).map(([m, q]) => [m, Math.min(q, have[m] || 0)]).filter(([, q]) => q > 0);
+            const fm = Object.fromEntries(feeIns);
+            restIns = i.map(([m, q]) => [m, q - (fm[m] || 0)]).filter(([, q]) => q > 1e-12);
+            split = true; raySplit = true;
           }
         }
         if (isDep) {
@@ -978,7 +1016,7 @@ function computeWallet(wallet, livePositions) {
           const fv = val(feeIns); c.fees += fv; if (fv) c.fx.push([t.ts, fv]);   // 2026-10-02: 手续费时间线, 资金快照按时间回写历史点用
           if (isOut) {
             c.ret += val(restIns);
-            if (P[k].p === 'Raydium' || (hasCol && !split)) c.feesUnknown = true;   // 本金与手续费一起转出, 拆不开
+            if ((P[k].p === 'Raydium' && (!raySplit || hasCol)) || (hasCol && !split)) c.feesUnknown = true;   // 本金与手续费一起转出拆不开 (Raydium 没取到日志事件 / 同 tx 领奖励)
             for (const [m, q] of restIns) c.a[m] = (c.a[m] || 0) - q;   // 持币基线只扣本金 (手续费不是存进去的币)
           } else if (isDep && !split) c.feesUnknown = true;   // 2026-09-28 审计修复: 领费+入金 (复投) 拆不开: 流入已在上面按找零扣了成本, 不再重复计 ret (旧版成本、提回各记一次)
           if (inAx) c.approx = true;
