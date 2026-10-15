@@ -50,6 +50,7 @@ const normAddr = (chainId, a) => (chainId === 'sol' ? String(a) : low(a));
 let solDeps = null;   // sol-adapter 注入: { records(addr) → 账本钱包对象 | null, prices() → { mint: usd (raw 口径) }, uiMult(mint) → Token-2022 份额乘数, symbols() → { mint: { symbol } }, histPrice(addr, mint, ts, sig) → { p, approx } | null, obsReady(addr) }
 function initSol(d) { solDeps = d; }
 function heliusKey() { return (process.env.HELIUS_KEY || '').trim(); }
+const backpack = require('./backpack');   // 2026-10-16: Backpack 股票代币 1 分钟 K 线定价 + 自己 Backpack 账户的地址 (自有钱包往来标 self) + 已知地址标签
 const solRpc = require('./sol-rpc');   // 2026-10-15: Helius 请求走共用限速桶 + 积分计量
 function enabled(chainId) { return chainId === 'sol' ? !!(heliusKey() && solDeps) : ledger.isAnkr(chainId); }
 
@@ -146,6 +147,39 @@ async function repriceNative(chainId, W) {
   }
   if (n) finish(W);
   return n;
+}
+// 2026-10-16: Backpack 股票代币 (DJT/CBRS/SKHY …, mint 由 /api/v1/assets 反查) 按 Backpack 美股 1 分钟 K 线定价: 转账时刻那根的收盘价 (休市取之前最近一根, 缺口 ≤4 天), 不是估算
+//   → { p 每份额美元, bt K 线起点 }; 不是 Backpack 股票代币 / 缺口太大 → null; 接口失败 → null + 10 分钟一条警告 (维持旧口径, 下轮再试)
+let bpWarnAt = 0;
+async function stockAt(mint, ts) {
+  if (!mint || mint === WSOL || SOL_STABLES[mint]) return null;
+  try { return await backpack.stockHist(mint, ts); }
+  catch (e) { if (Date.now() - bpWarnAt > 600000) { bpWarnAt = Date.now(); console.warn('[sol] Backpack 1 分钟 K 线拉取失败, 这轮维持旧口径:', String(e.message || e).slice(0, 100)); } return null; }
+}
+const uiMultOf = m => (solDeps && solDeps.uiMult && solDeps.uiMult(m)) || 1;   // flows 价格是 raw 口径: 每份额价 × 份额乘数
+// 历史上按现价 / 远期成交价近似 (ax) 的股票代币事件: 补成 1 分钟 K 线价, 清 ax, 记 ps:'bp' + pt (K 线时刻, 前端提示用)
+async function repriceStock(W) {
+  let n = 0;
+  for (const e of W.events) {
+    if (!e.ax || e.tok === WSOL || SOL_STABLES[e.tok]) continue;
+    const h = await stockAt(e.tok, e.ts);
+    if (!h) continue;
+    e.usd = e.amt * h.p * uiMultOf(e.tok); delete e.ax; delete e.rp; e.ps = 'bp'; e.pt = h.bt; n++;
+  }
+  if (n) finish(W);
+  return n;
+}
+// 2026-10-16: 自有钱包 ↔ 自己 Backpack 账户 (本账户充值地址 / Backpack 提币热钱包) 的往来 = 自控往来 (self: 列出不计), 因为 Backpack 余额由 sol-adapter 并进自有钱包的现值, 这些转账不是充提
+//   只对 own 钱包; 观察钱包与热钱包的往来是别人账户的提币, 照记 external (它在交易所里的盈亏看板看不到)。own 标记可改, 每轮按当前标记重标; 不走 markSelf (那是链全局的)
+function retagBackpack(W, isOwn) {
+  const C = cacheOf('sol'); let hit = false;
+  for (const e of W.events) {
+    if (!e.cp || e.ct === 'internal' || !backpack.isSelf('sol', e.cp)) continue;
+    if (isOwn && e.ct === 'external') { e.ct = 'self'; hit = true; }
+    else if (!isOwn && e.ct === 'self' && !(C.self && C.self[e.cp])) { e.ct = 'external'; hit = true; }
+  }
+  if (hit) finish(W);
+  return hit;
 }
 
 // ---- EVM (Ankr) ----
@@ -360,7 +394,7 @@ function markSelf(C, cp) {
     if (hit) finish(W);
   }
 }
-async function scanSolWallet(addr, monitored, deadline) {
+async function scanSolWallet(addr, monitored, deadline, ownSet) {   // ownSet: 自有钱包地址集 (2026-10-16, 判 Backpack 往来标 self)
   const C = cacheOf('sol');
   if (!C.self) C.self = {};
   const L = solDeps.records(addr);
@@ -369,7 +403,11 @@ async function scanSolWallet(addr, monitored, deadline) {
   if (L.partial) { W.stopped = 'budget'; W.events = []; W.inUSD = 0; W.outUSD = 0; W.updatedAt = Date.now(); return W; }
   if (!(curPrice('sol', WSOL) > 0)) { W.stopped = 'rpc'; return W; }   // 价表还没加载: 这时扫会把 tx 当无价标已查永久漏掉, 等下轮
   if (solDeps.obsReady && !solDeps.obsReady(addr)) { W.stopped = 'rpc'; return W; }   // 账本这次启动后还没重放过该钱包 (价格观测只在内存), 同上
+  const isOwn = !!(ownSet && ownSet.has(addr));
+  await backpack.ensureDeposit().catch(() => {});   // 自己 Backpack 账户的 Solana 充值地址 (没配 key = 只认热钱包); 1 天问一次
+  retagBackpack(W, isOwn);
   await repriceNative('sol', W);
+  await repriceStock(W);
   const syms = solDeps.symbols() || {};
   const cands = [];
   for (const [sig, t] of Object.entries(L.txs || {})) {
@@ -406,16 +444,22 @@ async function scanSolWallet(addr, monitored, deadline) {
           const h = solDeps.histPrice(addr, l.mint, c.t.ts, c.sig);
           if (h && h.p > 0) { price = h.p; ax = h.approx ? 1 : 0; rp = 0; }
         }
+        // 2026-10-16: 账本没有精确成交价 (ax) 或没价的 Backpack 股票代币: 按 Backpack 美股 1 分钟 K 线 (转账时刻那根的收盘价) 定价; 拿不到维持上面的口径
+        let bpT = 0;
+        if ((ax || !(price > 0)) && l.mint !== WSOL && !SOL_STABLES[l.mint]) {
+          const h = await stockAt(l.mint, c.t.ts);
+          if (h) { price = h.p * uiMultOf(l.mint); ax = 0; rp = 0; bpT = h.bt; }
+        }
         const usd = amt * price;
         if (!(price > 0) || !(usd >= DUST_USD)) continue;
         const cp = solCounterparty(p, addr, l.mint, dir);
         const selfPaid = p.feePayer === addr, pda = !!cp && !onCurve(cp);
         if (selfPaid && pda) continue;   // 钱包自己发起、对方是程序账户 = 协议存取 (借贷/质押/跨链桥等), 不是充提
         if (cp && dir === 'in' && selfPaid && !pda && !monitored.has(cp)) markSelf(C, cp);   // 对方签名转给本钱包、本钱包付费 = 自控地址
-        const ct = !cp ? (dir === 'in' ? 'mint' : 'burn') : (monitored.has(cp) ? 'internal' : C.self[cp] ? 'self' : 'external');
+        const ct = !cp ? (dir === 'in' ? 'mint' : 'burn') : (monitored.has(cp) ? 'internal' : (C.self[cp] || (isOwn && backpack.isSelf('sol', cp))) ? 'self' : 'external');   // 2026-10-16: 自有钱包 ↔ 自己 Backpack 账户 = self
         const sym = l.mint === WSOL ? 'SOL' : (SOL_STABLES[l.mint] || (syms[l.mint] && syms[l.mint].symbol) || l.mint.slice(0, 4));
         const e = { id: `${c.sig}:${l.mint}`, ts: c.t.ts, dir, tok: l.mint, sym, amt, usd, cp: cp || '', ct };
-        if (ax) e.ax = 1; if (rp) e.rp = 1;
+        if (ax) e.ax = 1; if (rp) e.rp = 1; if (bpT) { e.ps = 'bp'; e.pt = bpT; }
         W.events.push(e);
       }
       W.chk[c.sig] = 1;
@@ -437,13 +481,14 @@ async function runQueue(chainId, wallets, opts = {}) {
   const deadline = Date.now() + (opts.budgetMs || 180 * 1000);
   try {
     const monitored = new Set(wallets.map(w => normAddr(chainId, w.address)));
+    const ownSet = new Set(wallets.filter(w => w.own === true).map(w => normAddr(chainId, w.address)));   // 2026-10-16: 自有钱包 (Backpack 往来标 self 只对它们)
     const queue = scanWallets(chainId, wallets);
     queued[chainId] = new Set(queue.map(w => normAddr(chainId, w.address)));
     for (const w of queue) {
       if (Date.now() > deadline) break;
       const a = normAddr(chainId, w.address);
       try {
-        const W = chainId === 'sol' ? await scanSolWallet(a, monitored, deadline) : await scanEvmWallet(chainId, a, monitored, deadline);
+        const W = chainId === 'sol' ? await scanSolWallet(a, monitored, deadline, ownSet) : await scanEvmWallet(chainId, a, monitored, deadline);
         if (!W) continue;
         save(chainId);
         console.log(`[${chainId}] flows ${w.name}: ${W.stopped === 'budget' ? '高频钱包放弃' : `${W.events.length} 笔, 充 $${W.inUSD.toFixed(0)} 提 $${W.outUSD.toFixed(0)}${W.stopped === 'rpc' ? ' (未扫完下轮续)' : ''}`}`);
@@ -463,7 +508,12 @@ function fundingOf(chainId, addr, wallets) {
   // 2026-10-13: 记录的数量按链上 raw, 出口换成份额口径 (Solana Token-2022 乘数 → sol-adapter uiMultOf; EVM ERC-8056 → pnl-ledger uiMultOf, 只有 BSC 接了, 其余链 = 1)
   const um = chainId === 'sol' ? (solDeps && solDeps.uiMult ? solDeps.uiMult : null) : (t => ledger.uiMultOf(chainId, t));
   const out = { inUSD: W.inUSD || 0, outUSD: W.outUSD || 0, netUSD: (W.inUSD || 0) - (W.outUSD || 0), partial: false, catchingUp: W.stopped === 'rpc',
-    events: W.events.map(({ rp, ...e }) => um ? { ...e, amt: e.amt * (um(e.tok) || 1) } : e) };
+    events: W.events.map(({ rp, ...e }) => {
+      const o = um ? { ...e, amt: e.amt * (um(e.tok) || 1) } : { ...e };
+      // 2026-10-16: 已知地址标签 (Backpack 热钱包 / 本账户充值址 / known-addrs.json 里的交易所充值址) → cpl 显示名, ex 交易所名 (前端「其中交易所往来」小计)
+      if (chainId === 'sol' && o.cp) { const k = backpack.known('sol', o.cp); if (k) { o.cpl = k.label; if (k.ex) o.ex = k.ex; } }
+      return o;
+    }) };
   const sel = wallets ? scanSet(chainId, wallets) : queued[chainId];
   if (sel && !sel.has(k)) { out.stale = true; out.staleAt = W.updatedAt || 0; out.catchingUp = false; }
   return out;
@@ -492,4 +542,4 @@ function injectIdle(idle, fOf) {
   else delete idle.funding;
 }
 
-module.exports = { initSol, enabled, runQueue, fundingOf, fundingSummary, injectIdle, fundSelected, scanWallets, ROUND_MS, _test: { solLegs, solCounterparty, scanEvmWallet, scanSolWallet, cacheOf } };
+module.exports = { initSol, enabled, runQueue, fundingOf, fundingSummary, injectIdle, fundSelected, scanWallets, ROUND_MS, _test: { solLegs, solCounterparty, scanEvmWallet, scanSolWallet, cacheOf, repriceStock, retagBackpack } };

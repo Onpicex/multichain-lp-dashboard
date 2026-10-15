@@ -51,3 +51,7 @@ lp-token.map
 flows-cache-*.json
 ui-mult-*.json
 helius-meter-sol.json
+# Backpack 只读接入 (backpack.js) 的运行缓存 (充值地址 / 资产表 / 已收盘日 K 线 / 余额)
+backpack-cache.json
+# 已知交易所地址表 (含观察地址的归属, 本地维护; 样例见 known-addrs.example.json)
+known-addrs.json

@@ -102,6 +102,7 @@ async function getPrices(mints) {
 const solLedger = require('./sol-ledger');    // Solana 钱包盈亏账本 (Helius 数据源)
 const wscope = require('./wallet-scope');    // 2026-10-09: 四项功能按钱包「纳入」开关
 const pnlLedger = require('./pnl-ledger');    // 只用它的 applyPnl (盈亏字段注入, 各链同一口径)
+const backpack = require('./backpack');   // 2026-10-16: Backpack 只读余额 → 作为一行「Backpack」并进归属自有钱包的闲置余额 (现值 / 快照 / 盈亏自动含它)
 const flows = require('./flows');             // 充提记录 / 净入金 (从账本记录挑单向转账, Helius 补对方地址)
 let lastPricesSol = {};                        // 上轮定价 (mint -> USD, 份额口径 = Jupiter usdPrice), 供账本给已关闭仓/无换币记录的币估值
 // 2026-10-13: Token-2022 scaledUiAmount 份额乘数 (xStocks 分红再投: 钱包/Raydium/Jupiter 显示的份额 = 链上 raw × 乘数, 池子按 raw 成交, 乘数只在分红时改).
@@ -695,6 +696,24 @@ function fundWalletsSol() {
   return activeWallets();   // 2026-09-28: 全部启用钱包都查余额 (观察钱包快照要用); 统计条只算自有由前端过滤
 }
 
+// 2026-10-16: Backpack 余额并进哪个自有钱包: env BACKPACK_SOL_WALLET (须在本轮钱包里且 own) > 充提记录里与自己 Backpack 地址 (充值址 / 热钱包) 有往来的自有钱包 > 第一个自有钱包; 没配 key / 没自有钱包 → null
+let bpHomeLast = '', bpEnvWarnAt = 0;
+function backpackHome(walletsSel, byWallet) {
+  if (!backpack.configured()) return null;
+  const own = walletsSel.filter(w => w.own === true && byWallet[w.address]);
+  if (!own.length) return null;
+  const env = String(process.env.BACKPACK_SOL_WALLET || '').trim();
+  let pick = env ? own.find(w => w.address === env) : null;
+  if (env && !pick && Date.now() - bpEnvWarnAt > 3600000) { bpEnvWarnAt = Date.now(); console.warn(`[backpack] BACKPACK_SOL_WALLET=${env.slice(0, 6)}… 不是本轮里的自有钱包, 改为自动挑选`); }
+  if (!pick) {
+    const selfA = backpack.selfAddrs();
+    pick = own.find(w => { const f = flows.fundingOf('sol', w.address, WALLETS); return !!(f && (f.events || []).some(e => e.cp && selfA.has(e.cp))); });
+  }
+  if (!pick) pick = own[0];
+  if (pick.address !== bpHomeLast) { bpHomeLast = pick.address; console.log(`[backpack] 账户余额并入自有钱包 ${pick.name} 的闲置余额`); }
+  return pick;
+}
+
 async function fetchIdleSol(walletsSel) {
   const raw = [];
   const allMints = new Set([WSOL_MINT]);
@@ -749,6 +768,22 @@ async function fetchIdleSol(walletsSel) {
     byWallet[addr] = { name: entry.w.name, totalUSD: wTotal, tokens: items };  // 键=base58 原样地址(大小写敏感)
     totalUSD += wTotal;
   }
+  // 2026-10-16: Backpack 账户余额 (只读 API, 60s 缓存) 作为一行「Backpack」挂在归属自有钱包下 → 该钱包 totalUSD 含它, 现值 / 总价值 / 快照 / 盈亏页都从 byWallet.totalUSD 取, 自动跟着
+  //   行: amount 0 / priceUSD 0 (前端按 bp 明细渲染), bp = { ts, rows:[{symbol, qty, price, usd, src}], priceMiss, stale, err }; 有持仓没拿到价或余额过期 → priceStale (*)
+  try {
+    const home = backpackHome(walletsSel, byWallet);
+    const h = home ? await backpack.holdings() : null;
+    if (home && h && h.rows.length && (h.totalUSD >= 1 || h.priceMiss > 0)) {   // 与其他代币同口径: 价值 <$1 (账户清空后的灰尘) 不挂行; 有持仓没拿到价的例外, 要露出来打 *
+      const W = byWallet[home.address];
+      const toks = (W.tokens || []).filter(t => t.address !== 'backpack');   // 失败沿用上轮快照时可能已带一行, 换成新的
+      const row = { symbol: 'Backpack', address: 'backpack', amount: 0, priceUSD: 0, valueUSD: h.totalUSD, bp: { ts: h.ts, rows: h.rows, priceMiss: h.priceMiss, stale: !!h.stale, err: h.err || '' } };
+      if (h.approx) row.priceStale = true;
+      toks.push(row); toks.sort((x, y) => y.valueUSD - x.valueUSD);
+      const wt = toks.reduce((s, t) => s + t.valueUSD, 0);
+      totalUSD += wt - (W.totalUSD || 0);
+      byWallet[home.address] = { ...W, totalUSD: wt, tokens: toks };
+    }
+  } catch (e) { console.error('[backpack] 余额并入失败 (本轮不含):', String(e && e.message || e).slice(0, 100)); }
   return { totalUSD, byWallet };
 }
 

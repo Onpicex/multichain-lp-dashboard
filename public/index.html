@@ -1922,6 +1922,7 @@ function renderIdle(data,curF){
         if(!agg[k]) agg[k]={symbol:t.symbol,address:k,native:t.native,amount:0,valueUSD:0,priceUSD:t.priceUSD,ws:[]};
         agg[k].amount+=t.amount; agg[k].valueUSD+=t.valueUSD; agg[k].ws.push(w.name);
         if(t.priceStale) agg[k].priceStale=true;   // 2026-09-28 审计修复: 任一钱包该币缺价 → 汇总行也打 *
+        if(t.bp) agg[k].bp=t.bp;   // 2026-10-16: Backpack 账户余额行的明细
       }
     }
     rows=Object.values(agg).sort((a,b)=>b.valueUSD-a.valueUSD);
@@ -1947,6 +1948,18 @@ function renderIdle(data,curF){
   }
   h+='<table class="idle-table"><thead><tr><th>代币</th><th style="text-align:right">数量</th><th style="text-align:right">价格</th><th style="text-align:right">价值</th>'+(curF==='all'?'<th class="idle-ws">钱包</th>':'')+'</tr></thead><tbody>';
   for(const t of rows){
+    if(t.bp){   // 2026-10-16: Backpack 账户余额 (只读 API, 后端 sol-adapter 挂在归属自有钱包下): 数量/价格两格改放持仓明细, 价值计入本钱包
+      const b=t.bp, br=b.rows||[], shown=br.filter(r=>r.usd>=1||!(r.price>0)).slice(0,6);
+      const det=shown.map(r=>escH(r.symbol)+' '+fN(r.qty,r.qty>=1000?0:2)).join(' · ')+(br.length>shown.length?' …':'');
+      const tip='余额来自你的 Backpack 账户（只读 API）：股票代币按 Backpack 美股行情、USDC 等稳定币按面值、其他按 Backpack 现货价'+(b.ts?'；更新 '+fT(b.ts):'')+'\n'
+        +br.map(r=>r.symbol+'  '+fN(r.qty)+(r.price>0?'  @ '+fU2(r.price)+'  = '+fU2(r.usd):'  （没拿到价，不计）')).join('\n')+(b.err?'\n上次刷新失败：'+b.err:'');
+      h+='<tr title="'+escH(tip)+'"><td class="idle-sym">Backpack<span class="idle-native">交易所</span></td>'
+        +'<td colspan="2" style="color:var(--text-muted);font-size:11px;white-space:normal">'+det+'</td>'
+        +'<td class="num idle-val">'+fU2(t.valueUSD)+(t.priceStale?'<span class="px-stale" title="'+(b.stale?'Backpack 余额超过 10 分钟没刷新成功，沿用上次':'有持仓没拿到价，未计入')+'">*</span>':'')+'</td>'
+        +(curF==='all'?('<td class="idle-ws" title="'+escH((t.ws||[]).join(', '))+'">'+escH((t.ws||[]).join(', '))+'</td>'):'')
+        +'</tr>';
+      continue;
+    }
     h+='<tr><td class="idle-sym">'+escH(t.symbol)+(t.native?'<span class="idle-native">原生</span>':'')+'</td>'
       +'<td class="num">'+fN(t.amount)+'</td>'
       +'<td class="num">'+(t.priceUSD>0?fU(t.priceUSD):'—')+'</td>'
@@ -1955,7 +1968,7 @@ function renderIdle(data,curF){
       +'</tr>';
   }
   const scope=activeChain==='sol'?'全部 SPL 代币':('LP 相关代币 + 稳定币 + 主流币'+(activeChain==='rh'?' + 官方股票代币':''));
-  h+='</tbody></table><div class="idle-note">口径：钱包中 LP 头寸之外的代币余额（'+scope+'）· 价值 &lt;$1 已隐藏'+(activeChain==='rh'?' · 股票代币按美股行情估价（~15min 延迟）':'')+'</div>';
+  h+='</tbody></table><div class="idle-note">口径：钱包中 LP 头寸之外的代币余额（'+scope+'）· 价值 &lt;$1 已隐藏'+(activeChain==='rh'?' · 股票代币按美股行情估价（~15min 延迟）':'')+(rows.some(t=>t.bp)?' · 「Backpack」行＝你的 Backpack 账户余额（只读 API，股票代币按 Backpack 美股行情、稳定币按面值），算进所挂钱包的现值':'')+'</div>';
   panel.innerHTML=h;
 }
 
@@ -1984,7 +1997,7 @@ function flowAgg(d,f){
   // 2026-10-06: stale = 钱包不在当前充提队列 (改成观察 / 账本关掉后留下的旧条目), 后端不再续扫, 停在 staleAt → 不计合计、不算盈亏
   const ok=has.filter(([,w])=>!w.funding.partial&&!w.funding.stale);
   const view=new Set(ok.map(([a])=>nmNorm(a)));
-  const g={fin:0,fout:0,net:0,ax:false,evs:[],addrs:ok.map(([a])=>a),
+  const g={fin:0,fout:0,net:0,ax:false,ex:{},evs:[],addrs:ok.map(([a])=>a),
     partial:has.filter(([,w])=>w.funding.partial).map(([,w])=>w.name),
     stale:has.filter(([,w])=>w.funding.stale).map(([,w])=>w.name+'（停在 '+fT(w.funding.staleAt)+'）'),
     catching:ok.filter(([,w])=>w.funding.catchingUp).map(([,w])=>w.name)};
@@ -1993,9 +2006,11 @@ function flowAgg(d,f){
     const self=e.ct==='self', intl=self||(!!cp&&cp!==nmNorm(a)&&view.has(cp));
     g.evs.push({...e,wn:w.name,intl});
     if(self) g.self=true;
+    if(self&&e.ex==='Backpack') g.bp=true;   // 2026-10-16: 自有钱包与自己 Backpack 账户的往来 (后端标 self)
     if(intl) continue;
     if(e.dir==='in') g.fin+=e.usd||0; else g.fout+=e.usd||0;
     if(e.ax) g.ax=true;
+    if(e.ex){ const x=g.ex[e.ex]||(g.ex[e.ex]={fin:0,fout:0}); if(e.dir==='in') x.fin+=e.usd||0; else x.fout+=e.usd||0; }   // 2026-10-16: 计入合计的交易所往来小计 (对方是已知交易所地址)
   }
   g.net=g.fin-g.fout;
   g.evs.sort((x,y)=>(y.ts||0)-(x.ts||0));
@@ -2016,7 +2031,7 @@ function renderFlow(L){
   if(!g.addrs.length) sub.innerHTML='<span>充提未回溯（高频钱包）</span>';
   else sub.innerHTML='<span>净入金 '+fUc(g.net)+'</span><span>· 盈亏 <span class="'+(pnl>=0?'pos':'neg')+'">'+fUc(pnl,1)+'</span>'+(approx?'*':'')+'</span>';
   cell.title=baseTitle+'\n点击'+(flowOpen?'收起':'展开')+'充提记录'
-    +(g.addrs.length?'\n净入金 = 充值 '+fU2(g.fin)+' − 提币 '+fU2(g.fout)+'（视图内钱包互转'+(g.self?'、与自控地址往来':'')+'不计）'
+    +(g.addrs.length?'\n净入金 = 充值 '+fU2(g.fin)+' − 提币 '+fU2(g.fout)+'（视图内钱包互转'+(g.self?'、与自控地址'+(g.bp?' / 自己 Backpack 账户':'')+'往来':'')+'不计）'
       +'\n盈亏 = '+(sameSet?'总价值':g.addrs.length+' 个有充提数据钱包的现值 '+fU2(val))+' − 净入金':'')
     +(g.ax?'\n* 含按当前价近似的代币':'')+(g.catching.length?'\n* 回补中：'+g.catching.join('、'):'')
     +(g.partial.length?'\n高频钱包未回溯：'+g.partial.join('、'):'')
@@ -2030,6 +2045,8 @@ function renderFlow(L){
     +(g.catching.length?'<div class="fund-warn">'+escH(g.catching.join('、'))+' 历史记录回补中，合计可能偏小</div>':'')
     +(g.partial.length?'<div class="fund-warn">高频钱包（'+escH(g.partial.join('、'))+'）交易过密未回溯，不计入</div>':'')
     +(g.stale.length?'<div class="fund-warn">'+escH(g.stale.join('、'))+' 的充提记录已过期（钱包不在当前扫描范围，之后的充提没记），不计入</div>':'')
+    +(Object.keys(g.ex).length?'<div class="fund-warn" style="color:var(--text-muted);cursor:help" title="钱包与已知交易所地址之间的转账（钱包视角：充值＝从交易所转到钱包，提币＝转进交易所），已计入上面的合计。钱在交易所里买卖、涨跌看板看不到：转进去再转回来，中间的差额会体现为净入金的变化而不是盈亏">其中交易所往来：'
+      +Object.entries(g.ex).map(([n,x])=>escH(n)+(x.fin?' 充 '+fU2(x.fin):'')+(x.fin&&x.fout?' /':'')+(x.fout?' 提 '+fU2(x.fout):'')).join(' · ')+'</div>':'')
     +'</div>';
   const MAX=300; let evs=g.evs; const cut=evs.length>MAX; if(cut) evs=evs.slice(0,MAX);
   if(!evs.length) h+='<div class="idle-empty">暂无充提记录</div>';
@@ -2037,28 +2054,29 @@ function renderFlow(L){
     const names={}; for(const w of walletList) names[nmNorm(w.address)]=w.name;
     h+='<table class="fund-table"><thead><tr><th>时间</th>'+(multi?'<th class="idle-ws">钱包</th>':'')+'<th>充/提</th><th>代币</th><th style="text-align:right">数量</th><th style="text-align:right">金额</th><th class="idle-ws">对方地址</th></tr></thead><tbody>';
     for(const e of evs){
-      const tu=flowTxUrl(e.id), cp=e.cp?nmNorm(e.cp):'', cpName=cp&&names[cp];
-      const tag=e.intl?'内部':(e.ct==='mint'?'铸入':e.ct==='burn'?'销毁':'');
+      const tu=flowTxUrl(e.id), cp=e.cp?nmNorm(e.cp):'', cpName=cp&&names[cp], bpSelf=e.ct==='self'&&e.ex==='Backpack';
+      const tag=e.intl?(bpSelf?'Backpack':'内部'):(e.ct==='mint'?'铸入':e.ct==='burn'?'销毁':'');
       const cpCell=cpName?'<span class="fund-cp known" title="'+escH(e.cp)+'">'+escH(cpName)+'</span>'
+        :e.cpl?'<a class="fund-cp known" href="'+escH(flowAddrUrl(e.cp))+'" target="_blank" rel="noopener" title="'+escH(e.cp)+'">'+escH(e.cpl)+'</a>'   // 2026-10-16: 已知地址标签 (Backpack 热钱包 / 充值址、币安充值址)
         :e.cp?'<a class="fund-cp" href="'+escH(flowAddrUrl(e.cp))+'" target="_blank" rel="noopener" title="'+escH(e.cp)+'">'+escH(sA(String(e.cp)))+'</a>':'<span class="fund-cp">—</span>';
-      const intlTip=e.ct==='self'?'对方不在钱包列表里，但在本钱包付手续费的交易里它也签了名（把币转回本钱包，或收币时联署）＝你或你用的钱包 / App 控制的地址（比如 Jupiter 挂限价单时的托管地址），往来不算充提、不计合计':'本视图内钱包互转，不计入合计';
+      const intlTip=bpSelf?'对方是你的 Backpack 账户（充值地址 / 提币热钱包）：Backpack 余额已并入本钱包的现值，这笔往来不算充提、不计合计':e.ct==='self'?'对方不在钱包列表里，但在本钱包付手续费的交易里它也签了名（把币转回本钱包，或收币时联署）＝你或你用的钱包 / App 控制的地址（比如 Jupiter 挂限价单时的托管地址），往来不算充提、不计合计':'本视图内钱包互转，不计入合计';
       h+='<tr'+(e.intl?' class="flow-intl" title="'+intlTip+'"':'')+'>'
         +'<td class="num">'+(tu?'<a href="'+escH(tu)+'" target="_blank" rel="noopener" title="在浏览器查看交易">'+fT(e.ts)+'</a>':fT(e.ts))+'</td>'
         +(multi?'<td class="idle-ws">'+escH(e.wn||'')+'</td>':'')
         +'<td><span class="fund-dir-'+(e.dir==='in'?'in':'out')+'">'+(e.dir==='in'?'充值':'提币')+'</span>'+(tag?'<span class="fund-ct">'+tag+'</span>':'')+'</td>'
         +'<td class="idle-sym">'+escH(e.sym||'')+'</td>'
         +'<td class="num">'+fN(e.amt,Math.abs(e.amt)>=1000?2:4)+'</td>'
-        +'<td class="num idle-val">'+fU2(e.usd)+(e.ax?'<span class="px-stale" title="近似价：按当前价，或离转账超过 6 小时的成交价">*</span>':'')+'</td>'
+        +'<td class="num idle-val"'+(e.ps==='bp'?' style="cursor:help" title="'+escH('按 Backpack 美股 1 分钟 K 线：转账时刻那根的收盘价，不是估算'+(Math.abs((e.ts||0)-(e.pt||0))>15*60000?'（当时休市，取之前最近一根：'+fT(e.pt)+'）':''))+'"':'')+'>'+fU2(e.usd)+(e.ax?'<span class="px-stale" title="近似价：按当前价，或离转账超过 6 小时的成交价">*</span>':'')+'</td>'   // 2026-10-16: ps=bp 不带 *
         +'<td class="idle-ws">'+cpCell+'</td></tr>';
     }
     h+='</tbody></table>';
     if(cut) h+='<div class="idle-note">仅显示最近 '+MAX+' 笔（合计含全部）</div>';
   }
   const scope=activeChain==='sol'
-    ?'开了账本的钱包里不含 LP / 换币指令的单向转账（SOL 与 WSOL 合并，建 / 关代币账户的租金不算）；本钱包付手续费、对方是程序账户的（借贷 / 质押 / 跨链桥存取）不算；本钱包付手续费、对方也签了名的普通地址（签名转回，或收币时联署）视为你或你用的钱包 / App 控制的地址（如 Jupiter 限价单托管地址；成交所得算换币、不算充值），与它的往来标「内部」· 没开账本的钱包无数据'
+    ?'开了账本的钱包里不含 LP / 换币指令的单向转账（SOL 与 WSOL 合并，建 / 关代币账户的租金不算）；本钱包付手续费、对方是程序账户的（借贷 / 质押 / 跨链桥存取）不算；本钱包付手续费、对方也签了名的普通地址（签名转回，或收币时联署）视为你或你用的钱包 / App 控制的地址（如 Jupiter 限价单托管地址；成交所得算换币、不算充值），与它的往来标「内部」· 自有钱包与自己 Backpack 账户（充值地址 / 提币热钱包）的往来标「Backpack」不计合计（Backpack 余额已并入该钱包现值）；观察钱包与交易所的往来照记 · 没开账本的钱包无数据'
     :'钱包与外部地址之间的单向转账（交易所充提、个人转账，含交易所合约热钱包打来的）；同一笔交易有进有出（换币 / LP 存取）、钱包自己发起的合约交互（LP、领费、路由、跨链桥转出）不算'
       +(activeChain==='rh'?' · 原生 ETH 直转链上无日志，看不见':' · 合约内部转出的原生币（如跨链桥解包后打来的币）看不见');
-  h+='<div class="idle-note">口径：'+scope+' · 视图内钱包互转标「内部」不计合计 · 稳定币按面值、原生币按转账时点价、其他代币'+(activeChain==='sol'?'按该钱包前后 3 天内的换币成交价（离转账超 6 小时或没有成交、改按当前价的标 *）':'按当前价近似（*）')+' · 单笔 &lt;$1 不计 · 盈亏 = 现值（钱包余额 + LP）− 净入金</div>';
+  h+='<div class="idle-note">口径：'+scope+' · 视图内钱包互转标「内部」不计合计 · 稳定币按面值、原生币按转账时点价、其他代币'+(activeChain==='sol'?'按该钱包前后 3 天内的换币成交价（离转账超 6 小时或没有成交、改按当前价的标 *；Backpack 股票代币如 DJT / CBRS / SKHY 则按 Backpack 美股 1 分钟 K 线转账时刻收盘价，不标 *）':'按当前价近似（*）')+' · 单笔 &lt;$1 不计 · 盈亏 = 现值（钱包余额 + LP）− 净入金</div>';
   panel.innerHTML=h;
 }
 
